@@ -82,6 +82,8 @@ class TikTokWarehouseTests(unittest.TestCase):
         self.assertEqual(report['totals']['revenue_cents'], 159)
         self.assertIsNone(report['totals']['iaa_cents'])
         self.assertEqual(report['meta']['iaa_missing_dates'], {'tiktok:2250': [PRIOR]})
+        self.assertEqual(report['totals']['data_status'], 'partial')
+        self.assertIn('TikTok IAA 待回传', csv_export(report).decode('utf-8-sig'))
         self.assertEqual(self.report(day=PRIOR, owner=['alice'])['totals']['revenue_cents'], 0)
         self.assertEqual(self.report(day=PRIOR, drama=['42'])['totals']['revenue_cents'], 0)
         self.assertIsNone(self.report(day='2026-07-30')['totals']['revenue_cents'])

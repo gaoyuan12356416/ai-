@@ -268,12 +268,6 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     def is_selected(row):
         return selected(row, actor, params)
 
-    def pending_tiktok_iaa(key, requested):
-        if key != "tiktok:2250" or iaa_coverage is None:
-            return False
-        from .bill_income import FIRST_DAY
-        return any(day >= FIRST_DAY and day in populated[key] and day not in ad_dates[key] for day in requested)
-
     def emit(row, value):
         key = tuple(row[dimension] for dimension in params["groups"])
         if actor.get("_system_report") is True and "owner" in params["groups"]:
@@ -399,8 +393,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         available = any(populated[key] & needed and not failure(catalog_errors, key) for key in sources)
         complete = all(needed <= populated[key] and not failure(errors, key)
                        and not failure(catalog_errors, key) and collector_complete(key)
-                       and not publication_conflicts_by_source[key] and not pending_tiktok_iaa(key, needed)
-                       for key in sources)
+                       and not publication_conflicts_by_source[key] for key in sources)
         publications_available = any(not failure(catalog_errors, key) for key in sources)
         return available, complete, publications_available
 
@@ -415,8 +408,6 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                       data_status="complete" if complete else "partial" if available else "unavailable")
         if source_ids is not None:
             result.update(source_keys=sorted(source_ids), platforms=applicable)
-        if any(pending_tiktok_iaa(k, [day] if day else days) for k in sources):
-            result["iaa_pending"] = True
         if "x" not in applicable:
             result.update(post_count=None, repost_count=None)
         elif not any(not failure(catalog_errors, key) for key, spec in specs.items() if spec["platform"] == "x"):
@@ -445,7 +436,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         available = metric_available and publication_available
         complete = (set(days) <= populated[key] and not failure(errors, key)
                     and publication_available and collector_complete(key)
-                    and not publication_conflicts_by_source[key] and not pending_tiktok_iaa(key, days))
+                    and not publication_conflicts_by_source[key])
         add(unmatched_total, quality["unmatched"])
         add(excluded_total, quality["excluded"])
         # This equality is integer-exact and cannot be broken by report filters.

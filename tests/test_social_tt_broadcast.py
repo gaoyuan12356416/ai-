@@ -10,10 +10,7 @@ from features.social_analytics.adapters import normalized
 from features.social_analytics.backend_scope import restrict
 from features.social_analytics.report import parameters, summarize
 from features.social_analytics.tiktok import campaign_key
-from features.social_daily_report import billing
-from features.social_daily_report.collector import present
-from features.social_daily_report.report import build_cards, require_complete
-from features.socialkit_gap_alert import collector, digest
+from features.social_analytics.bill_income import window
 
 DAY = "2026-11-24"
 NOW = datetime(2026, 11, 25, 3, 30, tzinfo=timezone.utc)
@@ -34,7 +31,7 @@ def metric(cid, name, cents, **kwargs):
 
 def payment(idx, name, cents):
     return dict(id=idx, site_id="2250", campaign_id="1", campaign=name,
-                event_name="af_purchase", event_time=billing.window(DAY)[0], user_key="a" * 64,
+                event_name="af_purchase", event_time=window(DAY)[0], user_key="a" * 64,
                 revenue_cents=cents, positive_purchase=True)
 
 
@@ -44,7 +41,40 @@ def group(name, iap, iaa):
 
 
 class TikTokBroadcastTests(unittest.TestCase):
+    def test_older_three_platform_preparation_is_recollected_without_changing_it(self):
+        from features.social_daily_report import prepared
+        from features.social_daily_report.collector import present
+        from features.social_daily_report.report import build_cards
+        from test_social_daily_report import three_channel_fixture
+
+        old = present(three_channel_fixture(), "2026-11-22")
+        old["prepared_at"] = NOW.isoformat()
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "prepared" / old["report_date"] / "report.json"
+            target.parent.mkdir(parents=True)
+            original = json.dumps(dict(chat_id="chat", report=old)).encode()
+            target.write_bytes(original)
+            self.assertIsNone(prepared.load(folder, old["report_date"], "chat"))
+            self.assertEqual(target.read_bytes(), original)
+            self.assertFalse((Path(folder) / "delivery.sqlite3").exists())
+        text = json.dumps(build_cards(old, "chat"), ensure_ascii=False)
+        self.assertIn("已归属收入", text)
+        self.assertNotIn("TikTok", text)
+
+    def test_historical_tiktok_recharge_available_before_iaa_reporting(self):
+        from features.social_daily_report import billing
+        day = "2026-11-22"
+        purchase = dict(payment(1, "generic", 511), event_time=window(day)[0])
+        money = dict(group("generic", 511, 0), date=day, ad_events=0)
+        result = billing.aggregate([], [purchase], day, [money])
+        self.assertEqual(result["tt_unassigned"].public()["iap_cents"], 511)
+        self.assertEqual(result["total"].revenue_cents, 511)
+        self.assertFalse(result["iaa_sites"])
+
     def test_daily_full_income_and_people_are_reconciled_without_guessed_owner(self):
+        from features.social_daily_report import billing
+        from features.social_daily_report.collector import present
+        from features.social_daily_report.report import build_cards, require_complete
         catalog = [post("1", "Post"), post("2", "legacy", owner="")]
         selected, facts, coverage, _ = restrict(catalog, [
             metric("1", "Post", 6000), metric("1", "post", 906)], DAY)
@@ -70,6 +100,7 @@ class TikTokBroadcastTests(unittest.TestCase):
         self.assertNotIn("__tiktok_unassigned__", card)
 
     def test_daily_subcent_payer_preserved_and_group_snapshot_race_rejected(self):
+        from features.social_daily_report import billing
         catalog = [post("1", "Post")]
         result = billing.aggregate(catalog, [payment(1, "Post", 0)], DAY, [group("Post", 0, 0)])
         self.assertEqual(result["total"].public()["conversions"], 1)
@@ -77,6 +108,7 @@ class TikTokBroadcastTests(unittest.TestCase):
             billing.aggregate(catalog, [payment(1, "Post", 0)], DAY, [group("different", 0, 0)])
 
     def test_digest_compares_verified_drama_and_leaves_generic_income_pending(self):
+        from features.socialkit_gap_alert import collector, digest
         catalog = [post("1", "Post"), post("2", "legacy", owner="", drama="drama-2")]
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "snap.sqlite3"

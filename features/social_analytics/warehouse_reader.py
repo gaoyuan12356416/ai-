@@ -96,6 +96,20 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
                               and day not in manifest.get('iaa_coverage', {}).get(source, ()))
                for source, dates in expected.items()}
     report['meta']['iaa_missing_dates'] = {source: dates for source, dates in missing.items() if dates}
+    tt_pending = set(missing.get('tiktok:2250', ()))
+    if tt_pending:
+        report['quality']['complete'] = False
+        quality = report['quality']['platforms']['tiktok']
+        for state in (quality, quality['sources']['2250']):
+            if state['state'] == 'complete':
+                state['state'] = 'partial'
+        for row in [report['totals'], report['platform_totals']['tiktok'], quality['sources']['2250']['totals'],
+                    *report['trend'], *report['all_rows'], *report['ranking']]:
+            if ('tiktok' in row.get('platforms', params['platforms'])
+                    and ('date' not in row or row['date'] in tt_pending)):
+                row['iaa_pending'] = True
+                if row['data_status'] == 'complete':
+                    row['data_status'] = 'partial'
     if any(missing.values()):
         report['warnings'].append('部分站点或日期的 IAA 广告收入待回传。总收入包含已到的充值和广告收入。')
     if params['start'] < manifest['start'] or params['end'] > manifest['end']:

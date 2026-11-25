@@ -18,7 +18,7 @@
     "features/social_analytics/report.py": {
       "after": "1373ba32dc9654ff51ca2c41b29e24369bedf0aa5fc15e31e62fd40776197945",
       "before": "126c0dbe46f978e62acaf652104cc4e27b7fa33d88dc6290b1de82740df9ec34",
-      "canonical": "4ba8b879d02336ef39532e24b6c752d585268ac06c0162cf8bc772a2290dcbba"
+      "canonical": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a"
     },
     "features/social_analytics/routes.py": {
       "after": "f71a8f6af7ace270a8caf1e71776b07bd78618b96c0e0e764aafc3da2df060d9",
@@ -73,9 +73,9 @@
       "canonical": "a93669afab83a661f45578c4f3b8b95ef542b1687de7cd9d95d492abe1eaa9ad"
     },
     "features/social_analytics/report.py": {
-      "after": "50a3214c5eeed5cf993e17a4184361d94d0df005d9db846fa11606500f8b67d4",
+      "after": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a",
       "before": "4aefebecf4f10caf7cd3d658dfff29a36133c06def37ccbf984949eaa27418aa",
-      "canonical": "50a3214c5eeed5cf993e17a4184361d94d0df005d9db846fa11606500f8b67d4"
+      "canonical": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a"
     },
     "features/social_analytics/routes.py": {
       "after": "652acfff254cb667416d6b8978afd44f1a3b5ea12ba80e671638a4b54dcd8ea5",
@@ -93,9 +93,9 @@
       "canonical": "d5d11e6203d0f8898fed588d6089fd6f41397d6fd0c7859f6d88d939f2374b35"
     },
     "features/social_analytics/warehouse_reader.py": {
-      "after": "47e969e7fc23c2d5e562ed3ee0b5a649abdcc531de10e982d2894dbd71864a7c",
+      "after": "43625673446cbc12f5772b00f88bf3900986700dd8177e5af24ec7e803561ff3",
       "before": "c87229fb603adcad9034de9d9e502ee7f523e1ce4e00bdc5991e5e0b7b6d19d6",
-      "canonical": "47e969e7fc23c2d5e562ed3ee0b5a649abdcc531de10e982d2894dbd71864a7c"
+      "canonical": "43625673446cbc12f5772b00f88bf3900986700dd8177e5af24ec7e803561ff3"
     }
   },
   "kit": {
@@ -115,9 +115,9 @@
       "canonical": "a93669afab83a661f45578c4f3b8b95ef542b1687de7cd9d95d492abe1eaa9ad"
     },
     "features/social_analytics/report.py": {
-      "after": "50a3214c5eeed5cf993e17a4184361d94d0df005d9db846fa11606500f8b67d4",
+      "after": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a",
       "before": "55b9181f4b75bf6d9244707548519501be80b700f89eacbebbb4fce58db3d0d3",
-      "canonical": "50a3214c5eeed5cf993e17a4184361d94d0df005d9db846fa11606500f8b67d4"
+      "canonical": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a"
     },
     "features/social_analytics/routes.py": {
       "after": "e386395da737e6d1358ba7e6976c06cd56a073823c6370070683ead4b7fba63e",
@@ -167,9 +167,9 @@
       "canonical": "a93669afab83a661f45578c4f3b8b95ef542b1687de7cd9d95d492abe1eaa9ad"
     },
     "features/social_analytics/report.py": {
-      "after": "4ba8b879d02336ef39532e24b6c752d585268ac06c0162cf8bc772a2290dcbba",
+      "after": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a",
       "before": "55b9181f4b75bf6d9244707548519501be80b700f89eacbebbb4fce58db3d0d3",
-      "canonical": "4ba8b879d02336ef39532e24b6c752d585268ac06c0162cf8bc772a2290dcbba"
+      "canonical": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a"
     },
     "features/social_analytics/routes.py": {
       "after": "652acfff254cb667416d6b8978afd44f1a3b5ea12ba80e671638a4b54dcd8ea5",
@@ -187,9 +187,9 @@
       "canonical": "d5d11e6203d0f8898fed588d6089fd6f41397d6fd0c7859f6d88d939f2374b35"
     },
     "features/social_analytics/warehouse_reader.py": {
-      "after": "5c30cf2a967bea224857df081f1f1622ee23dd172abd7b805d21f273660c468d",
+      "after": "c503aee22abe8d3cfbb218e09b18e22c1dc1ba4c5eafeb57134e40b156e6e82a",
       "before": "a197e5b66a17322598c9fa3b8d1a11f7dcbbb2f81ebc3047d607c2b1e4447895",
-      "canonical": "47e969e7fc23c2d5e562ed3ee0b5a649abdcc531de10e982d2894dbd71864a7c"
+      "canonical": "43625673446cbc12f5772b00f88bf3900986700dd8177e5af24ec7e803561ff3"
     },
     "features/social_analytics/warehouse_refresh.py": {
       "after": "e5fca7e545aee20485f05d047fd93798d4143c98a215557300ce1e3358a863a6",
@@ -219,9 +219,9 @@
       "canonical": "a93669afab83a661f45578c4f3b8b95ef542b1687de7cd9d95d492abe1eaa9ad"
     },
     "features/social_analytics/report.py": {
-      "after": "50a3214c5eeed5cf993e17a4184361d94d0df005d9db846fa11606500f8b67d4",
+      "after": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a",
       "before": "55b9181f4b75bf6d9244707548519501be80b700f89eacbebbb4fce58db3d0d3",
-      "canonical": "50a3214c5eeed5cf993e17a4184361d94d0df005d9db846fa11606500f8b67d4"
+      "canonical": "85c54c0fe5814a56e693a1d3a161e83e161db32daa8b61593f0221aa43e3e34a"
     },
     "features/social_analytics/routes.py": {
       "after": "4d84f9538c011558f7260052536654c03cf69661fb9166297a424b394b075b8a",
@@ -239,9 +239,9 @@
       "canonical": "d5d11e6203d0f8898fed588d6089fd6f41397d6fd0c7859f6d88d939f2374b35"
     },
     "features/social_analytics/warehouse_reader.py": {
-      "after": "47e969e7fc23c2d5e562ed3ee0b5a649abdcc531de10e982d2894dbd71864a7c",
+      "after": "43625673446cbc12f5772b00f88bf3900986700dd8177e5af24ec7e803561ff3",
       "before": "42d114684237d82b2c72103bdd84c0a1d250efffda93bd19536305802f076cb2",
-      "canonical": "47e969e7fc23c2d5e562ed3ee0b5a649abdcc531de10e982d2894dbd71864a7c"
+      "canonical": "43625673446cbc12f5772b00f88bf3900986700dd8177e5af24ec7e803561ff3"
     },
     "static/social-analytics.html": {
       "after": "9e2db05f24269326a399bf3aa29d5c9acd297886103aed0a6290cee4de019d07",
