@@ -10,6 +10,7 @@ from datetime import timedelta, timezone
 from heapq import nsmallest
 from itertools import islice
 import time
+import re
 
 from features.material_products import contains as has_product, selected
 from features.fb_video_publish.moboreels import contains as mobo
@@ -20,6 +21,13 @@ from .languages import page_language
 from .metrics import MetricTotals
 from .repositories import CandidateSnapshot, MaterialCandidate, MaterialRepository, RepositoryError
 from .repositories import _decimal, _description, _https
+
+
+# The existing broker permits REPLACE on its approved tables. Escape XML 1.0
+# control characters only when a raw read fails, without changing source text.
+XML_ESCAPES = {'~~':'~', **{f'~{i:02x}':chr(i) for i in range(32) if i not in (9,10,13)},
+               '~fe':'\ufffe','~ff':'\uffff'}
+XML_ESCAPE_PATTERN = re.compile('|'.join(re.escape(token) for token in XML_ESCAPES))
 
 
 def supports(config, materials):
@@ -83,17 +91,23 @@ class Catalog:
                 time.sleep(min(attempt, 5))
 
     def read_text(self, sql, args, columns):
+        projection = ','.join(f'{expression} AS `{name}`' for name, expression in columns)
         try:
-            return self.select(sql, args)
+            return self.select(sql.format(fields=projection), args)
         except RepositoryError as exc:
             if exc.code != 'source_readonly_check_failed':
                 raise
         # The mysql CLI transports rows as XML. An XML-forbidden control
         # character can invalidate even a one-row, correctly read-only result.
         # Retry with an ASCII representation, through the same replica check.
-        projection = ','.join(f'HEX(CONVERT(t.`{name}` USING utf8mb4)) AS `{name}`' for name in columns)
-        rows = self.select(f'SELECT {projection} FROM ({sql}) AS t', args)
-        return [{name: bytes.fromhex(value).decode('utf-8') if value is not None else None
+        fields, prefix = [], []
+        for name, expression in columns:
+            for token, char in XML_ESCAPES.items():
+                expression = f'REPLACE({expression},%s,%s)'
+                prefix.extend((char, token))
+            fields.append(f'{expression} AS `{name}`')
+        rows = self.select(sql.format(fields=','.join(fields)), (*prefix, *args))
+        return [{name: XML_ESCAPE_PATTERN.sub(lambda m: XML_ESCAPES[m[0]], value) if value is not None else None
                  for name, value in row.items()} for row in rows]
 
     def source_predicate(self):
@@ -111,8 +125,7 @@ class Catalog:
         predicate, args = self.source_predicate()
         # Traverse disjoint ranges. The cursor resumes from the last returned
         # id if a range exceeds the shared broker's bounded response size.
-        sql = f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ TRIM(s.data_source_id) cid,
-                         LOWER(TRIM(COALESCE(s.language,''))) lang,s.id
+        sql = f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ {{fields}}
                     FROM {self.schema}.ads_custom_source s FORCE INDEX(PRIMARY)
                    WHERE s.id BETWEEN %s AND %s AND {predicate} AND s.data_source_id=TRIM(s.data_source_id)
                      AND (LOWER(TRIM(s.language)) IN ({placeholders(self.languages)})
@@ -123,7 +136,8 @@ class Catalog:
             part = defaultdict(list)
             while lo <= end:
                 try:
-                    rows = self.read_text(sql, (lo, end, *args, *self.languages), ('cid','lang','id'))
+                    rows = self.read_text(sql, (lo, end, *args, *self.languages),
+                                          (('cid','TRIM(s.data_source_id)'),('lang',"LOWER(TRIM(COALESCE(s.language,'')))"),('id','s.id')))
                 except RepositoryError as exc:
                     if exc.code not in {'source_query_timeout','source_query_failed','source_result_too_large'} or lo == end:
                         raise
@@ -180,9 +194,10 @@ class Catalog:
         with_classes = bool(self.config.get('_profile_selection'))
         apps = self.resource_apps() if self.required_description or with_classes else []
         def chunk(batch):
-            rows = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ d.id,d.content_id,d.app_id,
-                     d.name,d.language,d.series_code,d.resource_type,d.deploy_time,d.release_status,
-                     CAST(d.resource_type_v2 AS CHAR) resource_type_v2
+            fields = [(name,'d.'+name) for name in ('id','content_id','app_id','name','language',
+                                                     'series_code','resource_type','deploy_time','release_status')]
+            fields.append(('resource_type_v2','CAST(d.resource_type_v2 AS CHAR)'))
+            rows = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ {{fields}}
                   FROM {self.schema}.ads_drama_info d FORCE INDEX(ac)
                  WHERE d.content_id IN ({placeholders(batch)}) AND d.app_id=%s
                    AND NOT EXISTS (SELECT 1 FROM {self.blacklist} b WHERE b.is_delete=0
@@ -191,8 +206,7 @@ class Catalog:
                                     JOIN {self.blacklist} b ON b.content_id=other.series_code
                                      AND b.is_delete=0 AND b.type=0
                                    WHERE other.content_id=d.content_id AND other.app_id=d.app_id)""",
-                               (*batch, self.config['app_id']), ('id','content_id','app_id','name','language',
-                                'series_code','resource_type','deploy_time','release_status','resource_type_v2'))
+                               (*batch, self.config['app_id']), fields)
             details = {}
             for row in rows:
                 cid = row['content_id'].strip()
@@ -204,16 +218,13 @@ class Catalog:
             resources = []
             descriptions = {}
             if details and apps:
-                profile_cols = ',r.series_code,r.labels' if with_classes else ''
-                desc_col = ",CASE WHEN r.type=2 THEN BINARY TRIM(r.`desc`) ELSE NULL END description" if self.required_description else ''
                 filter_type = '' if with_classes else ' AND r.type=2'
-                columns = ['content_id','app_id','language']
+                columns = [(name,'r.'+name) for name in ('content_id','app_id','language')]
                 if with_classes:
-                    columns.extend(('series_code','labels'))
+                    columns.extend((('series_code','r.series_code'),('labels','r.labels')))
                 if self.required_description:
-                    columns.append('description')
-                resources = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT r.content_id,r.app_id,
-                              r.language{profile_cols}{desc_col}
+                    columns.append(('description','CASE WHEN r.type=2 THEN BINARY TRIM(r.`desc`) ELSE NULL END'))
+                resources = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT {{fields}}
                          FROM {self.schema}.ads_drama_resource r FORCE INDEX(actcld)
                         WHERE r.app IN ({placeholders(apps)}) AND r.content_id IN ({placeholders(details)})
                           AND r.app_id=%s{filter_type}""", (*apps, *details, self.config['app_id']), columns)
@@ -252,11 +263,12 @@ class Catalog:
     def hydrate(self, ids):
         predicate, args = self.source_predicate()
         def chunk(batch):
-            return self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ s.id,TRIM(s.data_source_id) cid,
-                          s.url,s.name,s.tag_name,s.product,LOWER(TRIM(s.language)) lang,s.video_duration
+            columns = [(name,'s.'+name) for name in ('id','url','name','tag_name','product','video_duration')]
+            columns.extend((('cid','TRIM(s.data_source_id)'),('lang','LOWER(TRIM(s.language))')))
+            return self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ {{fields}}
                       FROM {self.schema}.ads_custom_source s FORCE INDEX(PRIMARY)
                      WHERE s.id IN ({placeholders(batch)}) AND {predicate}""", (*batch, *args),
-                     ('id','cid','url','name','tag_name','product','lang','video_duration'))
+                     columns)
         result = {}
         for rows in self.read_batches(chunk, ids, 1100):
             for row in rows:

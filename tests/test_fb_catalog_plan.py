@@ -16,14 +16,18 @@ class PlanTests(unittest.TestCase):
     def test_xml_control_character_fallback_checks_the_same_replica(self):
         bad = catalog.RepositoryError('source_readonly_check_failed','fixture',503)
         cat = catalog.Catalog.__new__(catalog.Catalog)
-        original = '文\x01案'
-        sql = 'SELECT name,body FROM texts WHERE id=%s'
-        with patch.object(cat,'select',side_effect=[bad,[{'name':original.encode().hex(),'body':None}]]) as calls:
-            self.assertEqual(cat.read_text(sql,(7,),('name','body')), [{'name':original,'body':None}])
-            self.assertEqual(calls.call_args.args[1], (7,))
-            self.assertIn(sql, calls.call_args.args[0])
+        from features.fb_video_publish.query_broker import validate_query
+        original = '文\x01案~01'
+        sql = 'SELECT {fields} FROM `kunlunads_dev`.ads_drama_info d WHERE id=%s'
+        columns = [('name','d.name'),('body','d.series_code')]
+        with patch.object(cat,'select',side_effect=[bad,[{'name':'文~01案~~01','body':None}]]) as calls:
+            self.assertEqual(cat.read_text(sql,(7,),columns), [{'name':original,'body':None}])
+            fallback, args = calls.call_args.args
+            self.assertEqual(args[-1],7)
+            self.assertIn('REPLACE',fallback)
+            validate_query(dict(schema='kunlunads_dev', blacklist_schema='ads_setting',sql=fallback,params=list(args)))
         with patch.object(cat,'select',side_effect=bad), self.assertRaises(catalog.RepositoryError):
-            cat.read_text(sql,(7,),('name','body'))
+            cat.read_text(sql,(7,),columns)
 
     def test_reconnect_replays_only_current_select(self):
         mysql=SimpleNamespace(schema='main',blacklist_schema='blocked')
