@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import time
 
+from features.social_analytics.report import effect_sites
+from features.social_analytics.tiktok_scope import UNASSIGNED
 from features.youtube_daily_report.collector import BEIJING, DB_PATH, ENV_PATH, read_settings
 
 X_DB_PATH = "/var/lib/x-post-automation/accounts.sqlite3"
@@ -50,6 +52,8 @@ def present(shared, report_date):
     for row in shared["all_rows"]:
         # The system report spans tenants; names and bare user IDs are not identities.
         owner = str(row["owner"])
+        if row["platform"] == "tiktok" and owner == UNASSIGNED:
+            continue
         tenant = str(row.get("owner_tenant") or "")
         person = people.setdefault((tenant, owner), {
             "owner": owner, "owner_tenant": tenant, "name": row.get("owner_label") or owner,
@@ -114,7 +118,7 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
                SOCIAL_ANALYTICS_MYSQL_COMPRESS=True,
                SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + query_budget_seconds)
-    catalog_snapshot = read_catalogs(app, ["youtube", "x", "facebook"])
+    catalog_snapshot = read_catalogs(app, ["youtube", "x", "facebook", "tiktok"])
     # Freeze candidates globally, before source SQL. Exact triple membership and
     # publication-date/owner verification remain in the shared source boundary.
     from features.social_analytics.backend_scope import eligible
@@ -122,7 +126,7 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
         site: sorted({(str(row["key"][0]), row["effect_source"]["adset_id"],
                        row["effect_source"]["ad_id"])
                       for row in catalog_snapshot[0]
-                      if row["platform"] == "facebook" and row["site_id"] == site
+                      if row["platform"] == "facebook" and site in effect_sites(row)
                       and row.get("effect_source") and eligible(row, day)
                       and not row.get("excluded")})
         for site in ("2049", "2310")

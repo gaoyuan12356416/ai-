@@ -240,6 +240,10 @@
       const details = [dates.length ? dates.length + ' 个日期未同步' : '', value.unverified_dates?.length ? value.unverified_dates.length + ' 个日期待核实' : '', value.error ? String(value.error) : ''].filter(Boolean).join(' · ');
       const sources = Object.entries(value.sources || {}).map(([siteId,source]) => {
         const sourceDetails = [statusText(source.state), source.missing_dates?.length ? source.missing_dates.length + ' 个日期未同步' : '', source.unverified_dates?.length ? source.unverified_dates.length + ' 个日期待核实' : '', source.error || ''];
+        if (key === 'tiktok' && source.unmatched_campaigns > 0) {
+          sourceDetails.push('已归属 ' + format(source.attributed_totals?.revenue,'revenue'),
+            '渠道待归属 ' + format(source.unmatched_totals?.revenue,'revenue'));
+        }
         if (source.collector?.state && !['complete','available','ok'].includes(source.collector.state)) sourceDetails.push('归属采集待核实');
         if (['stale','expired'].includes(source.collector?.freshness)) sourceDetails.push('归属快照已过期');
         return `<span class="source-status" data-source="${esc(source.source_key || key + ':' + siteId)}">${esc(source.label || siteId)}（${esc(siteId)}）：${esc(sourceDetails.filter(Boolean).join(' · '))}</span>`;

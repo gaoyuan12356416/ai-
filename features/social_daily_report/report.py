@@ -38,7 +38,8 @@ def income_split(report, row, platform=None):
     if report["report_date"] < FIRST_DAY:
         return ""
     covered = set(report.get("quality", {}).get("billing", {}).get("iaa_sites", ()))
-    needed = {site for site, name in SITES.items() if platform is None or name == platform}
+    platforms = {platform} if platform else set(row.get("platforms") or report["platforms"])
+    needed = {site for site, name in SITES.items() if name in platforms}
     ad = money(row.get("iaa_cents")) if needed & covered else "待回传"
     if needed & covered and needed - covered:
         ad += "（部分站点已回传）"
@@ -89,13 +90,17 @@ def blocks(report):
     backend_only = report.get("scope") == "ai_backend_confirmed_publications_and_manual_shortlinks"
     scope_text = ("仅 AI 后台已成功发布的内容及手动短链\n按 campaign ID 关联用户 · 历史内容的当日效果"
                   if backend_only else "按 campaign ID 关联用户 · 全部历史内容的当日效果")
+    tt = report["platforms"].get("tiktok", {})
+    if "unassigned_income" in tt:
+        scope_text = ("Facebook、YouTube、X 统计后台已归属的内容和短链。TikTok 统计 2250 站点全部收入。"
+                      "\n个人业绩只计已确认归属的收入；TikTok 通用短链及待归属收入见渠道汇总。")
     if report.get("prepared_at"):
         collected = datetime.fromisoformat(report["prepared_at"]).astimezone(timezone(timedelta(hours=8)))
         scope_text += "\n数据采集完成：北京时间 " + collected.strftime("%m-%d %H:%M:%S")
     result = [[md("**%s · UTC 自然日**\n%s" % (report["report_date"], scope_text))],
               [{"tag": "div", "fields": [
                   {"is_short": True, "text": {"tag": "lark_md", "content": label + "\n**" + value + "**"}}
-                  for label, value in (("💰 已归属收入", money(totals["revenue_cents"])),
+                  for label, value in ((("💰 总收入" if "unassigned_income" in tt else "💰 已归属收入"), money(totals["revenue_cents"])),
                                        ("🎬 成功发布", number(totals["published_count"]) + " 条"),
                                        ("✨ 激活", number(totals["installs"])),
                                        ("💳 付费人数", number(totals["conversions"])))]}],
@@ -104,7 +109,7 @@ def blocks(report):
     split = income_split(report, totals)
     if split:
         result[0][0]["text"]["content"] += "\n" + split
-    order = {"facebook": 0, "youtube": 1, "x": 2}
+    order = {"facebook": 0, "youtube": 1, "x": 2, "tiktok": 3}
     for index, person in enumerate(report["rows"], 1):
         text = "**%02d · %s**\n收入 **%s**　｜　成功发布 **%s 条**\n%s" % (
             index, safe_name(person["name"]), money(person["revenue_cents"]),
@@ -128,6 +133,12 @@ def blocks(report):
             number(row["installs"])))
         if split:
             channels[-1] += "\n" + income_split(report, row, platform)
+        if platform == "tiktok" and "unassigned_income" in value:
+            for key, label in (("assigned_income", "已归属发布人"), ("unassigned_income", "通用短链及待归属")):
+                amount = value[key]
+                channels[-1] += "\n%s %s" % (label, money(amount["revenue_cents"]))
+                if split:
+                    channels[-1] += "（" + income_split(report, amount, platform) + "）"
     result.append([{"tag": "hr"}, md("\n".join(channels))])
     exceptions = []
     for value in report["platforms"].values():

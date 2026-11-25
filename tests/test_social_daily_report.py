@@ -129,7 +129,7 @@ class PresentationTests(unittest.TestCase):
                                campaign="renamed campaign", revenue_cents=cents, refund_cents=0,
                                clicks=10, views=15, installs=3, conversions=1))
         actor = {"role": "admin", "_system_report": True}
-        query = {"start": [DAY], "end": [DAY], "group_by": ["owner,platform"]}
+        query = {"start": [DAY], "end": [DAY], "platform": ["youtube", "x", "facebook"], "group_by": ["owner,platform"]}
         shared = summarize(catalog, values, actor, parameters(query), "snapshot")
         owner_report = summarize(catalog, values, actor,
                                  parameters(dict(query, group_by=["owner"])), "snapshot")

@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from .adapters import PLATFORMS, read_catalogs, source_key
 from .backend_scope import eligible, restrict
-from .bill_income import FIRST_DAY, by_campaign, merge_settled
+from .bill_income import FIRST_DAY, by_campaign, merge_settled, allocate_tiktok_cents
 from .report import effect_sites
 from .report import FIELDS, ReportError, add, empty
 from .routes import metric_sql
@@ -138,6 +138,11 @@ def collect(env, reader, start=None, end=None):
         raise RuntimeError('publication_catalog_unavailable')
     end = end or datetime.now(timezone.utc).date().isoformat()
     dates = [row['date'] for row in catalog if row.get('date') and eligible(row, end)]
+    if start is None and 'tiktok' in PLATFORMS:
+        first_effect = reader.query(["SELECT HEX(JSON_OBJECT('date',CAST(dt AS CHAR))) "
+                                     "FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd) "
+                                     "WHERE site_id='2250' ORDER BY dt LIMIT 1"])
+        dates.extend(row['date'] for row in first_effect if row['date'] <= end)
     start = start or min(dates, default=end)
     if date.fromisoformat(start) > date.fromisoformat(end) or date.fromisoformat(start).year < 2020:
         raise ValueError('invalid_collection_range')
@@ -148,7 +153,7 @@ def collect(env, reader, start=None, end=None):
             site = source['site_id']
             source_dates = [row['date'] for row in restricted if row['platform'] == platform
                             and site in effect_sites(row) and row.get('date')]
-            first = max(start, min(source_dates, default=start))
+            first = start if platform == 'tiktok' else max(start, min(source_dates, default=start))
             # Coverage includes earlier dates: the source, not publication activity, proves a zero.
             windows = list(periods(start, end, days=1 if platform == 'facebook' else 4))
             source_rows, populated = [], set()
@@ -164,6 +169,8 @@ def collect(env, reader, start=None, end=None):
                     if kind != 'metric':
                         raise RuntimeError('source_row_kind_invalid')
                     identity = (row['date'], row.get('campaign_id'), row.get('adset_id'), row.get('ad_id'))
+                    if platform == 'tiktok':
+                        identity += (row.get('campaign'),)
                     if identity in seen or any(row.get(field) is None for field in FIELDS):
                         raise RuntimeError('source_metric_invalid')
                     seen.add(identity)
@@ -176,20 +183,31 @@ def collect(env, reader, start=None, end=None):
                     source_rows.append(row)
                 print(encoded(dict(event='source_batch', source=source_key(platform, site),
                                    start=batch[0][0], end=batch[-1][1], rows=len(rows))), flush=True)
+            if platform == 'tiktok':
+                from .tiktok_scope import keyed, reconcile_insight_cents
+                reconcile_insight_cents(source_rows)
             covered = []
             if end >= FIRST_DAY:
                 daily = defaultdict(list)
                 for row in source_rows:
                     daily[row['date']].append(row)
                 keys = ('campaign_id', 'adset_id', 'ad_id') if platform == 'facebook' else ('campaign_id',)
+                if platform == 'tiktok':
+                    keys = ('campaign_id', 'campaign')
                 for day, _ in periods(max(start, FIRST_DAY), end, days=1):
                     bills = reader.query([by_campaign(day, site)])
                     if any(r["ad_events"] for r in bills) and not any(r["purchase_events"] for r in bills):
                         bills.extend(reader.query([by_campaign(day, site, provisional_purchases=True)]))
+                    if platform == 'tiktok':
+                        allocate_tiktok_cents(bills)
+                        if bills:
+                            populated.add(day)
                     daily[day], settled = merge_settled(daily[day], bills, keys, empty())
                     if settled:
                         covered.append(day)
                 source_rows = [row for batch in daily.values() for row in batch]
+            if platform == 'tiktok':
+                source_rows = [keyed(row) for row in source_rows]
             iaa_coverage[source_key(platform, site)] = covered
             _, facts, _, audit = restrict(catalog, source_rows, end)
             accepted.extend(facts)
@@ -423,7 +441,7 @@ def refresh(env, root, start=None, end=None):
     atomic_json(root / 'status.json', dict(status='collecting', version=version, started_at=started))
     writer = None
     try:
-        data = collect(env, reader, start, end)
+        data = collect(dict(env, SOCIAL_ANALYTICS_WAREHOUSE_ROOT=str(root)), reader, start, end)
         values = table_rows(data, version)
         manifest = {key: data[key] for key in ('start', 'end', 'coverage', 'catalog_errors', 'source_metadata')}
         manifest['iaa_coverage'] = data.get('iaa_coverage', {})

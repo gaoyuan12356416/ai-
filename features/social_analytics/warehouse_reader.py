@@ -51,6 +51,8 @@ def catalogs(root, platforms, snapshot=None):
     errors = CatalogErrors()
     errors.update(manifest.get('catalog_errors', {}))
     errors.source_metadata = manifest.get('source_metadata', {})
+    if 'tiktok' in platforms and 'tiktok:2250' not in manifest.get('coverage', {}):
+        errors['tiktok:2250'] = 'TikTok 历史数据尚未完成首次同步'
     return [row for row in cached if row['platform'] in platforms], errors, manifest, path
 
 
@@ -81,8 +83,9 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
                           snapshot_age_seconds=round(age), snapshot_stale=age > 7200,
                           range_start=manifest['start'], range_end=manifest['end'])
     report['warnings'][:2] = [
-        '仅统计 AI 后台已确认成功发布的内容及 YouTube 手动短链；包含历史内容在所选 UTC 日期产生的效果。',
-        '数仓每小时更新一次；人员按冻结 campaign ID 归属，Facebook 同时核对冻结 Page 和素材 ID。',
+        '按所选 UTC 日期统计历史内容产生的效果，成功发布按已确认的回执去重。',
+        '数仓每小时更新。TikTok 按站点、campaign ID 和完整活动名匹配已发布短链；待归属效果单列在授权管理员的渠道总额内。' if 'tiktok' in params['platforms'] else
+        '人员按冻结 campaign ID 归属，Facebook 同时核对冻结 Page 和素材 ID。数仓每小时更新。',
     ]
     if age > 7200:
         report['warnings'].append('数仓更新已延迟，当前显示上次成功同步的数据；请核对更新时间。')

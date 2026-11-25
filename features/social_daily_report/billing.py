@@ -1,7 +1,7 @@
 """Daily-only financial metrics from purchase bills; no publishing side effects."""
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 import re
 
@@ -9,23 +9,29 @@ from features.social_analytics.backend_scope import eligible
 from features.social_analytics.bill_income import FIRST_DAY, SITES, by_campaign, window
 from features.social_analytics.report import campaign_index, resolve
 from features.social_analytics.routes import query_source_rows
+from features.social_analytics.tiktok import campaign_key
+from features.social_analytics.tiktok_scope import UNASSIGNED
 
 MAX_BILLS = 50000
 SOURCE = "kunlunads_dev.ads_drama_bills"
 
 
-def read_bills(app, day):
+def read_bills(app, day, *, tiktok_provisional=False):
     start, end = window(day)
+    table = "ads_drama_bills_t0" if tiktok_provisional else "ads_drama_bills"
+    sites = "'2250'" if tiktok_provisional else "'2049','2310','2116','2284','2250'"
     sql = """SELECT HEX(JSON_OBJECT(
-      'id',id,'site_id',site_id,'campaign_id',campaign_id,
+      'id',id,'site_id',site_id,'campaign_id',campaign_id,'campaign',campaign,
       'adset_id',adset_id,'ad_id',ad_id,'event_name',event_name,'event_time',event_time,
       'revenue_cents',CAST(ROUND(event_revenue_usd*100) AS SIGNED),
+      'positive_purchase',IF(site_id='2250',event_revenue_usd>0,ROUND(event_revenue_usd*100)>0),
       'user_key',IF(COALESCE(user_id,'')='',NULL,SHA2(user_id,256))))
-      FROM kunlunads_dev.ads_drama_bills FORCE INDEX(idx_site_event_name_time)
-      WHERE site_id IN ('2049','2310','2116','2284') AND event_name='af_purchase'
+      FROM kunlunads_dev.%s FORCE INDEX(idx_site_event_name_time)
+      WHERE site_id IN (%s) AND event_name='af_purchase'
         AND event_time >= %d AND event_time < %d
-      ORDER BY site_id,event_time,id LIMIT %d""" % (start, end, MAX_BILLS + 1)
-    return query_source_rows(app, sql, MAX_BILLS)
+      ORDER BY site_id,event_time,id LIMIT %d""" % (table, sites, start, end, MAX_BILLS + 1)
+    records = query_source_rows(app, sql, MAX_BILLS)
+    return [dict(row, provisional=True) for row in records] if tiktok_provisional else records
 
 
 @dataclass
@@ -36,13 +42,15 @@ class Bucket:
     users: set = field(default_factory=set)
 
     def add(self, bill):
-        if bill["event_name"] == "ad_revenue":
-            self.iaa_cents += bill["revenue_cents"]
-            self.revenue_cents += bill["revenue_cents"]
-            return
+        kind = bill["event_name"]
         self.revenue_cents += bill["revenue_cents"]
+        if kind == "ad_revenue":
+            self.iaa_cents += bill["revenue_cents"]
+            return
+        if kind == "grouped_purchase_income":
+            return
         self.orders += 1
-        if bill["revenue_cents"] > 0:
+        if bill.get("positive_purchase", bill["revenue_cents"] > 0):
             self.users.add(bill["user_key"])
 
     def public(self):
@@ -64,34 +72,52 @@ def aggregate(catalog, bills, day, ad_groups=()):
     total, raw = Bucket(), Bucket()
     owners, groups, platforms, sites = (defaultdict(Bucket) for _ in range(4))
     outside = defaultdict(Bucket)
+    tt_unassigned, tt_attributed = Bucket(), Bucket()
+    tt_orders, tt_group_orders = Counter(), Counter()
     seen = set()
     for bill in bills:
         site = bill.get("site_id")
+        record_key = (bool(bill.get("provisional")), bill.get("id"))
         if (site not in SITES or bill.get("event_name") != "af_purchase"
-                or type(bill.get("id")) is not int or bill["id"] in seen
+                or type(bill.get("id")) is not int or record_key in seen
                 or type(bill.get("event_time")) is not int
                 or not start <= bill["event_time"] < end
                 or type(bill.get("revenue_cents")) is not int):
             raise ValueError("billing_record_invalid")
-        if bill["revenue_cents"] > 0 and not re.fullmatch(r"[a-fA-F0-9]{64}", bill.get("user_key") or ""):
+        if bill.get("positive_purchase", bill["revenue_cents"] > 0) and not re.fullmatch(r"[a-fA-F0-9]{64}", bill.get("user_key") or ""):
             raise ValueError("billing_payer_missing")
-        seen.add(bill["id"])
+        if site == "2250":
+            tt_orders[campaign_key(bill.get("campaign_id"), bill.get("campaign"))] += 1
+        seen.add(record_key)
     coverage = set()
     ads = []
     for row in ad_groups:
         if row["date"] != day or row["site_id"] not in SITES or type(row["iaa_cents"]) is not int:
             raise ValueError("billing_record_invalid")
-        if row["ad_events"]:
+        if row["site_id"] == "2250" and row["purchase_events"]:
+            tt_group_orders[campaign_key(row.get("campaign_id"), row.get("campaign"))] += row["purchase_events"]
+            ads.append(dict(row, event_name="grouped_purchase_income", revenue_cents=row["iap_cents"]))
+        if row["ad_events"] and (row["site_id"] != "2250" or day >= FIRST_DAY):
             coverage.add(row["site_id"])
             ads.append(dict(row, event_name="ad_revenue", revenue_cents=row["iaa_cents"]))
+    if tt_orders != tt_group_orders:
+        raise ValueError("billing_reconciliation_failed")
     for bill in [*bills, *ads]:
         site = bill["site_id"]
+        cid = str(bill.get("campaign_id") or "")
+        if site == "2250":
+            cid = campaign_key(bill.get("campaign_id"), bill.get("campaign"))
+            if bill["event_name"] == "af_purchase":
+                # Count the transaction and its payer; grouped decimal amounts
+                # supply money once, with the same site-level rounding as the web report.
+                bill = dict(bill, positive_purchase=bill.get("positive_purchase", bill["revenue_cents"] > 0),
+                            revenue_cents=0)
         raw.add(bill)
         platform = SITES[site]
-        key = (platform, site, str(bill.get("campaign_id") or ""))
+        key = (platform, site, cid)
         candidates, owner = index.get(key, []), resolved.get(key)
         reason = ""
-        if not owner:
+        if not owner or (platform == "tiktok" and owner.get("owner") == UNASSIGNED):
             reason = "no_unique_backend_campaign"
         elif not any(eligible(row, day) for row in candidates):
             reason = "not_published_or_link_not_yet_created"
@@ -101,8 +127,14 @@ def aggregate(catalog, bills, day, ad_groups=()):
             if (str(bill.get("adset_id") or ""), str(bill.get("ad_id") or "")) not in allowed:
                 reason = "outside_backend_frozen_source_ids"
         if reason:
+            if site == "2250":
+                for bucket in (tt_unassigned, total, platforms[platform], sites[site]):
+                    bucket.add(bill)
+                continue
             outside[(site, reason)].add(bill)
             continue
+        if site == "2250":
+            tt_attributed.add(bill)
         identity = (owner["tenant"], owner["owner"])
         for bucket in (total, owners[identity], groups[identity + (platform,)],
                        platforms[platform], sites[site]):
@@ -111,7 +143,8 @@ def aggregate(catalog, bills, day, ad_groups=()):
            for k in ("revenue_cents", "iaa_cents", "orders")):
         raise ValueError("billing_reconciliation_failed")
     return dict(total=total, raw=raw, owners=owners, groups=groups, platforms=platforms,
-                sites=sites, outside=outside, iaa_sites=sorted(coverage))
+                sites=sites, outside=outside, iaa_sites=sorted(coverage),
+                tt_unassigned=tt_unassigned, tt_attributed=tt_attributed)
 
 
 def _patch(row, bucket):
@@ -144,23 +177,32 @@ def apply(report, financials):
                                      r["name"], r["owner_tenant"], r["owner"]))
     for platform, value in report["platforms"].items():
         bucket = financials["platforms"].get(platform, zero)
+        linked = financials["tt_attributed"] if platform == "tiktok" else bucket
+        unmatched = financials["tt_unassigned"] if platform == "tiktok" else zero
         _patch(value["totals"], bucket)
         _patch(value["source"], bucket)
-        for key in ("unmatched", "excluded"):
-            _patch(value[key], zero)
+        _patch(value["unmatched"], unmatched)
+        _patch(value["excluded"], zero)
+        if platform == "tiktok":
+            value.update(assigned_income=linked.public(), unassigned_income=unmatched.public())
         quality = value["quality"]
-        for key in ("source_totals", "attributed_totals"):
-            _patch(quality[key], bucket)
+        _patch(quality["source_totals"], bucket)
+        _patch(quality["attributed_totals"], linked)
+        if platform == "tiktok":
+            _patch(quality["unmatched_totals"], unmatched)
         for source in quality.get("sources", {}).values():
             site_bucket = financials["sites"].get(source["site_id"], zero)
             for key in ("totals", "source_totals", "attributed_totals"):
                 if key in source:
-                    _patch(source[key], site_bucket)
+                    _patch(source[key], linked if key == "attributed_totals" and platform == "tiktok" else site_bucket)
+            if platform == "tiktok" and "unmatched_totals" in source:
+                _patch(source["unmatched_totals"], unmatched)
     shared = report["shared_report"]
     _patch(shared["totals"], financials["total"])
     for row in shared["all_rows"]:
         key = (row.get("owner_tenant", ""), row["owner"], row["platform"])
-        _patch(row, financials["groups"].get(key, zero))
+        _patch(row, financials["tt_unassigned"] if row["platform"] == "tiktok" and row["owner"] == UNASSIGNED
+               else financials["groups"].get(key, zero))
     shared["all_rows"].sort(key=lambda r: (-r["revenue_cents"], str(r["owner"]), r["platform"]))
     for platform, value in shared["platform_totals"].items():
         _patch(value, financials["platforms"].get(platform, zero))
@@ -217,9 +259,20 @@ def collect_financials(report, app, catalog):
         day = report["report_date"]
         bills = read_bills(app, day)
         ad_groups = []
-        if bills and day >= FIRST_DAY:
+        if bills:
             for site in SITES:
-                ad_groups.extend(query_source_rows(app, by_campaign(day, site), MAX_BILLS))
+                if day < FIRST_DAY and (site != "2250" or not any(b["site_id"] == site for b in bills)):
+                    continue
+                groups = query_source_rows(app, by_campaign(day, site), MAX_BILLS)
+                if site == "2250":
+                    from features.social_analytics.bill_income import allocate_tiktok_cents
+                    if any(r["ad_events"] for r in groups) and not any(r["purchase_events"] for r in groups):
+                        fallback = read_bills(app, day, tiktok_provisional=True)
+                        if fallback:
+                            bills = [*bills, *fallback]
+                            groups += query_source_rows(app, by_campaign(day, site, provisional_purchases=True), MAX_BILLS)
+                    groups = allocate_tiktok_cents(groups)
+                ad_groups.extend(groups)
         return apply(report, aggregate(catalog, bills, day, ad_groups))
     except Exception as exc:
         # Driver messages and SQL must not leak into Feishu or failure diagnostics.

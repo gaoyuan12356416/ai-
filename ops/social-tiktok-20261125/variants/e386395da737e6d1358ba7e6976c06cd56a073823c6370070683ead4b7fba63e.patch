@@ -1,0 +1,52 @@
+--- a/module
++++ b/module
+@@ -36,6 +36,11 @@
+ def metric_sql(start, end, platform, site_id=None):
+     start, end = date.fromisoformat(start).isoformat(), date.fromisoformat(end).isoformat()
+     site = source_site(platform, site_id)
++    group = ("BINARY COALESCE(campaign_id,''),BINARY COALESCE(campaign,'')"
++             if platform == "tiktok" else "BINARY campaign_id")
++    precision = ("""'revenue_usd_1e4',CAST(SUM(COALESCE(revenue,0))*10000 AS SIGNED),
++                    'refund_usd_1e4',CAST(SUM(COALESCE(refund_revenue,0))*10000 AS SIGNED),"""
++                 if platform == "tiktok" else "")
+     return """SELECT HEX(JSON_OBJECT('date',CAST(dt AS CHAR),
+       'site_id','%s',
+       'campaign_id',MIN(campaign_id),'campaign',MIN(campaign),
+@@ -43,10 +48,10 @@
+       'installs',SUM(COALESCE(installs,0)),'conversions',SUM(COALESCE(recharge,0)),
+       'revenue_cents',CAST(ROUND(SUM(COALESCE(revenue,0))*100) AS SIGNED),
+       'refund_cents',CAST(ROUND(SUM(COALESCE(refund_revenue,0))*100) AS SIGNED),
+-      'updated_at',CAST(MAX(updated_at) AS CHAR)))
++      %s'updated_at',CAST(MAX(updated_at) AS CHAR)))
+       FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd)
+       WHERE site_id='%s' AND dt BETWEEN '%s' AND '%s'
+-      GROUP BY dt,BINARY campaign_id LIMIT %d""" % (site, site, start, end, MAX_ROWS + 1)
++      GROUP BY dt,%s LIMIT %d""" % (site, precision, site, start, end, group, MAX_ROWS + 1)
+ 
+ 
+ def query_rows(app, statement, max_rows=1001):
+@@ -133,6 +138,11 @@
+             _cache.move_to_end(key)
+             return cached[1], cached[2]
+     result = query_source_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
++    if platform == "tiktok":
++        from .tiktok_scope import keyed, reconcile_insight_cents
++        result = [dict(row) for row in result]
++        reconcile_insight_cents(result)
++        result = [keyed(row) for row in result]
+     start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
+     days = {(start_day + timedelta(days=i)).isoformat() for i in range((end_day - start_day).days + 1)}
+     validate_metrics(result, platform, days, site_id=site)
+@@ -255,8 +265,10 @@
+     if scope_audit is not None:
+         report["meta"]["content_scope"] = scope_audit["scope"]
+         report["warnings"][:2] = [
+-            "仅统计 AI 后台已确认成功发布的内容及 YouTube 手动短链；包含历史内容在所选 UTC 日期产生的效果。发布量为所选日期确认成功的数量。",
+-            "按冻结 campaign ID 归属人员；Facebook 同时核对冻结 Page 和素材 ID，排除其他系统同号来源及未成功发布记录。",
++            "按所选 UTC 日期统计历史内容产生的效果，发布量按确认成功的日期统计。",
++            "TikTok 按站点、活动 ID 和完整活动名核对冻结短链，待归属效果在授权管理员的渠道总额内单列。"
++            if "tiktok" in params["platforms"] else
++            "按冻结 campaign ID 归属人员，Facebook 同时核对冻结 Page 和素材 ID。",
+         ]
+         if actor.get("_system_report") is True:
+             report["scope_audit"] = scope_audit

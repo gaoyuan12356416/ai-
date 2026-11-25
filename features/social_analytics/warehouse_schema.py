@@ -3,7 +3,7 @@ import hashlib
 import json
 
 FACT_TABLES = {platform: 'social_analytics_' + platform + '_daily'
-               for platform in ('youtube', 'x', 'facebook')}
+               for platform in ('youtube', 'x', 'facebook', 'tiktok')}
 CATALOG_TABLE = 'social_analytics_link_catalog'
 PUBLICATION_TABLE = 'social_analytics_publication'
 RUN_TABLE = 'social_analytics_refresh_runs'

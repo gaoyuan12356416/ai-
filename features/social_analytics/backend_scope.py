@@ -154,16 +154,19 @@ def restrict(catalog, metrics, end):
     """Resolve globally first; then apply source/date scope without reassignment."""
     index = campaign_index(catalog)
     resolved = {key: resolve(rows) for key, rows in index.items()}
+    from .tiktok_scope import site_tenant, unassigned_row
+    tt_tenant = site_tenant(catalog)
     selected_catalog = []
     for row in catalog:
         if not eligible(row, end) or row.get("excluded"):
             continue
         key = (row["platform"], row["site_id"], row["key"][0])
-        if not resolved.get(key):
+        if not resolved.get(key) and row["platform"] != "tiktok":
             raise ReportError("AI 后台记录的 campaign ID 用户归属冲突", 503)
         if row["platform"] == "facebook" and not row.get("effect_source"):
             raise ReportError("AI 后台发布记录缺少冻结来源 ID", 503)
-        selected_catalog.append(row)
+        selected_catalog.append(dict(row, tiktok_site_tenant=tt_tenant)
+                                if row["platform"] == "tiktok" else row)
     coverage = defaultdict(set)
     accepted, outside = {}, defaultdict(lambda: dict(empty(), rows=0))
     raw_totals = empty()
@@ -186,10 +189,15 @@ def restrict(catalog, metrics, end):
             if provenance not in permitted:
                 reason = "outside_backend_frozen_source_ids"
         if reason:
-            bucket = outside[(source, reason)]
-            add(bucket, metric)
-            bucket["rows"] += 1
-            continue
+            if metric["platform"] == "tiktok":
+                info = unassigned_row(index.get(key, ()), tt_tenant, metric["date"])
+                metric = dict(metric, tiktok_unassigned=True, tiktok_site_tenant=tt_tenant,
+                              tiktok_drama=info["drama"], tiktok_reason=reason)
+            else:
+                bucket = outside[(source, reason)]
+                add(bucket, metric)
+                bucket["rows"] += 1
+                continue
         group = (metric["date"],) + key
         if group not in accepted:
             accepted[group] = {**metric, **empty()}
@@ -199,7 +207,8 @@ def restrict(catalog, metrics, end):
     kept = empty()
     for row in accepted.values():
         add(kept, row)
-    if any(raw_totals[field] != kept[field] + sum(v[field] for v in outside.values()) for field in FIELDS):
+    if any(raw_totals[field] != kept[field] + sum(v[field] for v in outside.values())
+           for field in FIELDS + (("iaa_cents",) if "iaa_cents" in kept else ())):
         raise ReportError("AI 后台统计范围金额不守恒", 503)
     audit = dict(scope=SCOPE, raw_totals=raw_totals, included_totals=kept,
                  outside=[dict(source=source, reason=reason, **value)

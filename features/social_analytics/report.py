@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from features.youtube_analytics.report import ReportError, add as legacy_add
 from features.youtube_analytics.titles import display_title
 from .adapters import PLATFORMS, platform_metadata, source_key, source_site
+from .tiktok_scope import site_tenant, unassigned_row, unassigned_visible, UNASSIGNED
 
 DIMENSIONS = ("date", "owner", "platform", "drama", "channel", "link_type", "language")
 FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents")
@@ -72,7 +73,7 @@ def parameters(query):
         filters[key] = set(values)
     if filters["platform"] - set(PLATFORMS):
         raise ReportError("渠道尚未接入")
-    if filters["link_type"] - {"auto", "manual", "auto_template", "system", "pool", "group_pool"}:
+    if filters["link_type"] - {"auto", "manual", "auto_template", "system", "pool", "group_pool", "tt_post"}:
         raise ReportError("链接类型无效")
     search = one("search", "").strip()
     if len(search) > 200 or any(ord(c) < 32 for c in search):
@@ -87,6 +88,8 @@ def parameters(query):
 
 
 def visible(row, actor):
+    if row.get("platform") == "tiktok" and row.get("owner") == UNASSIGNED:
+        return unassigned_visible(row, actor)
     if actor.get("_system_report") is True:
         return True
     return (bool(actor.get("tenant_key")) and bool(actor.get("user_id"))
@@ -141,11 +144,16 @@ def resolve(candidates):
 
 def options(catalog, actor):
     by_id = campaign_index(catalog)
+    tt_tenant = site_tenant(catalog)
     values = {dimension: {} for dimension in DIMENSIONS[1:]}
     for candidates in by_id.values():
         row = resolve(candidates)
+        if not row and candidates and candidates[0]["platform"] == "tiktok":
+            row = unassigned_row(candidates, tt_tenant, "9999-12-31")
         if row and visible(row, actor):
             for dimension in values:
+                if not row[dimension]:
+                    continue
                 values[dimension][row[dimension]] = row.get(dimension + "_label", row[dimension])
     # A selected channel may have no campaigns yet. It still needs a visible
     # unavailable state and must never disappear into a misleading total.
@@ -232,6 +240,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     start, end = date.fromisoformat(params["start"]), date.fromisoformat(params["end"])
     days = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
     platforms = params["platforms"]
+    tt_tenant = site_tenant(catalog)
     by_id = campaign_index(catalog)
     resolved = {key: resolve(candidates) for key, candidates in by_id.items()}
     specs = {source_key(platform, spec["site_id"]): dict(spec, platform=platform)
@@ -259,6 +268,12 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     def is_selected(row):
         return selected(row, actor, params)
 
+    def pending_tiktok_iaa(key, requested):
+        if key != "tiktok:2250" or iaa_coverage is None:
+            return False
+        from .bill_income import FIRST_DAY
+        return any(day >= FIRST_DAY and day in populated[key] and day not in ad_dates[key] for day in requested)
+
     def emit(row, value):
         key = tuple(row[dimension] for dimension in params["groups"])
         if actor.get("_system_report") is True and "owner" in params["groups"]:
@@ -271,6 +286,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             if "owner" in params["groups"]:
                 groups[key]["owner_tenant"] = row["tenant"]
         add(groups[key], value)
+        if row["platform"] == "tiktok" and row["owner"] == UNASSIGNED:
+            groups[key]["tiktok_unassigned_cents"] = groups[key].get("tiktok_unassigned_cents", 0) + value.get("revenue_cents", 0)
         add(totals, value)
         add(trend[row["date"]], value)
         add(platform_values[row["platform"]], value)
@@ -299,6 +316,16 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         quality_visible = actor.get("_system_report") is True or (
             actor.get("role") == "admin" and bool(candidates)
             and all(candidate.get("tenant") == actor.get("tenant_key") for candidate in candidates))
+        if platform == "tiktok":
+            if metric.get("tiktok_unassigned") or not row:
+                group = unassigned_row(candidates, metric.get("tiktok_site_tenant", tt_tenant), day)
+                if is_selected(group) and not failure(catalog_errors, source_id):
+                    add(quality["source"], metric)
+                    add(quality["unmatched"], metric)
+                    quality["unmatched_keys"].add(key[2])
+                    emit(group, metric)
+                continue
+            quality_visible = is_selected(row)
         if quality_visible:
             add(quality["source"], metric)
         if row:
@@ -324,7 +351,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         for fact in row.get("publications", []):
             publications[fact["id"]].append((row, fact))
         if not resolved.get(key):
-            continue
+            if row["platform"] != "tiktok" or row.get("excluded"):
+                continue
+            group = unassigned_row([row], tt_tenant, "9999-12-31")
+            row = {**row, **group, "date": row["date"]}
         if is_selected(row) and row["link_id"] not in counted_links and row["date"] in trend:
             counted_links.add(row["link_id"])
             emit(row, {"links": 1})
@@ -334,6 +364,16 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     publication_conflicts_by_platform = defaultdict(int)
     publication_conflicts_by_source = defaultdict(int)
     for candidates in publications.values():
+        if (candidates[0][0]["platform"] == "tiktok"
+                and len({(fact["date"], fact["kind"]) for _, fact in candidates}) == 1
+                and (any(not resolved.get((row["platform"], row["site_id"], row["key"][0])) for row, _ in candidates)
+                     or len({identity(row) for row, _ in candidates}) != 1)):
+            day = candidates[0][1]["date"]
+            eligible = [row for row, _ in candidates if not row.get("excluded")]
+            group = unassigned_row(eligible, tt_tenant, day)
+            if eligible and day in trend and is_selected(group):
+                emit(group, {"published_count": 1})
+            continue
         if (len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1
                 or any(not resolved.get((row["platform"], row["site_id"], row["key"][0]))
                        for row, _ in candidates)):
@@ -359,7 +399,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         available = any(populated[key] & needed and not failure(catalog_errors, key) for key in sources)
         complete = all(needed <= populated[key] and not failure(errors, key)
                        and not failure(catalog_errors, key) and collector_complete(key)
-                       and not publication_conflicts_by_source[key] for key in sources)
+                       and not publication_conflicts_by_source[key] and not pending_tiktok_iaa(key, needed)
+                       for key in sources)
         publications_available = any(not failure(catalog_errors, key) for key in sources)
         return available, complete, publications_available
 
@@ -374,6 +415,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                       data_status="complete" if complete else "partial" if available else "unavailable")
         if source_ids is not None:
             result.update(source_keys=sorted(source_ids), platforms=applicable)
+        if any(pending_tiktok_iaa(k, [day] if day else days) for k in sources):
+            result["iaa_pending"] = True
         if "x" not in applicable:
             result.update(post_count=None, repost_count=None)
         elif not any(not failure(catalog_errors, key) for key, spec in specs.items() if spec["platform"] == "x"):
@@ -402,7 +445,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         available = metric_available and publication_available
         complete = (set(days) <= populated[key] and not failure(errors, key)
                     and publication_available and collector_complete(key)
-                    and not publication_conflicts_by_source[key])
+                    and not publication_conflicts_by_source[key] and not pending_tiktok_iaa(key, days))
         add(unmatched_total, quality["unmatched"])
         add(excluded_total, quality["excluded"])
         # This equality is integer-exact and cannot be broken by report filters.
@@ -471,7 +514,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     unverified_dates = [day for day in days if any(day in source_quality[key]["unverified_dates"] for key in specs)]
     warnings = [
         "效果按 UTC 自然日统计，覆盖全部历史链接；发布量按确认完成的 UTC 日期去重。",
-        "按渠道站点内 campaign ID 唯一关联发布表或链接账本；名称与 af_channel 不参与效果归因。",
+        "按渠道站点内 campaign ID 关联发布账本。TikTok 还须匹配冻结短链上的完整活动名。",
         "转化数采用源表充值人数；跨日期累加每日人数，未做跨日用户去重。",
         "手动短链仅计效果及生成链接数；X 中转源 Post 不重复计入目标账号发布量。",
     ]
@@ -525,6 +568,8 @@ def csv_export(report):
     fields += [(metric, "收入（USD）" if metric == "revenue" else LABELS[metric])
                for metric in METRICS if metric not in ("iap", "iaa")]
     fields += [(metric, LABELS[metric]) for metric in ("iap", "iaa")]
+    if any("tiktok_unassigned_cents" in row for row in report["all_rows"]):
+        fields.append(("tiktok_unassigned_revenue", "其中 TikTok 待归属收入（USD）"))
     fields += [("period", "统计范围（UTC）"), ("data_status_label", "数据完整性"), ("conversion_note", "转化口径")]
 
     def safe(value):
@@ -540,6 +585,11 @@ def csv_export(report):
                                         "unavailable": "未同步／待核实"}[row["data_status"]],
                      conversion_note="源表充值人数，每日人数累加，未跨日去重")
         applicable = row.get("platforms", [row["platform"]] if "platform" in row else report["meta"]["platforms"])
+        value["tiktok_unassigned_revenue"] = (
+            round(row["tiktok_unassigned_cents"] / 100, 2)
+            if "tiktok_unassigned_cents" in row and row.get("revenue") is not None else "")
+        if row.get("iaa_pending"):
+            value["data_status_label"] += "，TikTok IAA 待回传"
         writer.writerow(["不适用" if key in {"post_count", "repost_count"} and "x" not in applicable
                          else safe(value.get(key)) for key, _ in fields])
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")

@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 
 
 FIRST_DAY = "2026-11-23"
-SITES = {"2049": "facebook", "2310": "facebook", "2116": "x", "2284": "youtube"}
+SITES = {"2049": "facebook", "2310": "facebook", "2116": "x", "2284": "youtube", "2250": "tiktok"}
 
 
 def window(day):
@@ -16,6 +16,11 @@ def by_campaign(day, site, *, provisional_purchases=False):
     start, stop = window(day)
     provenance = ("'adset_id',MIN(adset_id),'ad_id',MIN(ad_id)," if platform == "facebook" else "")
     groups = "BINARY campaign_id" + (",BINARY adset_id,BINARY ad_id" if platform == "facebook" else "")
+    if platform == "tiktok":
+        groups = "BINARY COALESCE(campaign_id,''),BINARY COALESCE(campaign,'')"
+        provenance = """'campaign',MIN(campaign),
+            'iap_usd_1e4',CAST(COALESCE(SUM(IF(event_name='af_purchase',event_revenue_usd,0)),0)*10000 AS SIGNED),
+            'iaa_usd_1e4',CAST(COALESCE(SUM(IF(event_name='ad_revenue',event_revenue_usd,0)),0)*10000 AS SIGNED),"""
     table = "ads_drama_bills_t0" if provisional_purchases else "ads_drama_bills"
     events = "event_name='af_purchase'" if provisional_purchases else "event_name IN ('af_purchase','ad_revenue')"
     return f"""SELECT HEX(JSON_OBJECT('date','{day}','site_id','{site}','platform','{platform}',
@@ -28,6 +33,27 @@ def by_campaign(day, site, *, provisional_purchases=False):
         WHERE site_id='{site}' AND {events}
           AND event_time >= {start} AND event_time < {stop}
         GROUP BY {groups}"""
+
+
+def allocate_tiktok_cents(bills, fields=('iap', 'iaa')):
+    """Allocate each day's exact site/event total to frozen ID + campaign groups."""
+    def rounded(value):
+        cents = (abs(value) + 50) // 100
+        return -cents if value < 0 else cents
+
+    for field in fields:
+        units, cents = field + '_usd_1e4', field + '_cents'
+        for row in bills:
+            row[cents] = rounded(row[units])
+        difference = rounded(sum(row[units] for row in bills)) - sum(row[cents] for row in bills)
+        if difference:
+            sign = 1 if difference > 0 else -1
+            ordered = sorted(bills, key=lambda row: (
+                -sign * (row[units] - 100 * row[cents]),
+                str(row.get('campaign_id') or ''), str(row.get('campaign') or '')))
+            for row in ordered[:abs(difference)]:
+                row[cents] += sign
+    return bills
 
 
 def merge_settled(insights, bills, keys, metric_defaults):

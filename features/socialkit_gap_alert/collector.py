@@ -15,12 +15,12 @@ from features.social_analytics.bill_income import FIRST_DAY, by_campaign
 from features.social_analytics.routes import build_report, source, scoped_facebook_source
 
 APP_ID = 1479
-CHANNELS = ("facebook", "youtube", "x")
+CHANNELS = ("facebook", "youtube", "x", "tiktok")
 FRESH_SECONDS = 7200
 HISTORY_FRESH_SECONDS = 26 * 3600  # Historical snapshot dates are reconciled daily.
 RULE_VERSION = "previous-complete-utc-day-v1"
 MIN_SOCIALKIT_CENTS = 1000
-SITES = {"facebook": {"2049", "2310"}, "youtube": {"2284"}, "x": {"2116"}}
+SITES = {"facebook": {"2049", "2310"}, "youtube": {"2284"}, "x": {"2116"}, "tiktok": {"2250"}}
 ERROR_CODES = frozenset({"socialkit_date_unavailable", "socialkit_snapshot_stale",
                          "socialkit_income_source_stale", "own_source_or_attribution_incomplete",
                          "own_income_source_stale", "own_income_not_integer_cents", "statistics_day_changed",
@@ -82,10 +82,10 @@ def socialkit_candidates(root, version, day, now, *, end=None, enforce_fresh=Tru
                    MAX(drama_name) AS drama_name,SUM(revenue_cents) AS revenue_cents,{ad_sum} AS iaa_cents,
                    {complete} AS iaa_complete
             FROM effects WHERE date BETWEEN ? AND ? AND drama_app_id=? AND matched=1
-              AND platform IN ('facebook','youtube','x') AND drama_content_id<>''
+              AND platform IN ({','.join('?' for _ in CHANNELS)}) AND drama_content_id<>''
             GROUP BY platform,drama_app_id,drama_content_id
             HAVING SUM(revenue_cents)>0
-        """, (day, end, APP_ID))]
+        """, (day, end, APP_ID, *CHANNELS))]
         for row in rows:
             row["iaa_complete"] = not includes_iaa or (available and bool(row["iaa_complete"]))
             if includes_iaa and not available:
@@ -113,7 +113,7 @@ def history(catalog):
             continue
         key = (row["platform"], row["site_id"], row["key"][0])
         if (row["site_id"] not in SITES[row["platform"]] or not drama
-                or not resolve(index.get(key))
+                or (row["platform"] != "tiktok" and not resolve(index.get(key)))
                 or row.get("attribution_status", "frozen") != "frozen"):
             blocked.add(drama)
             continue
@@ -180,6 +180,37 @@ def warehouse_snapshot(app):
     return manifest, path.as_uri() + "?mode=ro&immutable=1"
 
 
+def tiktok_channel(db, manifest, day, index, history_rows, blocked, ad_sites):
+    """Site 2250 is shared by named and generic links; compare only proven drama IDs."""
+    amounts, ads = defaultdict(int), defaultdict(int)
+    unassigned_money = False
+    latest = ""
+    for (payload,) in db.execute("SELECT payload FROM effects WHERE platform='tiktok' AND dt=?", (day,)):
+        fact = json.loads(payload)
+        if fact["site_id"] != "2250" or type(fact.get("revenue_cents")) is not int:
+            raise ComparisonUnavailable("own_source_or_attribution_incomplete")
+        if ad_sites and type(fact.get("iaa_cents")) is not int:
+            raise ComparisonUnavailable("own_iaa_pending")
+        latest = max(latest, str(fact.get("updated_at") or ""))
+        if fact.get("tiktok_unassigned"):
+            drama = fact.get("tiktok_drama")
+        else:
+            owner = resolve(index.get(("tiktok", "2250", fact["campaign_id"]), ()))
+            if not owner:
+                raise ComparisonUnavailable("own_source_or_attribution_incomplete")
+            drama = owner.get("drama")
+        if drama:
+            amounts[drama] += fact["revenue_cents"]
+            ads[drama] += fact.get("iaa_cents") or 0
+        elif fact["revenue_cents"] or fact.get("iaa_cents"):
+            unassigned_money = True
+    times = {"2250": latest}
+    return dict(amounts=dict(amounts), iaa=dict(ads) if ad_sites else None,
+                iaa_complete=day < FIRST_DAY or bool(ad_sites), history=history_rows, blocked=blocked,
+                unassigned_drama_income=unassigned_money, source_updated_at=times,
+                source_updated_by_date={day: times}, version=manifest["version"])
+
+
 def warehouse_channel(app, snapshot_info, day, platform, now, enforce_fresh):
     """Compare the published report generation, retaining uncertain bill identities."""
     from features.social_analytics.routes import query_source_rows
@@ -201,6 +232,8 @@ def warehouse_channel(app, snapshot_info, day, platform, now, enforce_fresh):
                    if (row := json.loads(payload))["platform"] == platform]
         history_rows, blocked = history(catalog)
         index = campaign_index(catalog)
+        if platform == "tiktok":
+            return tiktok_channel(conn, manifest, day, index, history_rows, blocked, ad_sites)
         amounts, ads = defaultdict(int), defaultdict(int)
         for (payload,) in conn.execute("SELECT payload FROM effects WHERE platform=? AND dt=?", (platform, day)):
             fact = json.loads(payload)
@@ -232,7 +265,7 @@ def own_channel(app, day, platform, now, *, end=None, enforce_fresh=True, wareho
     settings.update(SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + (300 if end != day else 150),
                     SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                     SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2)
-    if day == end and day >= FIRST_DAY:
+    if day == end and (day >= FIRST_DAY or platform == "tiktok"):
         return warehouse_channel(settings, warehouse or warehouse_snapshot(app), day, platform, now, enforce_fresh)
     catalog, errors = read_catalogs(settings, [platform])
     histories, blocked = history(catalog)
@@ -277,6 +310,9 @@ def compare(candidates, own, day):
             pending.append(dict(platform=platform, drama=drama,
                                 reason=(channel or {}).get("error", "drama_attribution_unverified")))
             continue
+        if platform == "tiktok" and channel.get("unassigned_drama_income") and not channel["amounts"].get(drama):
+            pending.append(dict(platform=platform, drama=drama, reason="tiktok_drama_income_unverified"))
+            continue
         # A missing grouped row is zero only after the complete site/date and
         # attribution checks above, never because a source returned no rows.
         amount = channel["amounts"].get(drama, 0)
@@ -291,6 +327,8 @@ def compare(candidates, own, day):
         own_complete = channel.get("iaa_complete", True)
         if not (sk_complete and own_complete):
             pending.append(dict(platform=platform, drama=drama, reason="iaa_pending"))
+            if platform == "tiktok":
+                continue
         elif row["revenue_cents"] >= MIN_SOCIALKIT_CENTS and amount * 2 < row["revenue_cents"]:
             reasons.append("large_revenue_gap")
         if not reasons:

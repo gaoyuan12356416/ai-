@@ -22,6 +22,8 @@ PLATFORMS = {
     "facebook": {"label": "Facebook", "storage_alias_length": None,
                  "sources": [{"site_id": "2049", "label": "旧自动发布"},
                              {"site_id": "2310", "label": "手动发布"}]},
+    "tiktok": {"label": "TikTok", "site_id": "2250", "storage_alias_length": None,
+               "sources": [{"site_id": "2250", "label": "TikTok 自营"}]},
 }
 MAX_CATALOG_ROWS = 100000
 
@@ -292,6 +294,11 @@ def read_catalogs(app, platforms):
     }
     for platform in platforms:
         try:
+            if platform == "tiktok":
+                from .tiktok import read_tiktok
+                from .tiktok_scope import stamp_site_tenant
+                catalog.extend(stamp_site_tenant(read_tiktok(app), app))
+                continue
             if platform == "facebook":
                 from .facebook import read_facebook
                 values, failures, metadata = read_facebook(app)

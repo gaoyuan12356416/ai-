@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from .collector import comparison_period
 
-LABELS = {"facebook": "Facebook", "youtube": "YouTube", "x": "X"}
+LABELS = {"facebook": "Facebook", "youtube": "YouTube", "x": "X", "tiktok": "TikTok"}
 MAX_BYTES = 24000
 MAX_ITEMS = 10
 

@@ -7,6 +7,8 @@ from .report import require_complete
 from features.social_analytics.bill_income import FIRST_DAY
 from scripts.post_daily_report import atomic_write
 
+PREPARED_VERSION = 2  # Includes TikTok site-wide income and separate unassigned income.
+
 
 def save(state, day, chat_id, report):
     require_complete(report)
@@ -14,7 +16,7 @@ def save(state, day, chat_id, report):
         raise ValueError("prepared_report_date_mismatch")
     path = Path(state) / "prepared" / day / "report.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(path, json.dumps(dict(chat_id=chat_id, report=report),
+    atomic_write(path, json.dumps(dict(version=PREPARED_VERSION, chat_id=chat_id, report=report),
                                   ensure_ascii=False, indent=2))
     return path
 
@@ -31,6 +33,8 @@ def load(state, day, chat_id):
     if datetime.fromisoformat(report["prepared_at"]).tzinfo is None:
         raise ValueError("prepared_report_timestamp_invalid")
     if day >= FIRST_DAY and "iaa_sites" not in report.get("quality", {}).get("billing", {}):
+        return None
+    if value.get("version") != PREPARED_VERSION:
         return None
     require_complete(report)
     return report

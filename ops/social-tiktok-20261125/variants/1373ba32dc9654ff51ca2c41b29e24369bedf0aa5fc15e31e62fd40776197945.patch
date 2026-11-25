@@ -1,0 +1,117 @@
+--- a/module
++++ b/module
+@@ -8,6 +8,7 @@
+ from features.youtube_analytics.report import ReportError, add as legacy_add
+ from features.youtube_analytics.titles import display_title
+ from .adapters import PLATFORMS, platform_metadata, source_key, source_site
++from .tiktok_scope import site_tenant, unassigned_row, unassigned_visible, UNASSIGNED
+ 
+ DIMENSIONS = ("date", "owner", "platform", "drama", "channel", "link_type", "language")
+ FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents")
+@@ -71,7 +72,7 @@
+         filters[key] = set(values)
+     if filters["platform"] - set(PLATFORMS):
+         raise ReportError("渠道尚未接入")
+-    if filters["link_type"] - {"auto", "manual", "auto_template", "system", "pool", "group_pool"}:
++    if filters["link_type"] - {"auto", "manual", "auto_template", "system", "pool", "group_pool", "tt_post"}:
+         raise ReportError("链接类型无效")
+     search = one("search", "").strip()
+     if len(search) > 200 or any(ord(c) < 32 for c in search):
+@@ -86,6 +87,8 @@
+ 
+ 
+ def visible(row, actor):
++    if row.get("platform") == "tiktok" and row.get("owner") == UNASSIGNED:
++        return unassigned_visible(row, actor)
+     if actor.get("_system_report") is True:
+         return True
+     return (bool(actor.get("tenant_key")) and bool(actor.get("user_id"))
+@@ -132,11 +135,16 @@
+ 
+ def options(catalog, actor):
+     by_id = campaign_index(catalog)
++    tt_tenant = site_tenant(catalog)
+     values = {dimension: {} for dimension in DIMENSIONS[1:]}
+     for candidates in by_id.values():
+         row = resolve(candidates)
++        if not row and candidates and candidates[0]["platform"] == "tiktok":
++            row = unassigned_row(candidates, tt_tenant, "9999-12-31")
+         if row and visible(row, actor):
+             for dimension in values:
++                if not row[dimension]:
++                    continue
+                 values[dimension][row[dimension]] = row.get(dimension + "_label", row[dimension])
+     # A selected channel may have no campaigns yet. It still needs a visible
+     # unavailable state and must never disappear into a misleading total.
+@@ -204,6 +212,7 @@
+     start, end = date.fromisoformat(params["start"]), date.fromisoformat(params["end"])
+     days = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+     platforms = params["platforms"]
++    tt_tenant = site_tenant(catalog)
+     by_id = campaign_index(catalog)
+     resolved = {key: resolve(candidates) for key, candidates in by_id.items()}
+     specs = {source_key(platform, spec["site_id"]): dict(spec, platform=platform)
+@@ -245,6 +254,8 @@
+             if "owner" in params["groups"]:
+                 groups[key]["owner_tenant"] = row["tenant"]
+         add(groups[key], value)
++        if row["platform"] == "tiktok" and row["owner"] == UNASSIGNED:
++            groups[key]["tiktok_unassigned_cents"] = groups[key].get("tiktok_unassigned_cents", 0) + value.get("revenue_cents", 0)
+         add(totals, value)
+         add(trend[row["date"]], value)
+         add(platform_values[row["platform"]], value)
+@@ -273,6 +284,16 @@
+         quality_visible = actor.get("_system_report") is True or (
+             actor.get("role") == "admin" and bool(candidates)
+             and all(candidate.get("tenant") == actor.get("tenant_key") for candidate in candidates))
++        if platform == "tiktok":
++            if metric.get("tiktok_unassigned") or not row:
++                group = unassigned_row(candidates, metric.get("tiktok_site_tenant", tt_tenant), day)
++                if selected(group) and not failure(catalog_errors, source_id):
++                    add(quality["source"], metric)
++                    add(quality["unmatched"], metric)
++                    quality["unmatched_keys"].add(key[2])
++                    emit(group, metric)
++                continue
++            quality_visible = selected(row)
+         if quality_visible:
+             add(quality["source"], metric)
+         if row:
+@@ -298,7 +319,10 @@
+         for fact in row.get("publications", []):
+             publications[fact["id"]].append((row, fact))
+         if not resolved.get(key):
+-            continue
++            if row["platform"] != "tiktok" or row.get("excluded"):
++                continue
++            group = unassigned_row([row], tt_tenant, "9999-12-31")
++            row = {**row, **group, "date": row["date"]}
+         if selected(row) and row["link_id"] not in counted_links and row["date"] in trend:
+             counted_links.add(row["link_id"])
+             emit(row, {"links": 1})
+@@ -308,6 +332,16 @@
+     publication_conflicts_by_platform = defaultdict(int)
+     publication_conflicts_by_source = defaultdict(int)
+     for candidates in publications.values():
++        if (candidates[0][0]["platform"] == "tiktok"
++                and len({(fact["date"], fact["kind"]) for _, fact in candidates}) == 1
++                and (any(not resolved.get((row["platform"], row["site_id"], row["key"][0])) for row, _ in candidates)
++                     or len({identity(row) for row, _ in candidates}) != 1)):
++            day = candidates[0][1]["date"]
++            eligible = [row for row, _ in candidates if not row.get("excluded")]
++            group = unassigned_row(eligible, tt_tenant, day)
++            if eligible and day in trend and selected(group):
++                emit(group, {"published_count": 1})
++            continue
+         if (len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1
+                 or any(not resolved.get((row["platform"], row["site_id"], row["key"][0]))
+                        for row, _ in candidates)):
+@@ -435,7 +469,7 @@
+     missing_dates = [day for day in days if any(day not in populated[key] for key in specs)]
+     warnings = [
+         "效果按 UTC 自然日统计，覆盖全部历史链接；发布量按确认完成的 UTC 日期去重。",
+-        "按渠道站点内 campaign ID 唯一关联发布表或链接账本；名称与 af_channel 不参与效果归因。",
++        "按渠道站点内 campaign ID 关联发布账本。TikTok 还须匹配冻结短链上的完整活动名。",
+         "转化数采用源表充值人数；跨日期累加每日人数，未做跨日用户去重。",
+         "手动短链仅计效果及生成链接数；X 中转源 Post 不重复计入目标账号发布量。",
+     ]

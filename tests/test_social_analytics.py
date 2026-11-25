@@ -172,8 +172,8 @@ class AttributionTests(unittest.TestCase):
     def test_parameters_defaults_and_validation(self):
         value = report.parameters({})
         self.assertEqual(value["groups"], ["owner", "platform"])
-        self.assertEqual(value["platforms"], ["youtube", "x", "facebook"])
-        for query in ({"platform": ["tiktok"]}, {"group_by": ["owner,owner"]},
+        self.assertEqual(value["platforms"], ["youtube", "x", "facebook", "tiktok"])
+        for query in ({"platform": ["unconfigured"]}, {"group_by": ["owner,owner"]},
                       {"group_by": ["owner,drama,channel,date"]}, {"surprise": ["yes"]}):
             with self.assertRaises(report.ReportError):
                 report.parameters(query)
@@ -310,7 +310,7 @@ class SharedCollectorTests(unittest.TestCase):
             return [metric()], "now"
         with patch.object(routes, "read_catalogs", return_value=([catalog(), catalog("x")], {})), \
                 patch.object(routes, "source", side_effect=source):
-            result = routes.build_report({}, SYSTEM, {"start": [DAY], "end": [DAY]})
+            result = routes.build_report({}, SYSTEM, {"start": [DAY], "end": [DAY], "platform": ["youtube", "x"]})
         self.assertEqual(result["totals"]["revenue"], 1)
         self.assertEqual(result["quality"]["platforms"]["x"]["state"], "unavailable")
         self.assertIsNone(result["platform_totals"]["x"]["revenue"])
