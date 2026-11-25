@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh shared FB planning catalog from the read-only replica
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/fb-planner-catalog
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fb-planner-catalog/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 -B scripts/fb_catalog_refresh.py
+Nice=8
+TimeoutStartSec=3h

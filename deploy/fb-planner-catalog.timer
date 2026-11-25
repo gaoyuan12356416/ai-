@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for newly triggered FB catalog work
+
+[Timer]
+OnCalendar=*-*-* *:*:05
+AccuracySec=2s
+Unit=fb-planner-catalog.service
+
+[Install]
+WantedBy=timers.target
