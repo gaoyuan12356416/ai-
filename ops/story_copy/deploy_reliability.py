@@ -57,6 +57,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "prepare-central-update", "apply-central", "apply-fb", "rollback"))
     parser.add_argument("folder", type=Path)
+    parser.add_argument("--fb-release", type=Path, help="FB reader release when a separate central deployment followed it")
     args = parser.parse_args()
     folder = args.folder.resolve()
     if (folder.parent != Path("/mnt/data-disk/story-copy-deploy") or not os.path.ismount("/mnt/data-disk")
@@ -72,12 +73,15 @@ if __name__ == "__main__":
     elif args.action == "prepare-central-update":
         previous = d.CENTRAL.resolve(strict=True).parent
         previous_record = json.loads((previous / "record.json").read_text())
-        if previous_record["commit"] != d.read("git", "-C", SOURCE, "rev-parse", "HEAD^"):
-            raise RuntimeError("inspect the newer central release before applying this update")
+        d.run("git", "-C", SOURCE, "merge-base", "--is-ancestor", previous_record["commit"], "HEAD")
+        fb_release = args.fb_release or Path(previous_record.get("fb_reliability_release", previous))
+        fb_manifest = json.loads((fb_release / "fb" / "manifest.json").read_text())
+        d.run("git", "-C", SOURCE, "merge-base", "--is-ancestor", fb_manifest["caption_commit"], "HEAD")
         central.FILES = ("features/story_copy/sources.py", "features/story_copy/store.py")
         central.prepare(folder, base=previous_record["commit"])
         record = json.loads((folder / "record.json").read_text())
-        d.save(folder, dict(record, previous_reliability_release=str(previous)))
+        d.save(folder, dict(record, previous_reliability_release=str(previous),
+                            fb_reliability_release=str(fb_release.resolve())))
     elif args.action == "apply-central":
         central.switch(folder, False)
     elif args.action == "apply-fb":
@@ -85,10 +89,13 @@ if __name__ == "__main__":
     else:
         current = folder
         record = json.loads((current / "record.json").read_text())
+        fb_release = record.get("fb_reliability_release")
         while "previous_reliability_release" in record:
             if d.CENTRAL.resolve() == Path(record["candidate"]):
                 central.switch(current, True)
             current = Path(record["previous_reliability_release"])
             record = json.loads((current / "record.json").read_text())
-        switch_fb(current / "fb", True)
-        central.switch(current, True)
+        fb_root = Path(fb_release) if fb_release else current
+        switch_fb(fb_root / "fb", True)
+        if current == fb_root:
+            central.switch(current, True)
