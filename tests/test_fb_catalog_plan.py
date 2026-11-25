@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -38,7 +39,7 @@ class PlanTests(unittest.TestCase):
                                mysql=SimpleNamespace(schema='main', blacklist_schema='blocked'))
         cfg = dict(product='Dramawave', metric_product='Dramawave',metric_platform=0,metric_window_days=1,
                    material_rule=rule, drama_rule=rule,drama_cooldown_hours=12,_profile_selection=True)
-        facts = {cid:dict(name=cid,resource_type='2',deploy_time=1,language='en') for cid in 'abc'}
+        facts = {cid:dict(name=cid,resource_type_v2='2',deploy_time=1,language='en') for cid in 'abc'}
         desc = {('a','en'):'one',('c','en'):'three'}
         labels = {(cid,'en'):dict(audience='y' if cid=='c' else 'x',themes=[]) for cid in 'abc'}
         groups = {('a',''):[1,2,3],('b','en'):[4],('c','en'):[5],('a','fr'):[6],('missing','en'):[7]}
@@ -49,9 +50,8 @@ class PlanTests(unittest.TestCase):
                     for mid in ids if mid in valid}
         with patch.object(catalog, 'BrokerReadOnlyMySQL', return_value=repo.mysql), \
              patch.object(catalog.Catalog,'index',return_value=groups), \
-             patch.object(catalog.Catalog,'drama_facts',return_value=(facts,desc)), \
-             patch.object(catalog.Catalog,'hydrate',hydrate), \
-             patch('features.fb_auto_posts.profile_selection.load_classifications',return_value=labels):
+             patch.object(catalog.Catalog,'drama_facts',return_value=(facts,desc,labels,'')), \
+             patch.object(catalog.Catalog,'hydrate',hydrate):
             res = catalog.snapshots(repo,cfg,{('en',True),('en',False),('fr',False),('fr',True)})
         actual = {scope:[x.material_id for x in snap.candidates] for scope,snap in res.items()}
         self.assertEqual(actual, {('en',True):['1','2','5'],('en',False):['1','2','5'],
@@ -64,3 +64,22 @@ class PlanTests(unittest.TestCase):
         for direction in ['asc','desc']:
             rule = dict(sort_by='roas',sort_direction=direction)
             self.assertLess(catalog.rank(known,rule),catalog.rank(zero,rule))
+
+    def test_resource_variants_and_splitting(self):
+        def query(sql, args):
+            if 'SELECT app FROM' in sql:
+                return [{'app':'android'}] if len(args)==1 else []
+            if 'ads_drama_info d FORCE' in sql:
+                if 'different' in args and 'same' in args:
+                    raise catalog.RepositoryError('source_query_timeout','fixture',503)
+                return [dict(id='10',content_id=args[0],app_id='1479',release_status='1',deploy_time='10',
+                             language='en',name='d',series_code='s',resource_type='2',resource_type_v2='1')]
+            return [dict(content_id=args[1],app_id='1479',language='en',description=text)
+                    for text in (['A','a','A'] if args[1]=='different' else ['A','A'])]
+        mysql=SimpleNamespace(schema='main',blacklist_schema='blocked',select=query)
+        cfg=dict(product='Dramawave',app_id='1479',drama_rule={},message_template='{{desc}}')
+        with patch.object(catalog,'BrokerReadOnlyMySQL',return_value=mysql), ThreadPoolExecutor(1) as pool:
+            cat=catalog.Catalog(None,cfg,{('en',True)},datetime.now(timezone.utc),pool)
+            facts,copy,_,_=cat.drama_facts(['different','same'])
+        self.assertEqual(set(facts),{'same','different'})
+        self.assertEqual(copy,{('same','en'):'A'})

@@ -25,11 +25,14 @@ def prepare(folder):
     commit = verify_source(SOURCE, 'HEAD')
     link, _, db = release.settings('fb')
     old, candidate = link.resolve(), folder / 'candidate'
+    baseline = json.loads((old.parent/'manifest.json').read_text())['commit']
+    subprocess.run(['git','-C',str(SOURCE),'merge-base','--is-ancestor',BASE,baseline],check=True)
+    subprocess.run(['git','-C',str(SOURCE),'merge-base','--is-ancestor',baseline,commit],check=True)
     folder.mkdir(exist_ok=False)
     folder.chmod(0o755)
     shutil.copytree(old, candidate, symlinks=True, ignore=shutil.ignore_patterns('.git','__pycache__','*.pyc'))
     preserve_tree_owners(old, candidate)
-    patch = subprocess.check_output(['git','-C',str(SOURCE),'diff','--binary',BASE,commit,'--',*FILES,TEST])
+    patch = subprocess.check_output(['git','-C',str(SOURCE),'diff','--binary',baseline,commit,'--',*FILES,TEST])
     subprocess.run(['git','apply','--check','-'],cwd=candidate,input=patch,check=True)
     subprocess.run(['git','apply','-'],cwd=candidate,input=patch,check=True)
     for path in (*FILES, TEST):

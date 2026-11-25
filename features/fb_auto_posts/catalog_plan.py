@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, timezone
 from heapq import nsmallest
 from itertools import islice
-from types import SimpleNamespace
 import time
 
 from features.material_products import contains as has_product, selected
@@ -69,7 +68,7 @@ class Catalog:
             try:
                 return self.mysql.select(sql, args)
             except TemplateError as exc:
-                if exc.code not in {'source_busy', 'source_query_timeout','source_connection_failed'} or attempt == 2:
+                if exc.code not in {'source_busy', 'source_connection_failed'} or attempt == 2:
                     raise RepositoryError(exc.code, '素材目录只读查询暂不可用', 503) from exc
                 time.sleep(attempt + 1)
 
@@ -115,44 +114,96 @@ class Catalog:
                 print(f'fb_catalog_index ranges={index}/{hi // 64000 + 1}', flush=True)
         return groups
 
+    def resource_apps(self):
+        # aacn starts with (app_id, app). Walk its distinct app keys without
+        # scanning episode rows. Android, iOS and any future app all participate.
+        apps = []
+        while True:
+            after = ' AND app>%s' if apps else ''
+            args = (self.config['app_id'], apps[-1]) if apps else (self.config['app_id'],)
+            rows = self.select(f"""SELECT app FROM {self.schema}.ads_drama_resource FORCE INDEX(aacn)
+                                    WHERE app_id=%s{after} ORDER BY app LIMIT 1""", args)
+            if not rows:
+                return apps
+            apps.append(rows[0]['app'])
+
+    def read_batches(self, fn, ids, size):
+        def read(batch):
+            try:
+                return [fn(batch)]
+            except RepositoryError as exc:
+                if len(batch) < 2 or exc.code not in {'source_query_failed', 'source_query_timeout',
+                                                      'source_result_too_large','source_readonly_check_failed'}:
+                    raise
+                middle = len(batch) // 2
+                return read(batch[:middle]) + read(batch[middle:])
+        for results in self.pool.map(read, batches(ids, size)):
+            yield from results
+
     def drama_facts(self, ids):
-        types = self.config['drama_rule'].get('resource_type_v2') or []
-        type_sql = ' AND CAST(d.resource_type_v2 AS CHAR) IN (' + placeholders(types) + ')' if types else ''
+        from features.x_tag_revenue.taxonomy import classification_index
+        types = {str(t) for t in self.config['drama_rule'].get('resource_type_v2') or []}
+        with_classes = bool(self.config.get('_profile_selection'))
+        apps = self.resource_apps() if self.required_description or with_classes else []
         def chunk(batch):
-            marks = placeholders(batch)
-            rows = self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ d.id,TRIM(d.content_id) cid,
-                     d.name,d.language,d.deploy_time,CAST(d.resource_type_v2 AS CHAR) resource_type
+            rows = self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ d.id,d.content_id,d.app_id,
+                     d.name,d.language,d.series_code,d.resource_type,d.deploy_time,d.release_status,
+                     CAST(d.resource_type_v2 AS CHAR) resource_type_v2
                   FROM {self.schema}.ads_drama_info d FORCE INDEX(ac)
-                 WHERE d.content_id IN ({marks}) AND d.app_id=%s AND d.release_status=1
-                   AND d.deploy_time>0 AND d.deploy_time<=%s{type_sql}
+                 WHERE d.content_id IN ({placeholders(batch)}) AND d.app_id=%s
                    AND NOT EXISTS (SELECT 1 FROM {self.blacklist} b WHERE b.is_delete=0
                                     AND b.type=1 AND b.content_id=d.content_id)
                    AND NOT EXISTS (SELECT 1 FROM {self.schema}.ads_drama_info other FORCE INDEX(ac)
                                     JOIN {self.blacklist} b ON b.content_id=other.series_code
                                      AND b.is_delete=0 AND b.type=0
                                    WHERE other.content_id=d.content_id AND other.app_id=d.app_id)""",
-                               (*batch, self.config['app_id'], self.end_epoch, *types))
+                               (*batch, self.config['app_id']))
             details = {}
             for row in rows:
-                current = details.get(row['cid'])
-                if current is None or int(current['id']) < int(row['id']):
-                    details[row['cid']] = row
+                cid = row['content_id'].strip()
+                if (str(row['release_status']) != '1' or not 0 < int(row['deploy_time'] or 0) <= self.end_epoch
+                        or (types and str(row['resource_type_v2']) not in types)):
+                    continue
+                if cid not in details or int(details[cid]['id']) < int(row['id']):
+                    details[cid] = row
+            resources = []
             descriptions = {}
-            if details and self.required_description:
-                rows = self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ TRIM(r.content_id) cid,
-                              LOWER(TRIM(r.language)) lang,MAX(TRIM(r.`desc`)) description
-                         FROM {self.schema}.ads_drama_resource r FORCE INDEX(content_id)
-                        WHERE r.content_id IN ({placeholders(details)}) AND r.app_id=%s AND r.type=2
-                          AND TRIM(COALESCE(r.`desc`,''))<>''
-                        GROUP BY r.content_id,LOWER(TRIM(r.language))
-                       HAVING COUNT(DISTINCT BINARY TRIM(r.`desc`))=1""", (*details, self.config['app_id']))
-                descriptions = {(row['cid'], row['lang']): _description(row['description']) for row in rows}
-            return details, descriptions
-        facts, descriptions = {}, {}
-        for detail, copy in self.pool.map(chunk, batches(ids, 500)):
+            if details and apps:
+                profile_cols = ',r.series_code,r.labels' if with_classes else ''
+                desc_col = ",CASE WHEN r.type=2 THEN BINARY TRIM(r.`desc`) ELSE NULL END description" if self.required_description else ''
+                filter_type = '' if with_classes else ' AND r.type=2'
+                resources = self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT r.content_id,r.app_id,
+                              r.language{profile_cols}{desc_col}
+                         FROM {self.schema}.ads_drama_resource r FORCE INDEX(actcld)
+                        WHERE r.app IN ({placeholders(apps)}) AND r.content_id IN ({placeholders(details)})
+                          AND r.app_id=%s{filter_type}""", (*apps, *details, self.config['app_id']))
+                for row in resources:
+                    text = row.get('description')
+                    if text:
+                        key = (row['content_id'].strip(), str(row['language'] or '').strip().lower())
+                        previous = descriptions.setdefault(key, text)
+                        if previous != text:
+                            descriptions[key] = None
+            classifications, profile_error = {}, ''
+            if details and with_classes:
+                # Description differences can split otherwise identical rows.
+                # The original taxonomy consumes distinct resource identities.
+                unique = {(r['content_id'], r['app_id'], r['language'], r['series_code'], r['labels']): r
+                          for r in resources}
+                try:
+                    classifications = classification_index(list(unique.values()),
+                        [r for r in rows if r['content_id'].strip() in details])
+                except Exception:
+                    profile_error = 'candidate_metadata_unavailable'
+            return details, {k: _description(v) for k, v in descriptions.items() if v}, classifications, profile_error
+
+        facts, descriptions, classes, error = {}, {}, {}, ''
+        for detail, copy, labels, failed in self.read_batches(chunk, ids, 160):
             facts.update(detail)
             descriptions.update(copy)
-        return facts, descriptions
+            classes.update(labels)
+            error = error or failed
+        return facts, descriptions, {} if error else classes, error
 
     def hydrate(self, ids):
         predicate, args = self.source_predicate()
@@ -162,7 +213,7 @@ class Catalog:
                       FROM {self.schema}.ads_custom_source s FORCE INDEX(PRIMARY)
                      WHERE s.id IN ({placeholders(batch)}) AND {predicate}""", (*batch, *args))
         result = {}
-        for rows in self.pool.map(chunk, batches(ids, 500)):
+        for rows in self.read_batches(chunk, ids, 500):
             for row in rows:
                 url = _https(row['url'])
                 if url:
@@ -194,7 +245,8 @@ def snapshots(repo, config, scopes):
         zero = MetricTotals()
         drama_rule, rule = config['drama_rule'], config['material_rule']
         ids = sorted({cid for cid, _ in raw if matches(metrics.by_drama.get(cid, zero), drama_rule)})
-        facts, descriptions = cat.drama_facts(ids)
+        print(f'fb_catalog_index_complete sources={len(ids)}', flush=True)
+        facts, descriptions, classes, profile_error = cat.drama_facts(ids)
         print(f'fb_catalog_facts sources={len(ids)} eligible={len(facts)}', flush=True)
         by_group = defaultdict(list)
         for (cid, raw_lang), mids in raw.items():
@@ -203,18 +255,6 @@ def snapshots(repo, config, scopes):
                 if lang in cat.languages and ((lang, False) in scopes or descriptions.get((cid, lang))):
                     by_group[lang, cid].extend(mids)
         del raw
-        classes, profile_error = {}, ''
-        if config.get('_profile_selection'):
-            from .profile_selection import load_classifications
-            try:
-                class_ids = sorted({cid for _, cid in by_group})
-                reader = SimpleNamespace(schema=cat.mysql.schema, select=cat.select)
-                for classified in pool.map(lambda batch: load_classifications(reader, batch), batches(class_ids, 500)):
-                    classes.update(classified)
-            except Exception:
-                profile_error = 'candidate_metadata_unavailable'
-                classes.clear()
-
         limit = min(repo.candidate_limit, config.get('_candidate_limit', repo.candidate_limit))
         per_drama = min(limit, 20) if config.get('drama_cooldown_hours') else limit
         scores = {None: rank(zero, rule)}
@@ -264,7 +304,7 @@ def snapshots(repo, config, scopes):
                         drama, mat, fact = metrics.by_drama.get(cid, zero), history.get((cid, str(mid)), zero), facts[cid]
                         loaded[mid] = MaterialCandidate(str(mid), cid, url, str(row['name'] or '')[:500],
                             str(fact['name'] or '')[:500], lang, _decimal(row['video_duration']), mat.spend, mat.roas,
-                            drama.spend, drama.roas, str(fact['resource_type'] or ''), descriptions.get((cid, lang), ''),
+                            drama.spend, drama.roas, str(fact['resource_type_v2'] or ''), descriptions.get((cid, lang), ''),
                             str(row['tag_name'] or '').strip()[:255], int(fact['deploy_time']))
                         continue
                 blocked.add(mid)
