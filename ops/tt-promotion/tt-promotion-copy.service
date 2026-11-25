@@ -8,6 +8,6 @@ WorkingDirectory=/opt/tt-promotion/current
 Environment=HOME=/root
 ExecStart=/usr/bin/python3 -B -m features.tt_promotion.pub_copy
 NoNewPrivileges=yes
-ProtectSystem=strict
+ProtectSystem=full
 PrivateTmp=yes
 ReadWritePaths=/mnt/data-disk/tt-promotion /mnt/data-disk/story-copy/work /root/.codex

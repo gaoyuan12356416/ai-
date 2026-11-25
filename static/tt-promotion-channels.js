@@ -151,7 +151,7 @@
         await openDetail(account);notify("已保存该频道的新版发布策略。",true);
       }catch(error){
         if(form.isConnected && error.status===409){
-          const retry=id("recheck-policy");retry.hidden=false;retry.onclick=()=>policyEditor({...channel,policy_configured:true,publish_policy});
+          const retry=id("recheck-policy");retry.hidden=false;retry.onclick=()=>policyEditor({...channel,policy_configured:true,publish_policy}).catch(e=>notify(e.message,true));
         }
         throw error;
       }finally{if(form.isConnected){saving=false;validate();}}

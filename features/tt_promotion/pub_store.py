@@ -1,4 +1,5 @@
 """Independent promotion scheduling facts. Native TT tasks live in this database too."""
+
 import contextlib
 import json
 import sqlite3
@@ -21,24 +22,24 @@ def iso(value):
 
 
 def dump(v):
-    return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def load(v):
-    return json.loads(v or '{}')
+    return json.loads(v or "{}")
 
 
 @contextlib.contextmanager
 def connection(path, *, write=False):
-    uri = Path(path).resolve().as_uri() + ('?mode=rw' if write else '?mode=ro')
+    uri = Path(path).resolve().as_uri() + ("?mode=rw" if write else "?mode=ro")
     db = sqlite3.connect(uri, uri=True, timeout=10)
     db.row_factory = sqlite3.Row
     try:
-        db.execute('pragma foreign_keys=on')
+        db.execute("pragma foreign_keys=on")
         if write:
-            db.execute('begin immediate')
+            db.execute("begin immediate")
         else:
-            db.execute('pragma query_only=on')
+            db.execute("pragma query_only=on")
         yield db
         if write:
             db.commit()
@@ -108,22 +109,25 @@ CREATE VIEW IF NOT EXISTS tt_promotion_report_task AS
 
 def install(path):
     with connection(path, write=True) as db:
-        for statement in DDL.split(';'):
-            sql=statement.strip()
-            if not sql:continue
-            if sql.startswith('CREATE VIEW IF NOT EXISTS '):
-                definition=sql.replace('CREATE VIEW IF NOT EXISTS ','CREATE VIEW ',1)
-                view=definition.split()[2]
-                current=db.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",(view,)).fetchone()
-                if current and current['sql']!=definition:
-                    db.execute('DROP VIEW '+view)
+        for statement in DDL.split(";"):
+            sql = statement.strip()
+            if not sql:
+                continue
+            if sql.startswith("CREATE VIEW IF NOT EXISTS "):
+                definition = sql.replace("CREATE VIEW IF NOT EXISTS ", "CREATE VIEW ", 1)
+                view = definition.split()[2]
+                current = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='view' AND name=?", (view,)
+                ).fetchone()
+                if current and current["sql"] != definition:
+                    db.execute("DROP VIEW " + view)
             db.execute(sql)
         # The reserved business ID range also separates GPU jobs, four-code
         # broker keys, immutable redirect files and campaign IDs from legacy.
         row = db.execute("SELECT seq FROM sqlite_sequence WHERE name='tt_auto_task'").fetchone()
         if not row:
-            if db.execute('SELECT 1 FROM tt_auto_task LIMIT 1').fetchone():
+            if db.execute("SELECT 1 FROM tt_auto_task LIMIT 1").fetchone():
                 raise ValueError("独立数据库中发现未分配新版号段的任务")
-            db.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('tt_auto_task',?)",(TASK_BASE,))
+            db.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('tt_auto_task',?)", (TASK_BASE,))
         elif row[0] < TASK_BASE:
             raise ValueError("任务数据库与新版号段不一致")
