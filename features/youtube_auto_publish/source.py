@@ -155,6 +155,9 @@ class MaterialSource:
         except Exception:
             raise WorkflowError('material_query_failed','上传人查询失败，请稍后刷新',503) from None
 
+    def _list_snapshot(self, sql, search, uploader_id, compact):
+        return {'items': self._read(sql, search=search, uploader_id=uploader_id, compact=compact)}
+
     def list(self, search='', *, refresh=False, uploader_id='', compact=False):
         uploader_id = str(uploader_id or '').strip()
         if uploader_id and re.fullmatch(r'0|[1-9][0-9]{0,18}', uploader_id) is None:
@@ -165,10 +168,10 @@ class MaterialSource:
         cache_key=(sql,search,uploader_id,compact)
         if self.read_cache is not None:
             uploaders, uploader_meta = self.uploader_cache.read(sql, lambda: self._read_uploaders(sql), refresh=refresh)
-            rows, metadata = self.read_cache.read(cache_key, lambda: self._read(sql,search=search,uploader_id=uploader_id,compact=compact), refresh=refresh)
+            snapshot, metadata = self.read_cache.read(cache_key, lambda: self._list_snapshot(sql,search,uploader_id,compact), refresh=refresh)
             metadata['refreshing'] = metadata['refreshing'] or uploader_meta['refreshing']
             metadata['error'] = metadata['error'] or uploader_meta['error']
-            return dict(state,items=rows,uploaders=uploaders,cache=metadata)
+            return dict(state,uploaders=uploaders,cache=metadata,**(snapshot or {'items': []}))
         with self.lock:
             if refresh or not self.uploader_snapshot or self.uploader_snapshot[0]!=sql or time.monotonic()-self.uploader_snapshot[1]>300:
                 self.uploader_snapshot=(sql,time.monotonic(),self._read_uploaders(sql))

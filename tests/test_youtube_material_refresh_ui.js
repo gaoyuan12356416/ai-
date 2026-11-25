@@ -61,5 +61,26 @@ const ui = context.uiTest;
   ui.setup(view,async()=>{calls++;return {items:[item]};});
   await ui.readMaterials('',false,'1');
   assert.equal(calls,1);
+  let timer, delay;
+  context.setTimeout = (callback, ms) => { timer=callback; delay=ms; return 1; };
+  const transferView = {type:'picker',search:'',uploaderId:'947'};
+  let transferred = false;
+  ui.setup(transferView,async route => {
+    assert.match(route,/refresh=1/);
+    return {configured:true,items:transferred ? [{id:'88',name:'Ready'}] : [],
+      pending_transfers:transferred ? [] : [{id:'41',name:'Waiting <cut>'}],cache:{refreshing:false}};
+  });
+  await ui.loadMaterials(transferView,true);
+  assert.equal(delay,30000);
+  const html=ui.pickerView(transferView);
+  assert.match(html,/Waiting &lt;cut&gt;/);
+  assert.ok(!html.includes('data-id="41"'));
+  assert.equal(transferView.items.length,0);
+  transferred=true;
+  timer();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(transferView.items[0].id,'88');
+  assert.equal(transferView.pendingTransfers.length,0);
+  assert.equal(delay,60000);
   console.log('Passed: polling failure, explicit retry, retained material/selection, stale response isolation, failed cache refresh.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

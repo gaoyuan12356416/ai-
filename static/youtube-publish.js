@@ -509,22 +509,34 @@
     }).finally(() => materialReads.delete(key));
     materialReads.set(key,{promise:request,force}); return request;
   }
+  function scheduleMaterialRefresh(view) {
+    const delay = view.pendingTransfers?.length ? 30000 : 60000;
+    materialPollTimer = setTimeout(() => {
+      if (!stack.includes(view)) return;
+      if (document.hidden || top() !== view) scheduleMaterialRefresh(view);
+      else void loadMaterials(view,true);
+    },delay);
+  }
   async function loadMaterials(view, force = false, polling = false) {
     const search = view.search || '', uploaderId = view.uploaderId || '', key = materialKey(search,uploaderId), serial = ++materialSerial;
     clearTimeout(materialPollTimer);
     if (!polling) { view.pollStarted = Date.now(); view.pollUntil = Date.now() + 90000; }
     view.loading = true; view.error = ''; view.pollExpired = false;
     const cached = materialCache.get(key);
-    if (view.loadedKey !== key) { view.items = cached?.data.items || []; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
+    if (view.loadedKey !== key) { view.items = cached?.data.items || []; view.pendingTransfers = cached?.data.pending_transfers || []; view.transferError = cached?.data.transfer_status_unavailable; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
     renderModals();
     try {
       const data = await readMaterials(search,force,uploaderId);
       if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return;
       state.materials = data.items; view.items = data.items; view.uploaders = data.uploaders || []; view.cache = data.cache; view.cacheAt = materialCache.get(key)?.at || Date.now(); view.loadedKey = key;
+      view.pendingTransfers = data.pending_transfers || [];
+      view.transferError = data.transfer_status_unavailable;
       state.source = {configured:data.configured,message:data.message}; view.loading = false; showSource();
       if (data.cache?.refreshing) {
         if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && materialKey(view.search || '',view.uploaderId || '') === key) void loadMaterials(view,false,true); },!data.items.length && Date.now() - view.pollStarted < 5000 ? 400 : 2000);
         else view.pollExpired = true;
+      } else if (data.configured && !data.cache?.error) {
+        scheduleMaterialRefresh(view);
       }
       renderModals();
     } catch (error) {
@@ -682,13 +694,16 @@
   function pickerView(v) {
     const configured = state.source?.configured !== false, materials = v.items || [];
     const selected = m => v.regularSelection ? v.regularSelection.has(String(m.id)) : String(v.selected?.id) === String(m.id);
-    const cacheStatus = v.error ? '素材更新失败，请点击刷新素材重试。' : v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
+    const cacheStatus = v.error ? '素材更新失败，请点击刷新素材重试。' : v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '已查询可发布素材';
+    const pending = v.pendingTransfers || [];
+    const transferHint = v.transferError ? '<p class="field-hint" role="status">待转存记录暂时无法查询。</p>' : pending.length
+      ? `<details class="note-box note-amber"><summary>已收到 ${pending.length} 条待转存视频，完成后自动显示为可选素材</summary><ul>${pending.map(m => `<li>${esc(m.name)} · 入库 ID ${esc(m.id)}</li>`).join('')}</ul></details>` : '';
     const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
-    const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>${v.detailError ? `<div class="note-box note-error" role="alert">${esc(v.detailError)}</div>` : ''}`;
+    const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 查询于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>${v.detailError ? `<div class="note-box note-error" role="alert">${esc(v.detailError)}</div>` : ''}`;
     const uploaders = [...(v.uploaders || [])];
     if (v.uploaderId && !uploaders.some(u => String(u.id) === v.uploaderId)) uploaders.push({id:v.uploaderId,name:'用户 ' + v.uploaderId});
     const uploaderFilter = `<label class="material-uploader-filter" for="material-uploader"><span>上传人</span><select class="select" id="material-uploader" aria-label="上传人筛选"><option value="">全部上传人</option>${uploaders.map(u => `<option value="${esc(u.id)}" ${String(u.id) === (v.uploaderId || '') ? 'selected' : ''}>${esc(u.name)}${String(u.id) === '0' ? '' : '（' + esc(u.id) + '）'}</option>`).join('')}</select></label>`;
-    const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${selected(m) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${selected(m)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${selected(m) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
+    const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${transferHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${selected(m) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${selected(m)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${selected(m) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? (pending.length ? '等待视频转存完成' : '暂无符合条件的素材') : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
     if (v.regularSelection) {
       const n = v.regularSelection.size;
       return shell(v,'选择普通视频素材','可选择一条或多条自定义视频。',body,

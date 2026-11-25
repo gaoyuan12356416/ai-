@@ -20,9 +20,14 @@ class ReadCache:
             now = self.clock()
             entry = self.entries.get(key, {})
             age = max(0, now - entry['at']) if 'at' in entry else None
-            due = refresh or age is None or age >= self.ttl
+            due = refresh or entry.get('refresh_requested', False) or age is None or age >= self.ttl
             cooling = now < entry.get('retry_at', 0)
+            # A poll after a forced refresh must still start the read if all
+            # slots were busy while the previous snapshot was within its TTL.
+            if refresh and age is not None and key not in self.running and not cooling:
+                entry['refresh_requested'] = True
             if due and not cooling and key not in self.running and len(self.running) < self.workers:
+                entry.pop('refresh_requested', None)
                 self.running.add(key)
                 threading.Thread(target=self._load, args=(key, loader), daemon=True, name='youtube-read-cache').start()
             running = key in self.running
