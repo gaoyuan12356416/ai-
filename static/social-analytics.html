@@ -24,7 +24,7 @@
     <div id="fetch-report-status" class="analytics-message" role="status" aria-live="polite" hidden></div>
     <div id="page-message" class="analytics-message" role="status" aria-live="polite">正在加载报表…</div>
     <form id="report-filters" class="analytics-panel filter-panel" aria-label="报表筛选">
-      <fieldset id="filter-fields" disabled>
+      <fieldset id="date-fields" disabled>
         <div class="filter-heading"><h2>筛选与分组</h2><span>多条件组合，聚焦你关心的数据</span></div>
         <div class="date-search-row">
           <div class="date-field"><label for="date-start">开始日期 <small>UTC</small></label><input type="date" id="date-start" required></div>
@@ -33,6 +33,8 @@
           <div class="date-shortcuts" aria-label="日期快捷选择"><button type="button" data-range="yesterday">昨天</button><button type="button" data-range="today">今天</button><button type="button" data-days="7">近 7 天</button><button type="button" data-days="30">近 30 天</button></div>
           <label class="report-search"><span>搜索剧目</span><input type="search" id="report-search" placeholder="输入剧名或剧 ID" maxlength="200"></label>
         </div>
+      </fieldset>
+      <fieldset id="filter-fields" disabled>
         <div id="dimension-filters" class="dimension-filters"></div>
         <div class="group-row"><span class="group-label" id="group-label">分组维度 <small>最多 3 项</small></span><div class="group-choices" id="group-choices" role="group" aria-labelledby="group-label"></div></div>
         <div class="filter-actions"><span id="filter-hint">默认近 7 个完整自然日，截至昨日（UTC）。</span><button type="button" class="btn btn-secondary" id="reset-filters">重置</button><button type="submit" class="btn btn-primary" id="apply-filters">应用筛选</button></div>
@@ -82,6 +84,6 @@
 </div>
 <script src="/quick-nav.js?v=43969bd46e10"></script>
 <script src="/ui-topbar.js?v=20260903-1"></script>
-<script src="/report-refresh.js?v=20261125-1"></script><script src="/social-analytics.js?v=20261125-tiktok"></script>
+<script src="/report-refresh.js?v=20261125-1"></script><script src="/social-analytics.js?v=20261125-origin1-tiktok"></script>
 </body>
 </html>

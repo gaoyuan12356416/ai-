@@ -244,14 +244,14 @@
       "canonical": "43625673446cbc12f5772b00f88bf3900986700dd8177e5af24ec7e803561ff3"
     },
     "static/social-analytics.html": {
-      "after": "03b8b0a03c2bbbdd72eb555b69300752751605d1aa54e47f0d4ee9c2df24db43",
-      "before": "2f3d7a84bd00e0520fa487c7d2b6b2d0db0bfbf4c7889d4a1ed5b308d3c40e21",
-      "canonical": "03b8b0a03c2bbbdd72eb555b69300752751605d1aa54e47f0d4ee9c2df24db43"
+      "after": "40d7825b7a6bed82f00e63da4fe2ef7754731ba45036849b099925613ae55306",
+      "before": "e07cc9f2bce830baa65cba8ab8ef8d89158dda9727e5ffb93f443c4f9cd26566",
+      "canonical": "40d7825b7a6bed82f00e63da4fe2ef7754731ba45036849b099925613ae55306"
     },
     "static/social-analytics.js": {
-      "after": "2418322ba4874916469eadd13dc4ea6b1358eb148e96198d355efe42dbbde8de",
-      "before": "43ddb5e3dfe36b45a802cfe1ba985598e578636c96fbc201e153908947370ec1",
-      "canonical": "2418322ba4874916469eadd13dc4ea6b1358eb148e96198d355efe42dbbde8de"
+      "after": "832435b82b0da4287cec908cd8e7e0bcee19ca865d9ff37ace0245162a88ed76",
+      "before": "5540543a95e921a1b50407c7833fd1810a8195b33094a0a6f29e91708956f11c",
+      "canonical": "832435b82b0da4287cec908cd8e7e0bcee19ca865d9ff37ace0245162a88ed76"
     }
   }
 }

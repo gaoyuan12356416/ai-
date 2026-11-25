@@ -29,17 +29,23 @@
   let auth, options = {}, report = null, applied = null, allowed = false, dirty = false, busy = false;
   let epoch = 0, serial = 0, exportSerial = 0, exporting = false;
   let reportController, exportController;
-  let entryApplied = false;
+  let entryApplied = false, entryFiltersEdited = false;
   let platformMetadata = {}, metricApplicability = {};
   const refreshControls = window.bindReportRefresh?.({api:API, allowed:() => allowed, denied, reload:async () => {
     if (busy) return null;
+    const generation = epoch;
     const fresh = await request(API + '/options');
-    const selected = new Set([...document.querySelectorAll('#dimension-filters input:checked')].map(input => input.name + ':' + input.value));
+    if (generation !== epoch || !allowed) return null;
+    const selected = new URLSearchParams();
+    for (const input of document.querySelectorAll('#dimension-filters input:checked')) selected.append(input.name,input.value);
     options = fresh.options;
     renderFilterOptions();
     document.querySelectorAll('#dimension-filters .multi-filter').forEach(group => {
+      const values = selected.getAll(group.dataset.dimension);
+      if (!values.length) return;
+      fillFilterOptions(group);
       const inputs = [...group.querySelectorAll('input[type=checkbox]')];
-      for (const input of inputs) input.checked = selected.has(input.name + ':' + input.value);
+      for (const input of inputs) input.checked = values.includes(input.value);
       const count = inputs.filter(input => input.checked).length;
       group.querySelector('[data-count]').textContent = count ? '已选 ' + count : '全部';
     });
@@ -87,6 +93,7 @@
     reportController?.abort(); exportController?.abort();
     allowed = false; busy = false; exporting = false; applied = null; options = {};
     clearReport(); $('#dimension-filters').replaceChildren(); $('#filter-fields').disabled = true;
+    $('#date-fields')?.setAttribute('disabled','');
     $('#scope-label').textContent = '数据权限不可用';
     message(error.message || (error.status === 401 ? '登录已失效，请重新使用飞书登录。' : '暂无数据报表权限，请联系管理员。'),'error');
     if (error.status === 401) { auth = {...auth,authenticated:false}; UiTopbar.render({auth,userCard:'#userCard',authButton:'#authButton'}); }
@@ -128,7 +135,10 @@
     $('#report-head').querySelectorAll('button').forEach(button => { button.disabled = !usable; });
   }
   function markDirty() {
-    if (!allowed) return;
+    if (!allowed) {
+      if ($('#date-fields')?.disabled === false) entryFiltersEdited = true;
+      return;
+    }
     dirty = true;
     // Prevent a pending query/export from becoming the result of newly edited filters.
     if (busy) { ++serial; reportController?.abort(); busy = false; clearReport(); message('筛选条件已修改，请点击「应用筛选」查询。'); }
@@ -141,23 +151,36 @@
     $('#date-start').value = utcDate(start); $('#date-end').value = utcDate(end);
   }
   function renderFilterOptions() {
-    $('#dimension-filters').innerHTML = filterKeys.map(key => `<details class="multi-filter" data-dimension="${key}"><summary><span>${dimensions[key]}</span><strong data-count>全部</strong></summary><div class="filter-popover"><input type="search" class="option-search" aria-label="搜索${dimensions[key]}选项" placeholder="搜索${dimensions[key]}"><div class="filter-option-list">${(options[key] || []).map(item => `<label class="filter-option"><input type="checkbox" name="${key}" value="${esc(item.value)}"><span>${esc(item.label || item.value)}</span></label>`).join('')}<div class="filter-empty" ${(options[key] || []).length ? 'hidden' : ''}>暂无可选项</div></div><button type="button" class="filter-clear">清除选择</button></div></details>`).join('');
+    $('#dimension-filters').innerHTML = filterKeys.map(key => `<details class="multi-filter" data-dimension="${key}"><summary><span>${dimensions[key]}</span><strong data-count>全部</strong></summary><div class="filter-popover"><input type="search" class="option-search" aria-label="搜索${dimensions[key]}选项" placeholder="搜索${dimensions[key]}"><div class="filter-option-list"></div><button type="button" class="filter-clear">清除选择</button></div></details>`).join('');
+  }
+  function fillFilterOptions(detail) {
+    const list = detail.querySelector('.filter-option-list');
+    if (list.childElementCount) return;
+    const key = detail.dataset.dimension, items = options[key] || [];
+    list.innerHTML = items.map(item => `<label class="filter-option"><input type="checkbox" name="${key}" value="${esc(item.value)}"><span>${esc(item.label || item.value)}</span></label>`).join('') +
+      `<div class="filter-empty" ${items.length ? 'hidden' : ''}>暂无可选项</div>`;
   }
   function renderGroupOptions() {
     $('#group-choices').innerHTML = Object.entries(dimensions).map(([key,label]) => `<label class="group-choice"><input type="checkbox" name="group" value="${key}" ${defaultGroups.includes(key) ? 'checked' : ''}><span>${label}</span></label>`).join('');
   }
   function selectedGroups() { return Array.from(document.querySelectorAll('[name="group"]:checked'),n => n.value); }
   function updateGroupLimit() { const count = selectedGroups().length; document.querySelectorAll('[name="group"]').forEach(input => { input.disabled = !input.checked && count >= 3; }); }
-  function applyEntryQuery() {
-    const query = new URLSearchParams(location.search);
-    if (!query.size) return;
+  function initialDateAndSearch() {
+    dateRange(7);
+    const query = new URLSearchParams(entryApplied ? '' : location.search);
     for (const key of ['start','end']) {
       const value = query.get(key);
       if (/^\d{4}-\d{2}-\d{2}$/.test(value || '')) $('#date-' + key).value = value;
     }
     $('#report-search').value = (query.get('search') || '').slice(0,200);
+  }
+  function applyEntryQuery() {
+    const query = new URLSearchParams(location.search);
+    if (!query.size) return;
     for (const key of filterKeys) {
       const values = query.getAll(key);
+      if (!values.length) continue;
+      fillFilterOptions($('#dimension-filters [data-dimension="' + key + '"]'));
       document.querySelectorAll(`input[name="${key}"]`).forEach(input => {
         // Saved YouTube report URLs used unprefixed account IDs.
         input.checked = values.includes(input.value) || (key === 'channel' && query.getAll('platform').length === 1
@@ -180,7 +203,7 @@
     const query = readQuery(), original = new URLSearchParams(location.search);
     if ([...selectedGroups(),...Object.keys(metrics)].includes(original.get('sort'))) query.set('sort',original.get('sort'));
     if (['asc','desc'].includes(original.get('direction'))) query.set('direction',original.get('direction'));
-    if (/^[1-9]\d{0,3}$/.test(original.get('page') || '')) query.set('page',original.get('page'));
+    if (!entryFiltersEdited && /^[1-9]\d{0,3}$/.test(original.get('page') || '')) query.set('page',original.get('page'));
     return query;
   }
   function readQuery() {
@@ -199,6 +222,7 @@
   }
   async function loadReport(query) {
     if (!allowed) return;
+    if (busy && applied?.toString() === query.toString()) return false;
     const current = ++serial, generation = epoch;
     reportController?.abort(); exportController?.abort(); ++exportSerial; exporting = false;
     reportController = new AbortController(); busy = true; dirty = false; applied = new URLSearchParams(query);
@@ -345,19 +369,22 @@
   }
   async function initialize() {
     const generation = ++epoch; ++serial; ++exportSerial;
-    reportController?.abort(); exportController?.abort(); allowed = false; busy = false; exporting = false; dirty = false;
-    clearReport(); $('#filter-fields').disabled = true; message('正在核验权限并加载筛选项…');
+    reportController?.abort(); exportController?.abort(); allowed = false; busy = false; exporting = false; dirty = false; entryFiltersEdited = false;
+    clearReport(); options = {}; $('#dimension-filters').replaceChildren();
+    $('#date-fields')?.setAttribute('disabled',''); $('#filter-fields').disabled = true; message('正在核验权限并加载筛选项…');
     try {
       auth = await request('/api/ui/topbar'); if (generation !== epoch) return;
       UiTopbar.render({auth,userCard:'#userCard',authButton:'#authButton'});
       await Promise.resolve(QuickNav.render({container:'#quickNav',auth,activeKey:'socialAnalytics'})).catch(() => {});
       if (generation !== epoch) return;
       if (!auth.authenticated) { denied({status:401,message:'请先使用飞书登录后台，再查看数据报表。'}); return; }
+      initialDateAndSearch();
+      $('#date-fields')?.removeAttribute('disabled');
       const result = await request(API + '/options'); if (generation !== epoch) return;
       if (!result.options || filterKeys.some(key => !Array.isArray(result.options[key]))) throw new Error('筛选数据不完整，请点击「刷新数据」重试。');
       options = result.options; platformMetadata = result.platform_metadata || {}; metricApplicability = result.metric_applicability || {};
       allowed = true; renderFilterOptions(); renderGroupOptions(); updateGroupLimit(); scopeLabel(result.scope);
-      $('#filter-fields').disabled = false; dateRange(7); $('#report-search').value = ''; $('#page-size').value = '50';
+      $('#filter-fields').disabled = false; $('#page-size').value = '50';
       $('#ranking-metric').value = 'clicks';
       if (!entryApplied) { applyEntryQuery(); entryApplied = true; await loadReport(entryQuery()); }
       else await loadReport(readQuery());
@@ -365,16 +392,20 @@
   }
   const metricOptions = chartMetricKeys.map(key => `<option value="${key}">${metrics[key].label}</option>`).join('');
   $('#trend-metric').innerHTML = metricOptions; $('#ranking-metric').innerHTML = metricOptions;
-  $('#report-filters').addEventListener('submit',event => { event.preventDefault(); try { void loadReport(readQuery()); } catch (error) { message(error.message,'error'); } });
+  $('#report-filters').addEventListener('submit',event => { event.preventDefault(); if (!allowed) return; try { void loadReport(readQuery()); } catch (error) { message(error.message,'error'); } });
   $('#report-filters').addEventListener('change',event => {
     if (event.target.name === 'group') updateGroupLimit();
     const detail = event.target.closest('.multi-filter'); if (detail) { const count = detail.querySelectorAll('input[type=checkbox]:checked').length; detail.querySelector('[data-count]').textContent = count ? '已选 ' + count : '全部'; }
     markDirty();
   });
   $('#report-search').addEventListener('input',markDirty);
+  $('#dimension-filters').addEventListener('toggle',event => {
+    if (allowed && event.target.matches('details[open]')) fillFilterOptions(event.target);
+  },true);
   $('#dimension-filters').addEventListener('input',event => {
     if (!event.target.classList.contains('option-search')) return;
     const query = event.target.value.trim().toLowerCase(),detail = event.target.closest('.multi-filter'); let visible = 0;
+    fillFilterOptions(detail);
     detail.querySelectorAll('.filter-option').forEach(node => { const match = (node.textContent + ' ' + node.querySelector('input').value).toLowerCase().includes(query); node.hidden = !match; if (match) visible++; });
     const empty = detail.querySelector('.filter-empty'); empty.hidden = !!visible; empty.textContent = query ? '没有匹配选项' : '暂无可选项';
   });
