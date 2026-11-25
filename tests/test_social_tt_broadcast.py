@@ -5,6 +5,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from features.social_analytics.adapters import normalized
 from features.social_analytics.backend_scope import restrict
@@ -41,6 +42,60 @@ def group(name, iap, iaa):
 
 
 class TikTokBroadcastTests(unittest.TestCase):
+    def test_daily_waits_for_evidenced_purchases_and_preserves_other_channels(self):
+        from features.social_daily_report import billing
+        from features.social_daily_report.collector import present
+        from features.social_daily_report.report import require_complete
+
+        tt = post("1", "Post")
+        x = dict(tt, platform="x", platform_label="X", site_id="2116", owner="x-user", key=["x-post", ""],
+                 link_id="x-post", publications=[dict(id="x-post", date=DAY, kind="post")])
+        catalogs = [tt, x]
+        tt_fact = dict(metric("1", "Post", 500), conversions=1)
+        x_fact = dict(tt_fact, platform="x", site_id="2116", campaign_id="x-post", revenue_cents=100)
+        selected, facts, coverage, _ = restrict(catalogs, [tt_fact, x_fact], DAY)
+        params = parameters({"start": [DAY], "end": [DAY], "platform": ["x", "tiktok"], "group_by": ["owner,platform"]})
+        x_bill = dict(payment(3, "", 100), site_id="2116", campaign_id="x-post")
+        for path in ("settled", "provisional", "empty", "missing_payer", "unavailable"):
+            with self.subTest(path=path):
+                shared = summarize(selected, facts, {"_system_report": True}, params, "snapshot", metric_coverage=coverage)
+                report = present(shared, DAY)
+                tt_bill = dict(payment(3 if path != "settled" else 4, "Post", 500), provisional=path != "settled")
+                if path == "missing_payer":
+                    tt_bill["user_key"] = None
+                def orders(app, day, *, tiktok_provisional=False):
+                    if not tiktok_provisional:
+                        return [x_bill, tt_bill] if path == "settled" else [x_bill]
+                    if path == "unavailable":
+                        raise RuntimeError("sensitive driver detail")
+                    return [] if path == "empty" else [tt_bill]
+                def groups(app, sql, max_rows):
+                    if "site_id='2250'" not in sql:
+                        return []
+                    if path == "settled" or "ads_drama_bills_t0" in sql:
+                        return [dict(group("Post", 500, 0), iap_usd_1e4=50000, iaa_usd_1e4=0, ad_events=0)]
+                    return []
+                with patch.object(billing, "read_bills", side_effect=orders) as lookup, \
+                        patch.object(billing, "query_source_rows", side_effect=groups):
+                    billing.collect_financials(report, {}, catalogs)
+                audit = report["quality"]["billing"]
+                self.assertEqual(report["platforms"]["x"]["totals"]["revenue_cents"], 100)
+                self.assertEqual(lookup.call_count, 1 if path == "settled" else 2)
+                if path in ("settled", "provisional"):
+                    require_complete(report)
+                    self.assertEqual(report["totals"]["revenue_cents"], 600)
+                    self.assertEqual(report["totals"]["conversions"], 1)
+                    self.assertEqual("tiktok_purchase_source" in audit, path == "provisional")
+                else:
+                    with self.assertRaisesRegex(ValueError, "sources_incomplete"):
+                        require_complete(report)
+                    self.assertIsNone(report["totals"]["revenue_cents"])
+                    self.assertIsNone(report["platforms"]["tiktok"]["totals"]["conversions"])
+                    self.assertEqual(audit["tiktok_purchase_observation"]["insight_revenue_cents"], 500)
+                    if path == "missing_payer":
+                        self.assertEqual(audit["tiktok_purchase_observation"]["t0_iap_cents"], 500)
+                    self.assertNotIn("sensitive driver", json.dumps(report))
+
     def test_older_three_platform_preparation_is_recollected_without_changing_it(self):
         from features.social_daily_report import prepared
         from features.social_daily_report.collector import present

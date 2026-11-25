@@ -36,9 +36,9 @@
       "canonical": "d5d11e6203d0f8898fed588d6089fd6f41397d6fd0c7859f6d88d939f2374b35"
     },
     "features/social_daily_report/billing.py": {
-      "after": "1dacadf03dfb951776d608061e29dab5ec75b8ed62be220a9cfe5a580baf5c29",
+      "after": "c31a66e320a51d879cb8cda79b106c46ac4e095da30e94f3f21ff50a4515004b",
       "before": "fcf393c1364b368ee45d5cd724b758ba6d0c281bd12a3e45c1971ba3bcd0db82",
-      "canonical": "1dacadf03dfb951776d608061e29dab5ec75b8ed62be220a9cfe5a580baf5c29"
+      "canonical": "c31a66e320a51d879cb8cda79b106c46ac4e095da30e94f3f21ff50a4515004b"
     },
     "features/social_daily_report/collector.py": {
       "after": "dc7803584d2863fbf4fc741ad2a5d08be2ec85fc87ae50913ca42a1f1ef6f16e",

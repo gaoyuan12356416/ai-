@@ -254,26 +254,93 @@ def unavailable(report, reason):
     return report
 
 
+def pending_tiktok_purchases(report, observation):
+    """Keep other channels' settled figures and the source evidence for a retry."""
+    tt = report["platforms"]["tiktok"]
+    quality, shared = tt["quality"], report["shared_report"]
+    message = "TikTok 充值账单待核实"
+    quality.update(state="partial", error=message)
+    affected = [report["totals"], shared["totals"], shared["platform_totals"]["tiktok"],
+                *shared.get("trend", ()), tt["source"], tt["totals"], tt["unmatched"],
+                tt["assigned_income"], tt["unassigned_income"]]
+    for source in [quality, *quality.get("sources", {}).values()]:
+        source.update(state="partial", error=message)
+        affected.extend(source[key] for key in ("totals", "source_totals", "attributed_totals", "unmatched_totals")
+                        if key in source)
+    for person in report["rows"]:
+        if "tiktok" in person["platforms"]:
+            affected.extend((person, person["platforms"]["tiktok"]))
+    for key in ("all_rows", "rows", "ranking"):
+        affected.extend(row for row in shared.get(key, ()) if row.get("platform") == "tiktok")
+    for row in affected:
+        for field in ("revenue_cents", "iap_cents", "conversions", "revenue", "iap", "payment_orders", "pay_rate"):
+            if field in row:
+                row[field] = None
+        if "data_status" in row:
+            row["data_status"] = "partial"
+    report["quality"]["complete"] = False
+    report["quality"]["billing"].update(state="partial", error="billing_tiktok_purchase_pending",
+                                       tiktok_purchase_observation=observation)
+    return report
+
+
+def provisional_tiktok_purchases(app, day, ad_cents, insight):
+    from features.social_analytics.bill_income import allocate_tiktok_cents
+
+    revenue, payers = insight.get("revenue_cents"), insight.get("conversions")
+    observation = dict(insight_revenue_cents=revenue, insight_conversions=payers)
+    try:
+        orders = read_bills(app, day, tiktok_provisional=True)
+        if not orders:
+            pending = payers or (revenue and revenue != ad_cents)
+            return [], [], observation if pending else None
+        groups = query_source_rows(app, by_campaign(day, "2250", provisional_purchases=True), MAX_BILLS)
+        groups = allocate_tiktok_cents(groups)
+        observation["t0_iap_cents"] = sum(row["iap_cents"] for row in groups)
+        for row in orders:
+            if (row.get("positive_purchase", row["revenue_cents"] > 0)
+                    and not re.fullmatch(r"[a-fA-F0-9]{64}", row.get("user_key") or "")):
+                return [], [], observation
+        if Counter(campaign_key(r.get("campaign_id"), r.get("campaign")) for r in orders) != Counter({
+                campaign_key(r.get("campaign_id"), r.get("campaign")): r["purchase_events"] for r in groups}):
+            return [], [], observation
+        return orders, groups, None
+    except Exception:
+        # An unavailable T0 reader cannot establish zero. Other channels and
+        # settled IAA remain valid while a later preparation retries the read.
+        return [], [], observation
+
+
 def collect_financials(report, app, catalog):
     try:
         day = report["report_date"]
         bills = read_bills(app, day)
         ad_groups = []
+        tt = report["platforms"].get("tiktok", {}).get("source", {})
+        tt_observed = bool(tt.get("revenue_cents") or tt.get("conversions"))
+        tt_settled = any(b["site_id"] == "2250" for b in bills)
+        pending = None
+        provisional_used = False
         if bills:
             for site in SITES:
-                if day < FIRST_DAY and (site != "2250" or not any(b["site_id"] == site for b in bills)):
+                if day < FIRST_DAY and (site != "2250" or not (tt_settled or tt_observed)):
                     continue
                 groups = query_source_rows(app, by_campaign(day, site), MAX_BILLS)
                 if site == "2250":
                     from features.social_analytics.bill_income import allocate_tiktok_cents
-                    if any(r["ad_events"] for r in groups) and not any(r["purchase_events"] for r in groups):
-                        fallback = read_bills(app, day, tiktok_provisional=True)
-                        if fallback:
-                            bills = [*bills, *fallback]
-                            groups += query_source_rows(app, by_campaign(day, site, provisional_purchases=True), MAX_BILLS)
                     groups = allocate_tiktok_cents(groups)
+                    has_ads = any(r["ad_events"] for r in groups)
+                    if (has_ads or tt_observed) and not tt_settled and not any(r["purchase_events"] for r in groups):
+                        orders, purchases, pending = provisional_tiktok_purchases(
+                            app, day, sum(r["iaa_cents"] for r in groups), tt)
+                        bills = [*bills, *orders]
+                        groups += purchases
+                        provisional_used = bool(orders)
                 ad_groups.extend(groups)
-        return apply(report, aggregate(catalog, bills, day, ad_groups))
+        report = apply(report, aggregate(catalog, bills, day, ad_groups))
+        if provisional_used:
+            report["quality"]["billing"]["tiktok_purchase_source"] = "kunlunads_dev.ads_drama_bills_t0"
+        return pending_tiktok_purchases(report, pending) if pending is not None else report
     except Exception as exc:
         # Driver messages and SQL must not leak into Feishu or failure diagnostics.
         safe_codes = {
