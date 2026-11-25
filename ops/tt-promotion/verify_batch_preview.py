@@ -10,8 +10,39 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
 from features.tt_promotion import channels
+from features.tt_promotion.pub_native import make_selector
 from features.tt_promotion.pub_store import connection
-from features.tt_promotion.publishing import Publisher
+from features.tt_promotion.publishing import Publisher, options
+
+
+def verify_catalog(runtime):
+    native = runtime.native
+    source = native.selector.source
+    stamp = int(time.time())
+    dates = dict(now_epoch=stamp, deploy_since_epoch=stamp - 60 * 86400, resource_types=())
+    rows = {lang: source.list_drama_rows(language=lang, **dates) for lang in ("en", "es", "pt", "fr")}
+    by_series = {}
+    for lang, entries in rows.items():
+        for row in entries:
+            if row.series_code:
+                by_series.setdefault(row.series_code, set()).add(lang)
+    code = next(code for code, langs in by_series.items() if len(langs) >= 2)
+
+    def matched(args, lang):
+        spec = options(dict(mode="drama", **args))
+        selector = make_selector(native, runtime.store, spec, {}, "catalog-acceptance")
+        return {r.content_id for r in selector.source.list_drama_rows(language=lang, **dates)}
+
+    verified = {}
+    for lang in sorted(by_series[code]):
+        expected = {r.content_id for r in rows[lang] if r.series_code == code}
+        assert matched({"resource_ids": [code]}, lang) == expected
+        verified[lang] = len(expected)
+    assert not matched({"content_ids": ["TT-PREVIEW-NONEXISTENT-CONTENT"]}, "en")
+    assert not matched({"resource_ids": ["TT-PREVIEW-NONEXISTENT-SERIES"]}, "en")
+    print(
+        json.dumps(dict(series_code=code, catalog_languages=verified, missing_ids_returned=0)), flush=True
+    )
 
 
 def main():
@@ -137,6 +168,7 @@ def main():
             ),
             flush=True,
         )
+        verify_catalog(pub.runtime.preview_session())
 
 
 if __name__ == "__main__":

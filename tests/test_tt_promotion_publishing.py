@@ -337,17 +337,16 @@ class PublisherTest(unittest.TestCase):
         from features.tt_promotion.publishing import options
 
         source = mocks.FakeSource(
-            [mocks.drama("C1"), mocks.drama("C2"), mocks.drama("C3")],
+            [
+                mocks.drama("C1"),
+                mocks.drama("C2", series_code="Dw_70-A"),
+                mocks.drama("C3", series_code="DW_70-A"),
+                mocks.drama("C4", series_code="Dw_70-A", app_id=1480),
+            ],
             {f"C{i}": [mocks.material(str(i * 100 + n), f"C{i}") for n in [1, 2]] for i in range(1, 4)},
         )
         source.schema = "catalog"
 
-        def resource_query(sql, values):
-            self.assertIn("ads_drama_resource", sql)
-            self.assertEqual(values, [1479, "700"])
-            return [{"content_id": "C2"}]
-
-        source._stream_select = resource_query
         day = mocks.complete_beijing_dates(mocks.NOW, 7)[-1]
         metrics = mocks.FakeMetricStore(
             [
@@ -374,7 +373,7 @@ class PublisherTest(unittest.TestCase):
             ),
         )
         t = rt.store.get_template(template["id"])
-        args = options(dict(mode="drama", content_ids=["C1"], resource_ids=["700"]))
+        args = options(dict(mode="drama", content_ids=["C1"], resource_ids=["Dw_70-A"]))
         args["_catalog_at"] = mocks.NOW.isoformat()
         with patch("features.tt_promotion.pub_native.old_databases", return_value=(self.path, self.path)):
             session = rt.preview_session()
@@ -384,6 +383,18 @@ class PublisherTest(unittest.TestCase):
         self.assertEqual(first["material_metrics"]["spend"], "41")
         self.assertEqual([r[3] for r in metrics.loads if r[0] == "rows"], [("C1", "C2")])
         self.assertEqual(source.material_calls, [("C2", "en")])
+        with patch("features.tt_promotion.pub_native.old_databases", return_value=(self.path, self.path)):
+            for missing in ({"resource_ids": ["Dw_70-a"]}, {"content_ids": ["c2"]}):
+                with self.assertRaises(mocks.NoEligibleMaterial):
+                    session.preview(
+                        t,
+                        self.channels[0],
+                        {**missing, "mode": "drama", "_catalog_at": mocks.NOW.isoformat()},
+                        "s",
+                        (),
+                    )
+        with self.assertRaises(PublicationError):
+            options(dict(mode="drama", resource_ids=["00"]))
         with self.assertRaises(PublicationError):
             self.call("POST", "/templates", dict(self.data, drama_rule=dict(spend_min=100, spend_max=90)))
 

@@ -82,13 +82,14 @@ def run(screens=None):
     auth_state = "ok"
     creator_fails = True
     save_fails = True
+    channel_directory_unavailable = True
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 960}, timezone_id="America/Los_Angeles")
         page.on("pageerror", lambda e: errors.append(str(e)))
 
         def handle(route):
-            nonlocal fail_first_run, creator_fails, save_fails
+            nonlocal fail_first_run, creator_fails, save_fails, channel_directory_unavailable
             req = route.request
             url = urlsplit(req.url)
             assert url.hostname == "127.0.0.1", url
@@ -140,6 +141,10 @@ def run(screens=None):
                     route.fulfill(status=403, json={"message": "没有访问权限"})
                     return
                 if endpoint == "/channels":
+                    if channel_directory_unavailable:
+                        channel_directory_unavailable = False
+                        route.fulfill(status=503, json={"message": "频道服务暂时不可用"})
+                        return
                     data = dict(items=channels, meta=dict(end="2026-11-24"))
                 elif endpoint == "/channels/101":
                     data = dict(
@@ -312,6 +317,9 @@ def run(screens=None):
 
         page.route("**/*", handle)
         page.goto(BASE + "/tt-promotion-channels.html")
+        expect(page.locator("#workspace")).to_be_visible()
+        expect(page.locator("#list-meta")).to_contain_text("等待取得频道清单")
+        page.locator("#list-identity-error button").click()
         expect(page.locator("#channels tr")).to_have_count(2)
         expect(page.locator("#channels")).to_contain_text("待回传")
         page.get_by_role("button", name="剧场甲").click()

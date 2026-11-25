@@ -172,18 +172,7 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
     source = native_selector.source
     exact = str(spec.get("content_id") or "")
     content_ids = set(spec.get("content_ids") or [])
-    resources = spec.get("resource_ids") or []
-    if resources:
-        for i in range(0, len(resources), 200):
-            part = resources[i : i + 200]
-            marks = ",".join(["%s"] * len(part))
-            content_ids.update(
-                str(r["content_id"])
-                for r in source._stream_select(
-                    f"SELECT DISTINCT content_id FROM `{source.schema}`.ads_drama_resource WHERE app_id=%s AND type=2 AND id IN ({marks})",
-                    [native_selector.app_id, *part],
-                )
-            )
+    resources = set(spec.get("resource_ids") or [])
     allowed = set(spec.get("material_ids") or [])
     if spec.get("material_id"):
         allowed = {str(spec["material_id"])}
@@ -204,11 +193,18 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
 
         def list_drama_rows(self, **kwargs):
             rows = source.list_drama_rows(**kwargs)
+            # X hit promotion uses the case-sensitive business series_code across languages.
+            # Keep every source row for a matched ID so native ambiguity checks still apply.
+            targets = content_ids | {
+                r.content_id
+                for r in rows
+                if r.series_code in resources and r.app_id == native_selector.app_id
+            }
             return [
                 r
                 for r in rows
                 if (not exact or r.content_id == exact)
-                and (not (content_ids or resources) or r.content_id in content_ids)
+                and (not (content_ids or resources) or r.content_id in targets)
                 and (not allowed or r.content_id in parents)
             ]
 

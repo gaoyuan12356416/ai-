@@ -2,7 +2,7 @@
   "use strict";
   const {id,h,money,cents,time,badge,empty,notify,moduleRetry,get,post,modal,action,boot,byId,name,status}=window.TTPromotion;
   const selected=new Set();
-  let items=[],meta={},displayed=[],detailRequest=0,listRequest=0,canCreate=false;
+  let items=[],meta={},displayed=[],detailRequest=0,listRequest=0,canCreate=false,catalogReady=false;
   const sectionRequests={profile:0,handoff:0};
   const detailCache=new Map();
   const filters=id("filters");
@@ -62,6 +62,7 @@
     return `已选 ${selected.size} 个频道${hidden?"，其中 "+hidden+" 个在当前筛选外":""}`;
   }
   function render(){
+    if(!catalogReady)return;
     displayed=filtered();
     const labels=[`${displayed.length} / ${items.length} 个频道`];
     if(meta.end) labels.push(`截至 ${meta.end} UTC`);
@@ -99,6 +100,7 @@
     const ticket=section?++sectionRequests[section]:0;
     const result=await get("/channels"+(section?"?section="+section:""));
     if(seq!==listRequest || section && ticket!==sectionRequests[section])return;
+    catalogReady=true;
     const old=new Map(items.map(row=>[byId(row),row]));
     meta=mergeMeta(meta,result.meta||{},section);
     const errors=meta.module_errors||{};
@@ -315,6 +317,17 @@
   id("filter-toggle").onclick=e=>e.currentTarget.setAttribute("aria-expanded",String(e.currentTarget.getAttribute("aria-expanded")!=="true"));
   boot("ttPromotionChannels",async user=>{
     canCreate=user.role==="admin" || user.permissions?.tt_promotion_auto===true;
-    await refresh();
+    try {
+      await refresh();
+      moduleRetry(id("list-identity-error"),"");
+    } catch(e) {
+      if(e.status===401 || e.status===403)throw e;
+      moduleRetry(id("list-identity-error"),"频道清单暂时无法读取。"+(items.length?"以下为上次加载结果。 ":" ")+e.message,()=>id("refreshPage").onclick());
+      if(!items.length){
+        id("list-meta").textContent="等待取得频道清单";
+        id("channel-summary").textContent="";
+        id("channels").innerHTML=empty(9,"重试后将在这里显示频道。");
+      }
+    }
   });
 })();

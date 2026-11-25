@@ -172,10 +172,14 @@ def options(payload):
     if mode == "drama":
         for key in ("content_ids", "resource_ids"):
             if payload.get(key):
-                pattern = r"[1-9][0-9]{0,30}" if key == "resource_ids" else r"[A-Za-z0-9_.:-]{1,128}"
+                pattern = (
+                    r"(?:[1-9][0-9]{0,30}|[A-Za-z][A-Za-z0-9_-]{0,63})"
+                    if key == "resource_ids"
+                    else r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
+                )
                 result[key] = clean_ids(payload[key], "指定剧目", pattern, 500)
         if "content_id" in payload and payload["content_id"]:
-            old = clean_ids([payload["content_id"]], "指定剧目", r"[A-Za-z0-9_.:-]{1,128}")[0]
+            old = clean_ids([payload["content_id"]], "指定剧目", r"[A-Za-z0-9_-]{1,128}")[0]
             result["content_ids"] = list(dict.fromkeys([*result.get("content_ids", []), old]))
         if not (result.get("content_ids") or result.get("resource_ids")):
             raise PublicationError("请选择至少一部剧或一个资源 ID")
