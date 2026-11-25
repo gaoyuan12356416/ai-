@@ -234,11 +234,15 @@ def claim(c):
             coalesce(json_extract(payload,'$.publish_at'),created) AS due
             FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=?
               AND coalesce(json_extract(payload,'$.publish_at'),created)<=?
+              AND ({priority})>=?
             ORDER BY priority DESC,due,created,key LIMIT 100""",
             (near, row["product"], row["content"], row["lang"],
-             max(now, row["due"]) + NEAR_PUBLISH_SECONDS),
+             max(now, row["due"]) + NEAR_PUBLISH_SECONDS, near, row["priority"]),
         ).fetchall()
-    rows = sorted(rows, key=lambda r: (-r["priority"], r["due"], r["created"], r["key"]))[:100]
+    # A full batch can occupy the sole post-cooldown probe for several minutes.
+    # One item tests the provider while leaving the queue free to reprioritize.
+    limit = 1 if gate else 100
+    rows = sorted(rows, key=lambda r: (-r["priority"], r["due"], r["created"], r["key"]))[:limit]
     if not rows:
         c.commit()
         return None, []

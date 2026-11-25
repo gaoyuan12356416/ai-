@@ -228,25 +228,30 @@ class CaptionTests(unittest.TestCase):
         pool = sources.fb_task("fv", dict(_ord=3, task_id="pool", content_id="z", source_kind="pool",
                     snapshot_json={"material":{"language":"en","drama_name":"Z","drama_description":"old facts"}}))
         pool["publish_at"] = now
-        self.assertEqual(pool["publish_priority"], 1)
+        self.assertEqual(pool["publish_priority"], 2)
         with store.connection() as c:
             store.enqueue(c, old)
             store.enqueue(c, dict(pool, publish_priority=0))
             store.enqueue(c, dict(pool, facts={"series":"changed"}))
             future = dict(self.task(4), content="later", publish_at=now+7200, publish_priority=2)
-            ready = dict(self.task(5), content="uploading soon", publish_at=now, publish_priority=2)
+            ready = dict(self.task(5), content="uploading soon", publish_at=now, publish_priority=3)
+            sibling = dict(self.task(6), content=ready["content"], publish_at=now-3600)
             store.enqueue(c, future)
             store.enqueue(c, ready)
+            store.enqueue(c, sibling)
             c.commit()
-            self.assertEqual(store.claim(c)[1][0]["key"], ready["key"])
+            self.assertEqual([t["key"] for t in store.claim(c)[1]], [ready["key"]])
             row = store.claim(c)[1][0]
             self.assertEqual((row["key"],row["facts"]), (pool["key"],pool["facts"]))
             self.assertEqual(store.claim(c)[1][0]["key"], old["key"])
-            self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"ready"})["publish_priority"], 2)
+            self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"ready"})["publish_priority"], 3)
+            self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"preparing"})["publish_priority"], 1)
 
     def test_provider_cooldown_preserves_partial_drafts_and_retry(self):
         first, retry, fresh = (self.task(k) for k in (1, 2, 3))
         stamp = time.time()
+        retry["publish_at"] = stamp - 10
+        fresh["publish_at"] = stamp + 1
         error = generator.ProviderError("codex_generation_failed", {"message":"last status: 429 Too Many Requests",
                                          "headers":{"Retry-After":"75"}})
         with store.connection() as c:
@@ -275,7 +280,7 @@ class CaptionTests(unittest.TestCase):
             store.enqueue(c, dict(self.task(4),content="other"))
             c.commit()
             self.assertFalse(store.claim(c)[1])
-            self.assertEqual({r["key"] for r in rows}, {retry["key"], fresh["key"]})
+            self.assertEqual([r["key"] for r in rows], [retry["key"]])
             with patch.object(generator, "splits", return_value=[[r] for r in rows]):
                 def throttled(*args):
                     raise generator.ProviderError("codex_request_failed", {"codexErrorInfo":{"httpStatusCode":429}})
@@ -289,6 +294,7 @@ class CaptionTests(unittest.TestCase):
             worker.generate_batch(c,b,rows,lambda tasks, emit, usage: [emit(self.item(t)) for t in tasks])
             self.assertFalse(c.execute("SELECT 1 FROM provider_backoff").fetchone())
             self.assertEqual(c.execute("SELECT state FROM retries").fetchone()[0], "succeeded")
+            self.assertTrue(store.claim(c)[1])
 
     def test_unit_symbols_survive_generation_and_native_selection(self):
         task = self.task(1, "fv")
