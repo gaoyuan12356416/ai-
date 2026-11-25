@@ -76,7 +76,15 @@ class Worker:
         self.store.update(row, "generating")
         atomic_json(directory / "launch.json", {"unit": unit_name(row), "started_at": time.time(), "attempt_id": row["attempt_id"]})
         runner = str(Path(__file__).resolve().with_name("runner.py"))
-        cmd = ["systemd-run", "--quiet", "--collect", "--unit=" + unit_name(row),
+        # The runner validates model artifacts before retrying. Expose only the
+        # worker's Pillow package and its wheel libraries inside the private /tmp.
+        pillow = Path(Image.__file__).resolve().parent
+        libs = pillow.parent / "pillow.libs"
+        deps = ["--property=Environment=PYTHONPATH=/tmp/codex-image-python"]
+        for package in (pillow, libs):
+            if package.is_dir():
+                deps.append("--property=BindReadOnlyPaths=%s:/tmp/codex-image-python/%s" % (package, package.name))
+        cmd = ["systemd-run", "--quiet", "--collect", "--unit=" + unit_name(row), *deps,
                "--property=User=" + self.config.runner_user, "--property=Group=" + self.config.runner_user,
                "--property=NoNewPrivileges=yes", "--property=ProtectHome=yes", "--property=ProtectSystem=strict",
                "--property=PrivateTmp=yes", "--property=PrivateDevices=yes",
