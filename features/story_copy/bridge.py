@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -41,36 +42,62 @@ def fb_plan(selection, owner, config, page, material, task_id, timestamp):
 
 
 def select(task, current, link):
-    # The native store always owns the original text. Losing the entire AI store returns it.
-    try:
-        with store.connection(readonly=True, timeout=0) as c:
-            if not store.eligible(c, task["family"], task["ordinal"]):
-                return "off", "", current, None
-            if task.get("manual"):
-                return "manual", "", current, None
-            row = c.execute("SELECT * FROM jobs WHERE key=?", (task["key"],)).fetchone()
-            if row is None or row["state"] != "ready":
-                return (
-                    "legacy",
-                    (row["reason"] if row else "") or "not_ready_at_publish",
-                    current,
-                    row["batch"] if row else None,
-                )
-            frozen = obj(row["payload"])
-            if group_key(task) != group_key(frozen) or (
-                task.get("material_id")
-                and str(task["material_id"]) != str(frozen.get("material_id"))
-            ):
-                return "legacy", "frozen_identity_mismatch", current, row["batch"]
-            if task.get("episode") != frozen.get("episode"):
-                return "legacy", "episode_mismatch", current, row["batch"]
-            try:
-                return "ai", "", render(frozen, obj(row["draft"]), link), row["batch"]
-            except Exception as exc:
-                return "legacy", str(exc)[:120], current, row["batch"]
-    except Exception as exc:
-        LOG.warning("story_copy.optional_read %s", type(exc).__name__)
-        return "legacy", "caption_store_unavailable", current, None
+    started = time.monotonic()
+    deadline = started + 0.30
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            result = _select_once(task, current, link)
+        except Exception as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            name = getattr(exc, "sqlite_errorname", None)
+            # Python 3.9 exposes SQLite's message but not its extended error code.
+            detail = str(exc) if isinstance(exc, sqlite3.Error) else ""
+            if code is None and isinstance(exc, sqlite3.OperationalError):
+                code = {"database is locked": 5, "database is busy": 5, "database table is locked": 6,
+                        "database schema is locked": 6}.get(detail.lower().split(":")[0])
+            busy = code is not None and (code & 255) in (5, 6)
+            remaining = deadline - time.monotonic()
+            if busy and remaining > 0 and attempts < 6:
+                time.sleep(min(0.02 * 2 ** (attempts - 1), remaining))
+                continue
+            LOG.warning("story_copy.optional_read key=%s attempts=%d elapsed_ms=%.0f error=%s code=%s detail=%s",
+                        task["key"], attempts, (time.monotonic() - started) * 1000,
+                        name or type(exc).__name__, code, detail[:160])
+            return "legacy", "caption_store_unavailable", current, None
+        if attempts > 1:
+            LOG.info("story_copy.read_recovered key=%s attempts=%d elapsed_ms=%.0f",
+                     task["key"], attempts, (time.monotonic() - started) * 1000)
+        return result
+
+
+def _select_once(task, current, link):
+    with store.connection(readonly=True, timeout=0) as c:
+        if not store.eligible(c, task["family"], task["ordinal"]):
+            return "off", "", current, None
+        if task.get("manual"):
+            return "manual", "", current, None
+        row = c.execute("SELECT * FROM jobs WHERE key=?", (task["key"],)).fetchone()
+        if row is None or row["state"] != "ready":
+            return (
+                "legacy",
+                (row["reason"] if row else "") or "not_ready_at_publish",
+                current,
+                row["batch"] if row else None,
+            )
+        frozen = obj(row["payload"])
+        if group_key(task) != group_key(frozen) or (
+            task.get("material_id")
+            and str(task["material_id"]) != str(frozen.get("material_id"))
+        ):
+            return "legacy", "frozen_identity_mismatch", current, row["batch"]
+        if task.get("episode") != frozen.get("episode"):
+            return "legacy", "episode_mismatch", current, row["batch"]
+        try:
+            return "ai", "", render(frozen, obj(row["draft"]), link), row["batch"]
+        except Exception as exc:
+            return "legacy", str(exc)[:120], current, row["batch"]
 
 
 def receipt(conn, task, source, reason, text, url, batch):

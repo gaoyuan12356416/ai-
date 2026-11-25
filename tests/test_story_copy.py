@@ -190,6 +190,106 @@ class CaptionTests(unittest.TestCase):
                 self.assertNotIn(secret, reason)
             self.assertEqual(c.execute("SELECT reason FROM jobs").fetchone()[0], "codex_generation_failed")
 
+    def test_short_read_lock_and_persistent_lock(self):
+        task = self.task(3, "fv")
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, lambda tasks, emit, usage: emit(self.item(task)))
+            c.execute("PRAGMA journal_mode=DELETE")
+        with store.connection() as holder, ThreadPoolExecutor(1) as pool:
+            holder.execute("BEGIN EXCLUSIVE")
+            attempted = threading.Event()
+            original = bridge._select_once
+
+            def read(*args):
+                attempted.set()
+                return original(*args)
+
+            with patch.object(bridge, "_select_once", side_effect=read):
+                future = pool.submit(bridge.select, task, "old caption", "https://example.com/")
+                self.assertTrue(attempted.wait(2))
+                time.sleep(.045)
+                holder.rollback()
+                self.assertEqual(future.result(timeout=2)[0], "ai")
+            holder.execute("BEGIN EXCLUSIVE")
+            with self.assertLogs(bridge.LOG, level="WARNING") as logged:
+                start = time.monotonic()
+                self.assertEqual(bridge.select(task, "old caption", "")[:3],
+                                 ("legacy", "caption_store_unavailable", "old caption"))
+                self.assertLess(time.monotonic() - start, .65)
+            self.assertIn(task["key"], logged.output[0])
+            self.assertIn("database is locked", logged.output[0])
+
+    def test_due_pool_and_ready_video_outrank_old_bulk(self):
+        now = time.time()
+        old = dict(self.task(1, "fa"), publish_at=now - 18000)
+        pool = sources.fb_task("fv", dict(_ord=3, task_id="pool", content_id="z", source_kind="pool",
+                    snapshot_json={"material":{"language":"en","drama_name":"Z","drama_description":"old facts"}}))
+        pool["publish_at"] = now
+        self.assertEqual(pool["publish_priority"], 1)
+        with store.connection() as c:
+            store.enqueue(c, old)
+            store.enqueue(c, dict(pool, publish_priority=0))
+            store.enqueue(c, dict(pool, facts={"series":"changed"}))
+            future = dict(self.task(4), content="later", publish_at=now+7200, publish_priority=2)
+            ready = dict(self.task(5), content="uploading soon", publish_at=now, publish_priority=2)
+            store.enqueue(c, future)
+            store.enqueue(c, ready)
+            c.commit()
+            self.assertEqual(store.claim(c)[1][0]["key"], ready["key"])
+            row = store.claim(c)[1][0]
+            self.assertEqual((row["key"],row["facts"]), (pool["key"],pool["facts"]))
+            self.assertEqual(store.claim(c)[1][0]["key"], old["key"])
+            self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"ready"})["publish_priority"], 2)
+
+    def test_provider_cooldown_preserves_partial_drafts_and_retry(self):
+        first, retry, fresh = (self.task(k) for k in (1, 2, 3))
+        stamp = time.time()
+        error = generator.ProviderError("codex_generation_failed", {"message":"last status: 429 Too Many Requests",
+                                         "headers":{"Retry-After":"75"}})
+        with store.connection() as c:
+            store.enqueue(c, retry)
+            c.commit()
+            b, rows = store.claim(c)
+            worker.generate_batch(c,b,rows,self.provider_down)
+            store.enqueue(c, first)
+            c.commit()
+            b, rows = store.claim(c)
+
+            def limited(tasks, emit, usage):
+                emit(self.item(first))
+                raise error
+
+            with patch.object(time, "time", return_value=stamp):
+                worker.generate_batch(c, b, rows, limited)
+                self.assertEqual(c.execute("SELECT state FROM jobs WHERE key=?", (first["key"],)).fetchone()[0], "ready")
+                self.assertEqual(c.execute("SELECT state FROM retries WHERE key=?", (retry["key"],)).fetchone()[0], "pending")
+                self.assertEqual(store.record_rate_limit(c, b+100, 0), stamp+75)
+                store.enqueue(c, fresh)
+                c.commit()
+                self.assertFalse(store.claim(c)[1])
+        with store.connection() as c, patch.object(time, "time", return_value=stamp+76):
+            b, rows = store.claim(c)
+            store.enqueue(c, dict(self.task(4),content="other"))
+            c.commit()
+            self.assertFalse(store.claim(c)[1])
+            self.assertEqual({r["key"] for r in rows}, {retry["key"], fresh["key"]})
+            with patch.object(generator, "splits", return_value=[[r] for r in rows]):
+                def throttled(*args):
+                    raise generator.ProviderError("codex_request_failed", {"codexErrorInfo":{"httpStatusCode":429}})
+                worker.generate_batch(c,b,rows,throttled)
+            gate = c.execute("SELECT * FROM provider_backoff").fetchone()
+            self.assertEqual((gate["delay"], gate["until_at"]), (60,stamp+136))
+            self.assertEqual(c.execute("SELECT calls FROM batches WHERE id=?", (b,)).fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 1)
+        with store.connection() as c, patch.object(time, "time", return_value=stamp+137):
+            b,rows=store.claim(c)
+            worker.generate_batch(c,b,rows,lambda tasks, emit, usage: [emit(self.item(t)) for t in tasks])
+            self.assertFalse(c.execute("SELECT 1 FROM provider_backoff").fetchone())
+            self.assertEqual(c.execute("SELECT state FROM retries").fetchone()[0], "succeeded")
+
     def test_unit_symbols_survive_generation_and_native_selection(self):
         task = self.task(1, "fv")
         item = dict(self.item(task), opening="The doctor treats twins with 50°C fevers.")

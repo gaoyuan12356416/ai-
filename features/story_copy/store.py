@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS alerts(event TEXT PRIMARY KEY,incident TEXT,body TEXT
 CREATE TABLE IF NOT EXISTS alert_packets(id TEXT PRIMARY KEY,incident TEXT,events TEXT,body TEXT,delivered REAL);
 CREATE TABLE IF NOT EXISTS packed_alerts(event TEXT PRIMARY KEY,packet TEXT);
 CREATE TABLE IF NOT EXISTS alert_resolutions(event TEXT PRIMARY KEY,reason TEXT NOT NULL,at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS provider_backoff(id INTEGER PRIMARY KEY CHECK(id=1),until_at REAL NOT NULL,
+ delay INTEGER NOT NULL,probe_batch INTEGER);
 CREATE TABLE IF NOT EXISTS cursors(name TEXT PRIMARY KEY,value INTEGER);
 CREATE TABLE IF NOT EXISTS reviewed_facts(product TEXT,content TEXT,lang TEXT,material_id TEXT,episode INTEGER,
  source_ref TEXT,summary TEXT,PRIMARY KEY(product,content,lang,material_id,episode,source_ref));
@@ -149,17 +151,19 @@ def enqueue(c, task):
         return False
     manual = task.get("manual")
     existing = c.execute(
-        "SELECT state,json_extract(payload,'$.publish_at') AS publish_at FROM jobs WHERE key=?",
+        """SELECT state,json_extract(payload,'$.publish_at') AS publish_at,
+        coalesce(json_extract(payload,'$.publish_priority'),0) AS priority FROM jobs WHERE key=?""",
         (task["key"],),
     ).fetchone()
     if existing:
         # Refresh only queue priority, never frozen facts or an accepted/final draft.
-        if existing["state"] in ("pending", "retry_wait") and existing["publish_at"] != task.get("publish_at"):
+        priority = task.get("publish_priority", 0)
+        due = task.get("publish_at")
+        if existing["state"] in ("pending", "retry_wait") and (existing["publish_at"], existing["priority"]) != (due, priority):
             c.execute(
-                """UPDATE jobs SET payload=json_set(payload,'$.publish_at',?)
-                WHERE key=? AND state IN ('pending','retry_wait')
-                AND json_extract(payload,'$.publish_at') IS NOT ?""",
-                (task.get("publish_at"), task["key"], task.get("publish_at")),
+                """UPDATE jobs SET payload=json_set(payload,'$.publish_at',?,'$.publish_priority',?)
+                WHERE key=? AND state IN ('pending','retry_wait')""",
+                (due, priority, task["key"]),
             )
         return True
     task = dict(task, facts=dict(task["facts"]))
@@ -194,43 +198,55 @@ def enqueue(c, task):
 def claim(c):
     c.execute("BEGIN IMMEDIATE")
     now = time.time()
+    gate = c.execute("SELECT until_at,probe_batch FROM provider_backoff WHERE id=1").fetchone()
+    if gate and (gate["until_at"] > now or c.execute(
+            "SELECT 1 FROM batches WHERE id=? AND finished IS NULL", (gate["probe_batch"],)
+    ).fetchone()):
+        c.commit()
+        return None, []
+    # Old deadlines from bulk runs must not outrank a video approaching upload.
+    priority = """CASE WHEN json_extract(payload,'$.publish_at')<=?
+                  THEN coalesce(json_extract(payload,'$.publish_priority'),0) ELSE 0 END"""
+    near = now + NEAR_PUBLISH_SECONDS
     row = c.execute(
-        """SELECT product,content,lang,
+        f"""SELECT product,content,lang,max({priority}) AS priority,
         min(coalesce(json_extract(payload,'$.publish_at'),created)) AS due
         FROM jobs WHERE state='pending' GROUP BY product,content,lang
         HAVING count(*)>=100 OR min(created)<=?
           OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
           OR min(json_extract(payload,'$.publish_at'))<=?
-        ORDER BY due,min(created),product,content,lang LIMIT 1""",
-        (now - 60, now + NEAR_PUBLISH_SECONDS),
+        ORDER BY priority DESC,due,min(created),product,content,lang LIMIT 1""",
+        (near, now - 60, near),
     ).fetchone()
     # Carry failures into the next ready queue, even if its drama/language differs.
     # With no new work, retry after one normal collection window instead of waiting forever.
     rows = c.execute(
-        """SELECT j.key,j.payload,j.created,
+        f"""SELECT j.key,j.payload,j.created,{priority} AS priority,
         coalesce(json_extract(j.payload,'$.publish_at'),j.created) AS due
         FROM jobs j JOIN retries r ON r.key=j.key
         WHERE j.state='retry_wait' AND r.state='pending' AND (r.retry_after<=? OR ?)
-        ORDER BY due,r.created,j.key LIMIT 100""",
-        (now, row is not None),
+        ORDER BY priority DESC,due,r.created,j.key LIMIT 100""",
+        (near, now, row is not None),
     ).fetchall()
     if row:
         rows += c.execute(
-            """SELECT key,payload,created,
+            f"""SELECT key,payload,created,{priority} AS priority,
             coalesce(json_extract(payload,'$.publish_at'),created) AS due
             FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=?
               AND coalesce(json_extract(payload,'$.publish_at'),created)<=?
-            ORDER BY due,created,key LIMIT 100""",
-            (row["product"], row["content"], row["lang"],
+            ORDER BY priority DESC,due,created,key LIMIT 100""",
+            (near, row["product"], row["content"], row["lang"],
              max(now, row["due"]) + NEAR_PUBLISH_SECONDS),
         ).fetchall()
-    rows = sorted(rows, key=lambda r: (r["due"], r["created"], r["key"]))[:100]
+    rows = sorted(rows, key=lambda r: (-r["priority"], r["due"], r["created"], r["key"]))[:100]
     if not rows:
         c.commit()
         return None, []
     batch = c.execute(
         "INSERT INTO batches(created,requested) VALUES(?,?)", (now, len(rows))
     ).lastrowid
+    if gate:
+        c.execute("UPDATE provider_backoff SET probe_batch=? WHERE id=1", (batch,))
     c.executemany(
         "UPDATE jobs SET state='generating',batch=? WHERE key=?",
         [(batch, r["key"]) for r in rows],
@@ -241,6 +257,34 @@ def claim(c):
     )
     c.commit()
     return batch, [json.loads(r["payload"]) for r in rows]
+
+
+def record_rate_limit(c, batch, retry_after):
+    """Advance the shared cooldown once per probe, even for simultaneous 429s."""
+    now = time.time()
+    c.execute("BEGIN IMMEDIATE")
+    row = c.execute("SELECT * FROM provider_backoff WHERE id=1").fetchone()
+    if row and row["until_at"] > now and row["probe_batch"] != batch:
+        until = max(row["until_at"], now + retry_after)
+        c.execute("UPDATE provider_backoff SET until_at=? WHERE id=1", (until,))
+    else:
+        delay = min(row["delay"] * 2, 300) if row else 30
+        until = now + max(delay, retry_after)
+        c.execute("INSERT OR REPLACE INTO provider_backoff VALUES(1,?,?,NULL)", (until, delay))
+    c.commit()
+    return until
+
+
+def defer_provider_jobs(c, batch, keys):
+    for key in keys:
+        retry = c.execute(
+            """UPDATE retries SET state='pending',retry_batch=NULL
+            WHERE key=? AND retry_batch=? AND state='generating'""", (key, batch),
+        ).rowcount
+        c.execute(
+            """UPDATE jobs SET state=?,batch=NULL WHERE key=? AND batch=? AND state='generating'""",
+            ("retry_wait" if retry else "pending", key, batch),
+        )
 
 
 def fail(c, batch, key, reason):

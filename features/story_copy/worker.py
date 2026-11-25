@@ -45,8 +45,13 @@ def generate_batch(c, batch, tasks, runner=generator.run):
     tokens = [None, None]
     calls = 0
     provider_errors = []
+    deferred = set()
     for chunk in generator.splits(ready) if ready else ():
         by_key = {t["key"]: t for t in chunk}
+        gate = c.execute("SELECT until_at,probe_batch FROM provider_backoff WHERE id=1").fetchone()
+        if gate and (gate["until_at"] > time.time() or gate["probe_batch"] != batch):
+            deferred.update(by_key)
+            continue
         submitted = set()
 
         def emit(item):
@@ -65,11 +70,18 @@ def generate_batch(c, batch, tasks, runner=generator.run):
         calls += 1
         try:
             runner(chunk, emit, usage)
+            if gate:
+                c.execute("DELETE FROM provider_backoff WHERE id=1 AND probe_batch=?", (batch,))
+                c.commit()
             missed = "missing_model_row"
         except Exception as exc:
             detail = exc.details if isinstance(exc, generator.ProviderError) else {"exception": type(exc).__name__}
             provider_errors.append(dict(keys=list(by_key), reason=str(exc) if isinstance(exc, generator.ProviderError) else "codex_generation_failed", details=detail))
             LOG.warning("caption batch %s provider %s details=%s", batch, type(exc).__name__, store.dump(detail))
+            if isinstance(exc, generator.ProviderError) and exc.rate_limited:
+                until = store.record_rate_limit(c, batch, exc.retry_after)
+                LOG.warning("caption provider cooldown until=%.0f batch=%s", until, batch)
+                deferred.update(by_key.keys() - submitted)
             missed = (
                 str(exc)
                 if str(exc) in alerts.SERVICE_REASONS
@@ -80,8 +92,11 @@ def generate_batch(c, batch, tasks, runner=generator.run):
         for i, k in enumerate(("inputTokens", "outputTokens")):
             if k in usage:
                 tokens[i] = (tokens[i] or 0) + usage[k]
+    store.defer_provider_jobs(c, batch, deferred)
     failed = []
     for t in tasks:
+        if t["key"] in deferred:
+            continue
         reason = errors.get(t["key"], "missing_model_row")
         if store.fail(c, batch, t["key"], reason) == "failed":
             failed.append(alert_item(t, reason, "重试一次仍失败，到点使用现行文案"))
@@ -205,6 +220,10 @@ def restore(c, batch_id=None):
         rows = c.execute(
             "SELECT payload FROM jobs WHERE batch=? AND state='generating'", (batch,)
         ).fetchall()
+        if c.execute("SELECT 1 FROM provider_backoff WHERE id=1").fetchone():
+            # A crash may occur after recording a 429 and before finishing its batch.
+            store.defer_provider_jobs(c, batch, [sources.obj(r[0])["key"] for r in rows])
+            rows = []
         failed = []
         for row in rows:
             task = sources.obj(row[0])

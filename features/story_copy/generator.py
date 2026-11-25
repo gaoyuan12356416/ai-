@@ -1,6 +1,8 @@
 """Stream newline-delimited JSON from the CPU's active Codex account, preserving completed rows."""
 
 import json
+import math
+from email.utils import parsedate_to_datetime
 import os
 import queue
 import re
@@ -31,8 +33,33 @@ def error_details(error, *, method="", status=""):
 
 class ProviderError(RuntimeError):
     def __init__(self, reason, error, *, method="", status=""):
-        super().__init__(reason)
         self.details = error_details(error, method=method, status=status)
+        structured = error if isinstance(error, dict) else {}
+        code = structured.get("httpStatusCode", structured.get("code"))
+        summary = " ".join(str(value) for value in self.details.values())
+        self.rate_limited = str(code) == "429" or bool(re.search(
+            r'(?i)too many requests|(?:httpStatusCode["\s:]+|(?:http(?: status)?|status(?: code)?)[:=\s]+)429\b',
+            summary,
+        ))
+        self.retry_after = 0
+        if self.rate_limited:
+            headers = structured.get("headers") or {}
+            header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None) if isinstance(headers, dict) else None
+            hint = header if header is not None else structured.get("retryAfterSeconds")
+            if hint is None:
+                match = re.search(r"(?i)retry[- ]after[:=\s]+(\d+(?:\.\d+)?)", summary)
+                hint = match.group(1) if match else None
+            if hint is not None:
+                try:
+                    seconds = float(hint)
+                except (TypeError, ValueError):
+                    try:
+                        seconds = parsedate_to_datetime(str(hint)).timestamp() - time.time()
+                    except (TypeError, ValueError, OverflowError):
+                        seconds = 0
+                if math.isfinite(seconds):
+                    self.retry_after = max(0, math.ceil(seconds))
+        super().__init__("provider_rate_limited" if self.rate_limited else reason)
 
 HOOK_RULES = """The program prints 👆 and the supplied local click_prefix, a translation of 'watch full now'.
 Write one short story-specific continuation in an array named hooks. Keep the prefix unchanged and do not repeat it.
