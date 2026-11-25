@@ -35,6 +35,8 @@ class Fixture:
         self.stats_error = True
         self.run_error = True
         self.changed_copy = False
+        self.fail_sources = {"/channels"}
+        self.denied = {}
 
     @staticmethod
     def candidate(i, account, conflict=False):
@@ -71,6 +73,11 @@ class Fixture:
         route.fulfill(json=data)
 
     def respond(self, ep, method, q, body):
+        if ep in self.denied:
+            return self.denied[ep], dict(message="访问受限")
+        if ep in self.fail_sources:
+            self.fail_sources.remove(ep)
+            return 503, dict(message="单一数据源超时")
         if ep == "/channels":
             return 200, dict(items=self.channels)
         if ep == "/templates":
@@ -156,6 +163,15 @@ def run(screens=None):
         page.set_default_timeout(7000)
         page.goto(BASE + "/tt-promotion-auto.html?accounts=101,102,999")
         loc = page.locator
+        expect(loc("#channel-source-error")).to_contain_text("频道清单暂未取得")
+        expect(loc("#workspace")).to_be_visible()
+        expect(loc("#templates")).to_contain_text("收入画像")
+        expect(loc("#new-template")).to_be_disabled()
+        expect(loc("[data-act=run]")).to_be_disabled()
+        loc("[data-view=runs]").click()
+        expect(loc("#history-total")).to_contain_text("1000")
+        loc("[data-view=templates]").click()
+        loc("#channel-source-error button").click()
 
         def screenshot(name):
             if screens:
@@ -192,6 +208,9 @@ def run(screens=None):
         screenshot("automation-rules")
         form.locator("[type=submit]").click()
         expect(loc("#dialog")).not_to_be_visible()
+        loc("#refreshPage").click()
+        expect(loc("#new-template")).to_be_enabled()
+        expect(loc("#dialog")).not_to_be_visible()
         draft = fx.sent("/templates")[0]
         assert draft["account_ids"] == ["101", "102"]
         assert draft["drama_rule"]["spend_min"] == 4 and draft["drama_rule"]["spend_max"] == 22
@@ -213,6 +232,8 @@ def run(screens=None):
                          start="2026-11-22", end="2026-11-25", page="2", page_size="25")
         loc("[data-run]").click()
         expect(loc("#task-rows .branch[open]")).to_contain_text("正式结果有变化")
+        expect(loc("#task-rows summary")).to_contain_text("待核对")
+        expect(loc("#task-rows summary")).not_to_contain_text("已确认发布")
         expect(loc("#task-rows")).to_contain_text("AI 生成，人工修改")
         close()
         loc("[data-view=templates]").click()
@@ -249,7 +270,7 @@ def run(screens=None):
         f.locator("[name=scheduled_at]").fill("2026-12-09T12:10")
         f.locator("[name=mode]").select_option("drama")
         f.locator("[name=content_ids]").fill("A,B,A")
-        f.locator("[name=resource_ids]").fill("1,2")
+        f.locator("[name=resource_ids]").fill("1,DW-A01")
         f.locator("[type=submit]").click()
         expect(loc("#preview-feedback")).to_contain_text("已完成 2")
         expect(loc("#preview-output")).to_contain_text("35.5%")
@@ -289,9 +310,24 @@ def run(screens=None):
         assert run1 == run2, "a transport retry must reuse the same operation"
         assert run1["preview_id"] == list(fx.snapshots)[-1] and run1["account_ids"] == ["101", "102"]
         assert run1["scheduled_at"] == "2026-12-09T04:10:00.000Z"
-        assert run1["mode"] == "drama" and run1["content_ids"] == ["A", "B"] and run1["resource_ids"] == ["1", "2"]
+        assert run1["mode"] == "drama" and run1["content_ids"] == ["A", "B"] and run1["resource_ids"] == ["1", "DW-A01"]
         assert len(run1["drafts"]) == 2 and run1["drafts"][0]["edited_caption"] == "Edited by operator"
         assert "edited_caption" not in run1["drafts"][1] and "manual_caption" not in run1
+        fx.fail_sources.add("/templates")
+        page.goto(BASE+"/tt-promotion-auto.html")
+        expect(loc("#workspace")).to_be_visible()
+        expect(loc("#template-source-error")).to_contain_text("模板清单暂未取得")
+        expect(loc("#templates-meta")).to_have_text("模板清单暂未取得")
+        loc("[data-view=runs]").click()
+        expect(loc("#history-total")).to_contain_text("1000")
+        loc("#template-source-error button").click()
+        loc("[data-view=templates]").click()
+        expect(loc("[data-act=run]").first).to_be_enabled()
+        for ep, code, msg in [("/channels", 403, "没有访问"), ("/templates", 401, "已过期")]:
+            fx.denied = {ep: code}
+            page.goto(BASE+"/tt-promotion-auto.html")
+            expect(loc("#workspace")).not_to_be_visible()
+            expect(loc("#notice")).to_contain_text(msg)
         assert not errors, errors
         browser.close()
 

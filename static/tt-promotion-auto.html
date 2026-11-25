@@ -21,7 +21,7 @@
     </header>
     <div role="alert" id="notice" hidden></div>
     <div role="status" id="loading">正在加载…</div>
-    <section id="workspace" hidden><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
+    <section id="workspace" hidden><div id="channel-source-error" aria-live="polite"></div><div id="template-source-error" aria-live="polite"></div><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
     <section id="templates-view" class="panel">
       <div class="section-head"><h2>发布模板</h2><div class="actions"><span id="templates-meta" class="muted"></span><button class="button primary" id="new-template">创建模板</button></div></div>
       <div class="tool-filters"><label>查找模板<input type="search" id="template-search" placeholder="名称或模板 ID"></label><label>最近批次<select id="template-state"><option value="">全部结果</option><option value="anomaly">有异常</option><option value="failed">有失败</option><option value="skipped">有跳过</option><option value="review">待核对</option></select></label><span id="stats-error" aria-live="polite"></span></div>

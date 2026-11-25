@@ -1,9 +1,32 @@
 (function(){
   "use strict";
-  const {id,h,money,time,badge,empty,notify,get,post,modal,confirmAction,action,boot,byId,name,status,statusBadge}=window.TTPromotion;
+  const {id,h,money,time,badge,empty,notify,get:read,post:write,modal,confirmAction,action,boot,byId,name,status,statusBadge}=window.TTPromotion;
   const modeNames={template:"按模板选材",drama:"指定爆款剧",material:"指定素材",pool:"素材池分配",serial:"短剧连载"};
   let templates=[],channels=[],actorId="",currentView="templates",requestToken=0;
   let stats=new Map(),historyPage=1,detailEpoch=0,importedAccounts=[],allowClose=null;
+  let accessDenied=false,importHandled=false;
+  const sourceReady={channels:false,templates:false},sourceVersion={channels:0,templates:0};
+  const canConfigure=()=>!accessDenied&&sourceReady.channels&&sourceReady.templates;
+  function checkAccess(error){
+    if(![401,403].includes(error.status))return;
+    accessDenied=true;
+    id("workspace").hidden=true;
+    allowClose=null;
+    if(id("confirm").open)id("confirm").close();
+    if(id("dialog").open)id("dialog").close();
+    notify(error.status===401?"登录已过期，请重新登录。":"当前账号没有访问此功能的权限。",false,"error");
+    if(error.status===401){
+      id("authButton").textContent="登录";
+      id("authButton").onclick=()=>location.assign(window.UiTopbar.loginUrl({}));
+    }
+  }
+  async function get(route){
+    try{return await read(route);}catch(error){checkAccess(error);throw error;}
+  }
+  async function post(route,payload){
+    if(!canConfigure())throw new Error("请先重试频道与模板数据，恢复配置权限后再操作。");
+    try{return await write(route,payload);}catch(error){checkAccess(error);throw error;}
+  }
   const templatesPath="/templates";
   const path=(t,suffix="")=>`/templates/${encodeURIComponent(t.id)}${suffix}`;
   const cfg=t=>t.config||{};
@@ -32,12 +55,17 @@
   }
   function anomaly(s,k){if(!k)return true;if(!s?.latest)return false;return k==="anomaly"?["failed","skipped","review"].some(i=>s.latest[i]>0):s.latest[k]>0;}
   function templateRows(){
+    id("new-template").disabled=!canConfigure();
+    if(!sourceReady.templates){
+      id("templates-meta").textContent="模板清单暂未取得";
+      id("templates").innerHTML=empty(6,"模板清单暂未取得，可重试或查看运行记录。");return;
+    }
     const term=id("template-search").value.trim().toLowerCase(),state=id("template-state").value;
     const rows=templates.filter(t=>(!term||[t.id,t.name].some(v=>String(v).toLowerCase().includes(term)))&&anomaly(stats.get(String(t.id)),state));
     id("templates-meta").textContent=`${rows.length} / ${templates.length} 个模板 · ${templates.filter(t=>t.enabled).length} 个已启用`;
     id("templates").innerHTML=rows.map(t=>{
       const c=cfg(t),stat=stats.get(String(t.id)),tid=h(t.id);
-      const btn=(act,label)=>`<button class="row-link" data-act="${act}" data-id="${tid}">${label}</button>`;
+      const btn=(act,label)=>`<button class="row-link" data-act="${act}" data-id="${tid}" ${!canConfigure()&&["edit","run","toggle"].includes(act)?'disabled title="请重试频道与模板数据"':""}>${label}</button>`;
       return `<tr><td><strong>${h(tName(t))}</strong><small class="secondary">#${tid} · v${h(t.version)}</small></td><td>${statusBadge(t.enabled?"enabled":"draft")}<small class="secondary">${c.model==="rules"?"模板规则":"收入画像"}</small></td><td>${h(c.account_ids?.length??0)} 个频道<small class="secondary">${c.ai_copy?"AI 文案":"模板文案"}</small></td><td>${h(scheduleText(c.schedule))}<small class="secondary">下次 ${h(time(stat?.next_at))}</small></td><td>${stat?countsHtml(stat.latest,t.id):"—"}${stat?.latest?.id?`<button class="row-link" data-open-run="${h(stat.latest.id)}">#${h(stat.latest.id)}</button>`:""}</td><td><div class="inline">${btn("edit","编辑")}${btn("run","预演与执行")}${btn("inventory","素材池库存")}${btn("records","记录")}${btn("toggle",t.enabled?"停用":"启用")}</div></td></tr>`;
     }).join("")||empty(6,templates.length?"没有符合条件的模板":"暂无新版模板，可创建草稿后预演。");
   }
@@ -48,8 +76,7 @@
     catch(e){errorBox(node,e,getStats);}
   }
   async function updateTemplates(){
-    templates=(await get(templatesPath)).items;
-    options(id("run-filter"),templates.map(t=>[t.id,tName(t)]),"全部模板");templateRows();void getStats();
+    await loadSource("templates");void getStats();
   }
   function pickerRows(selected){
     const all=new Map(channels.map(c=>[byId(c),c]));
@@ -207,7 +234,7 @@
       <label>时间方式<select name="when"><option value="plan">模板日排期（仅预演）</option><option value="now">立即执行</option><option value="at">一次性预约</option></select></label>
       <label data-day>计划日期（北京）<input name="plan_date" type="date" value="${today}"></label><label data-when hidden>预约时间（北京）<input name="scheduled_at" type="datetime-local"></label>
       <label data-mode="drama" hidden>单语言剧目 ID（可多条）<textarea name="content_ids" rows="2" placeholder="每行一个 Drama ID"></textarea></label>
-      <label data-mode="drama" hidden>跨语言分集资源 ID（可多条）<textarea name="resource_ids" rows="2" placeholder="每行一个资源 ID"></textarea></label>
+      <label data-mode="drama" hidden>跨语言资源 ID（业务系列码，可多条）<textarea name="resource_ids" rows="2" placeholder="每行一个资源 ID"></textarea></label>
       <label data-mode="serial" hidden>连载剧目 ID<input name="content_id"></label><label data-mode="material" hidden>素材 ID<input name="material_id"></label>
       <label data-mode="pool serial" class="stretch" hidden><span id="ids-label"></span><textarea name="inventory" rows="2" placeholder="可逐行粘贴；留空沿用已保存的库存或集序"></textarea></label></div></fieldset>
       ${picker()}<label class="field">整批人工稿（可选）<textarea name="manual_caption" rows="2"></textarea></label>
@@ -229,7 +256,7 @@
       for(const field of form.querySelectorAll("[data-mode]"))field.hidden=!field.dataset.mode.split(" ").includes(e.mode.value);
       form.querySelector("[data-day]").hidden=e.when.value!=="plan";form.querySelector("[data-when]").hidden=e.when.value!=="at";id("ids-label").textContent=e.mode.value==="serial"?"按集序排列的素材 ID":"候选素材 ID";
     }
-    const onInput=ev=>{if(ev.target.closest("[data-picker],#adopted-copy"))return;dirty=true;reset();displayFields();};
+    const onInput=ev=>{if(ev.target.closest("[data-picker],#adopted-copy"))return;if(ev.target===e.manual_caption)dirty=true;reset();displayFields();};
     form.addEventListener("input",onInput);form.addEventListener("change",onInput);displayFields();guardClose(()=>dirty);
     function values(){
       const mode=e.mode.value,account_ids=getIds();if(!account_ids.length)throw new Error("请选择参与预演的频道。");
@@ -238,7 +265,7 @@
       if(e.when.value==="at"){p.scheduled_at=beijingIso(e.scheduled_at.value);if(!p.scheduled_at)throw new Error("请选择预约时间。");}
       if(mode==="drama"){
         p.content_ids=[...new Set(splitIds(e.content_ids.value))];p.resource_ids=[...new Set(splitIds(e.resource_ids.value))];
-        if(p.resource_ids.some(v=>!/^\d+$/.test(v)||/^0/.test(v)))throw new Error("请输入有效的分集资源 ID（正整数）。");
+        if(p.resource_ids.some(v=>!/^(?:[1-9][0-9]{0,30}|[A-Za-z][A-Za-z0-9_-]{0,63})$/.test(v)))throw new Error("请输入有效的业务系列码，例如 12345 或 DW-A01。");
         if(!p.content_ids.length&&!p.resource_ids.length)throw new Error("请输入至少一个剧目或资源 ID。");
       }
       if(mode==="serial"){p.content_id=e.content_id.value.trim();if(!p.content_id)throw new Error("请输入连载剧目 ID。");}
@@ -499,7 +526,8 @@
       id("task-rows").innerHTML=filtered.map((row,i)=>{
         const account=channels.find(ch=>byId(ch)===String(row.account_id)),url=publicUrl(row.publish_url);
         const fields=[["目标时间",time(row.scheduled_at_utc)],["预演与执行复核",proofLine(row)],["剧目",row.drama_name||row.content_id],["素材",row.material_id],["错误码",row.error_code],["选材 / 跳过原因",why(row.reason)],["首选受众 / 题材",audienceTheme(row.decision,"preferred")],["命中受众 / 题材",audienceTheme(row.decision,"selected")],["画像版本",row.profile_version],["文案来源",copyLabel(row)],["采用草稿 ID",row.copy_provenance?.draft_id],["文案回退原因",row.copy_reason],["推广四位码",row.code],["平台回执",row.publish_id],["平台作品 ID",(row.public_video_ids||[]).join("、")]];
-        return `<details class="branch" ${bucket&&i===0?"open":""}><summary>${h(account?name(account):row.account_id)} · ${h(status(row.status))}<span>${row.id?"任务 #"+h(row.id):"等待任务入队"}</span></summary><div class="task-detail"><dl>${fields.filter(([,val])=>val!=null&&val!=="").map(([k,val])=>`<dt class="muted">${h(k)}</dt><dd>${h(val)}</dd>`).join("")}</dl>${row.caption?`<h4>最终文案</h4><p class="caption">${h(row.caption)}</p>`:""}${url?`<a class="row-link" href="${h(url)}" target="_blank" rel="noopener noreferrer">打开 TikTok 作品</a>`:row.publish_id&&rowBucket(row)==="confirmed"?'<p class="muted">公开作品链接待取得</p>':""}</div></details>`;
+        const displayStatus=rowBucket(row)==="review"?"needs_review":row.status;
+        return `<details class="branch" ${bucket&&i===0?"open":""}><summary>${h(account?name(account):row.account_id)} · ${h(status(displayStatus))}<span>${row.id?"任务 #"+h(row.id):"等待任务入队"}</span></summary><div class="task-detail"><dl>${fields.filter(([,val])=>val!=null&&val!=="").map(([k,val])=>`<dt class="muted">${h(k)}</dt><dd>${h(val)}</dd>`).join("")}</dl>${row.caption?`<h4>最终文案</h4><p class="caption">${h(row.caption)}</p>`:""}${url?`<a class="row-link" href="${h(url)}" target="_blank" rel="noopener noreferrer">打开 TikTok 作品</a>`:row.publish_id&&rowBucket(row)==="confirmed"?'<p class="muted">公开作品链接待取得</p>':""}</div></details>`;
       }).join("")||'<p class="empty">此分类暂无任务。</p>';
     }
     id("run-buckets").onclick=ev=>{const btn=ev.target.closest("[data-bucket]");if(btn)render(btn.dataset.bucket);};render(preselect);
@@ -507,6 +535,7 @@
   function inventory(t){
     allowClose=null;modal(`${tName(t)} · 素材池库存`,`<form id="inventory-import" class="group"><label class="field">批量补充素材 ID<textarea name="material_ids" rows="2" placeholder="每行或逗号分隔多个 ID"></textarea></label><div class="inline"><button type="submit" class="button">加入素材池</button><button type="button" id="coverage-preview" class="row-link">预演可覆盖频道</button></div></form><div id="inventory-note" role="status"></div><div id="inventory-table"></div>`);
     let page=1,epoch=0;const form=id("inventory-import"),node=id("inventory-table");
+    for(const button of form.querySelectorAll("button"))button.disabled=!canConfigure();
     const names={available:"未占用 / 待预检",occupied:"已占用",published:"已发布",review:"待核对"};
     async function refresh(){
       const token=++epoch;node.innerHTML='<p class="muted">正在读取库存…</p>';
@@ -539,15 +568,46 @@
   action(id("history-pages"),"click",async ev=>{const b=ev.target.closest("[data-history-page]");if(b&&!b.disabled){historyPage+=Number(b.dataset.historyPage);await loadHistory();}});
   action(id("history-filters"),"submit",async ev=>{ev.preventDefault();historyQuery=selectedHistory();historyPage=1;await loadHistory();});
   id("history-filters").onreset=()=>setTimeout(()=>{historyQuery=selectedHistory();historyPage=1;void loadHistory();},0);
-  boot("ttPromotionAuto",async user=>{
-    actorId=user.id||user.user_id||user.email||user.name;
-    const [acc,initial]=await Promise.all([get("/channels"),get(templatesPath)]);channels=acc.items;templates=initial.items;
-    options(id("run-filter"),templates.map(t=>[t.id,tName(t)]),"全部模板");
-    options(id("history-channel"),channels.map(c=>[byId(c),`${name(c)} · #${byId(c)}`]),"全部频道");
-    templateRows();void getStats();
+  function importSelected(){
+    if(!canConfigure()||importHandled)return;
     const wanted=(new URLSearchParams(location.search).get("accounts")||"").split(",").map(s=>s.trim()).filter(Boolean),visible=new Set(channels.map(byId));
     importedAccounts=[...new Set(wanted)].filter(a=>visible.has(a));
-    if(wanted.length){await edit(null,importedAccounts);notify(importedAccounts.length?`已带入 ${importedAccounts.length} 个可见频道。`:"所选频道当前不可见，请重新选择。",true);}
+    importHandled=true;
+    if(wanted.length&&!id("dialog").open){void edit(null,importedAccounts);notify(importedAccounts.length?`已带入 ${importedAccounts.length} 个可见频道。`:"所选频道当前不可见，请重新选择。",true);}
+  }
+  async function loadSource(key){
+    const accountSource=key==="channels",node=id(accountSource?"channel-source-error":"template-source-error");
+    const version=++sourceVersion[key];
+    sourceReady[key]=false;templateRows();
+    try{
+      const {items}=await get(accountSource?"/channels":templatesPath);
+      if(version!==sourceVersion[key]||accessDenied)return;
+      if(!Array.isArray(items))throw new Error("服务响应缺少清单");
+      if(accountSource){
+        channels=items;
+        options(id("history-channel"),channels.map(c=>[byId(c),`${name(c)} · #${byId(c)}`]),"全部频道");
+      }else{
+        templates=items;
+        options(id("run-filter"),templates.map(t=>[t.id,tName(t)]),"全部模板");
+      }
+      sourceReady[key]=true;node.replaceChildren();
+    }catch(e){
+      if([401,403].includes(e.status))throw e;
+      if(version!==sourceVersion[key]||accessDenied)return;
+      if(accountSource){channels=[];options(id("history-channel"),[],"频道清单未取得");}
+      else{templates=[];options(id("run-filter"),[],"模板清单未取得");}
+      const source=accountSource?"频道清单":"模板清单";
+      errorBox(node,new Error(`${source}暂未取得 · ${e.message}`),()=>loadSource(key));
+    }finally{
+      if(version===sourceVersion[key]&&!accessDenied){templateRows();importSelected();}
+    }
+  }
+  boot("ttPromotionAuto",async user=>{
+    actorId=user.id||user.user_id||user.email||user.name;accessDenied=false;
+    sourceReady.channels=false;sourceReady.templates=false;
+    const sources=await Promise.allSettled([loadSource("channels"),loadSource("templates")]);
+    const blocked=sources.find(s=>s.status==="rejected");if(blocked)throw blocked.reason;
+    if(!accessDenied)void getStats();
   });
 
 })();
