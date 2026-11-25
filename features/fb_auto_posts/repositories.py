@@ -735,9 +735,7 @@ class MaterialRepository:
         target = config.get('hit_drama_publish')
         complete_content_scan = inherit_language or bool(target) or profile_mode
         scan_content_ids = target_content_ids(target, language) if target else priority_content_ids
-        if complete_content_scan and not target and explicit_range and window_lookup is not None and selection_end_epoch-deploy_after <= 7*86400+1:
-            scan_content_ids, window_details = window_lookup.load(self.mysql,app_id,deploy_after,selection_end_epoch,allowed_types)
-        elif complete_content_scan and not target:
+        if complete_content_scan and not target:
             eligible = self.mysql.select(f"""
                 SELECT /*+ MAX_EXECUTION_TIME(45000) */ DISTINCT TRIM(d.content_id) content_id
                   FROM `{self.mysql.schema}`.ads_drama_info d
@@ -746,6 +744,9 @@ class MaterialRepository:
                    AND TRIM(COALESCE(d.content_id,''))<>''
             """, (app_id, deploy_after, selection_end_epoch, *allowed_types))
             scan_content_ids = sorted({str(row["content_id"]) for row in eligible}, key=lambda value: value.encode("utf-8"))
+            if (explicit_range and window_lookup is not None
+                    and selection_end_epoch-deploy_after <= 7*86400+1):
+                window_details = window_lookup.load(self.mysql,app_id,deploy_after,selection_end_epoch,allowed_types)
         if complete_content_scan or len(scan_content_ids) >= self.metric_prefilter_min_content_ids:
             for start_at in range(0, len(scan_content_ids), self.metric_prefilter_batch_size):
                 if self.monotonic_fn() >= deadline:

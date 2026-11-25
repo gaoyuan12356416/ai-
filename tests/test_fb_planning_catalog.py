@@ -63,12 +63,12 @@ class CatalogTests(unittest.TestCase):
         from features.fb_auto_posts.planning_catalog import WindowMetadata
         from unittest.mock import Mock
         mysql=Mock(schema='kunlunads_dev')
-        mysql.select.side_effect=[[{'content_id':'a'}],[{'content_id':'a','drama_name':'latest'}]]
+        mysql.select.return_value=[{'content_id':'a','drama_name':'latest'}]
         window=WindowMetadata(10)
         with ThreadPoolExecutor(3) as pool:
             results=list(pool.map(lambda _:window.load(mysql,1479,9,20,['2']),range(5)))
-        self.assertEqual(mysql.select.call_count,2)
-        self.assertEqual(results[0],(['a'],{'a':{'content_id':'a','drama_name':'latest'}}))
+        self.assertEqual(mysql.select.call_count,1)
+        self.assertEqual(results[0],{'a':{'content_id':'a','drama_name':'latest'}})
         sql,args=mysql.select.call_args.args
         self.assertIn('MAX(d0.id)',sql)
         self.assertIn('GROUP BY d0.content_id',sql)
