@@ -6,10 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import urlencode, urlsplit
 
-from features.social_analytics import adapters, report, routes
+from features.social_analytics import adapters, report, routes, warehouse_reader
 
 
 DAY = "2026-10-19"
@@ -48,6 +50,37 @@ def summarize(catalogs, metrics, actor=SYSTEM, **query):
 
 
 class AttributionTests(unittest.TestCase):
+    def test_warehouse_ownership_reuses_immutable_catalog_but_rechecks_every_actor(self):
+        catalog_rows = [catalog(link_type="manual"), catalog(campaign="second", owner="bob", link_type="manual")]
+        metrics = [metric(), metric(campaign="second", cents=17)]
+        path, platforms = Path("fixture.sqlite3"), ["youtube"]
+        start = Barrier(4)
+
+        def prepare():
+            start.wait(timeout=5)
+            return warehouse_reader.scoped_ownership(path, "v1", platforms, catalog_rows, DAY)
+
+        with patch.object(warehouse_reader, "_ownership_cache", {}), patch.object(
+                warehouse_reader, "restrict", wraps=warehouse_reader.restrict) as restrict:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                entries = [f.result(timeout=6) for f in [executor.submit(prepare) for _ in range(4)]]
+            self.assertTrue(all(entry is entries[0] for entry in entries))
+            self.assertEqual(restrict.call_count, 1)
+            rows, ownership = entries[0]
+            for tenant, owner, role, cents in (
+                    ("t", "alice", "admin", 117), ("t", "alice", "user", 100),
+                    ("t", "bob", "user", 17), ("other", "alice", "admin", 0)):
+                actor = {"tenant_key": tenant, "user_id": owner, "role": role}
+                result = report.summarize(rows, metrics, actor, params(platform=platforms), "fixture", ownership=ownership)
+                self.assertEqual(result["totals"]["revenue_cents"], cents)
+            before, _ = warehouse_reader.scoped_ownership(path, "v1", platforms, catalog_rows, "2020-01-01")
+            self.assertEqual(before, [])
+            with self.assertRaises(report.ReportError):
+                warehouse_reader.scoped_ownership(path, "v2", platforms, [
+                    *catalog_rows, catalog(owner="conflict", link_type="manual")], DAY)
+            updated, _ = warehouse_reader.scoped_ownership(path, "v2", platforms, catalog_rows[1:], DAY)
+            self.assertEqual(updated, catalog_rows[1:])
+
     def test_campaign_name_does_not_affect_join_and_channels_are_isolated(self):
         result = summarize([catalog(), catalog("x")], [metric(cents=123), metric("x", cents=456)])
         self.assertEqual(result["totals"]["revenue_cents"], 579)
