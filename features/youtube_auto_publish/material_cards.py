@@ -20,51 +20,6 @@ from .templates import WorkflowError
 ROUTE = '/api/youtube-auto-publish/material-cards'
 
 
-class CardSource(MaterialSource):
-    def _transfers(self, search, uploader_id):
-        # The intake row has no uploader ID. Its designer is the exact login
-        # name; remark becomes the official material ID when transfer completes.
-        conditions = ["s.data_source=102", "s.type=2", "s.user_id=0", "s.product='Dramawave'",
-                      "s.category='dramawave_post'"]
-        exact_id = re.fullmatch(r'[1-9][0-9]{0,18}', search)
-        if exact_id:
-            conditions.append("s.id=" + search)
-        else:
-            conditions.extend(["s.is_delete=0", "COALESCE(s.remark,'')=''"])
-            if search:
-                conditions.append("LOCATE(LOWER(CONVERT(0x%s USING utf8mb4)),LOWER(s.name))>0"
-                                  % search.encode('utf-8').hex())
-        if uploader_id:
-            if uploader_id == '0':
-                return [], None
-            conditions.append("BINARY s.designer=(SELECT BINARY username FROM kunlunads_dev.admin_users WHERE id=%s)"
-                              % uploader_id)
-        query = ("SELECT HEX(JSON_OBJECT('id',s.id,'name',s.name,'deleted',s.is_delete,'receipt',s.remark)) "
-                 "FROM kunlunads_dev.ads_custom_source s WHERE " + " AND ".join(conditions) +
-                 " ORDER BY s.id DESC LIMIT 100")
-        pending = []
-        for row in self.query_runner(query):
-            item = json.loads(bytes.fromhex(row[0]).decode())
-            receipt = str(item.get('receipt') or '').strip()
-            if exact_id and item['deleted'] == 1 and re.fullmatch(r'[1-9][0-9]{0,18}', receipt):
-                return [], receipt
-            if item['deleted'] == 0 and not receipt:
-                pending.append({'id': str(item['id']), 'name': item['name']})
-        return pending, None
-
-    def _list_snapshot(self, sql, search, uploader_id, compact):
-        # Both lists refresh under one cache key and consume one reader worker.
-        # A transfer-status read failure must leave ready videos selectable.
-        pending, receipt = [], None
-        transfer_error = False
-        try:
-            pending, receipt = self._transfers(search, uploader_id)
-        except (WorkflowError, ValueError, KeyError):
-            transfer_error = True
-        snapshot = super()._list_snapshot(sql, receipt or search, uploader_id, compact)
-        return dict(snapshot, pending_transfers=pending, transfer_status_unavailable=transfer_error)
-
-
 def logged_in_uploader_ids(app, reader):
     # Match the deployed main API's uploader visibility (login history + email).
     def resolve():
@@ -150,7 +105,7 @@ def main():
         ADMIN_MAPPING_MYSQL_DATABASE=os.environ.get('ADMIN_MAPPING_MYSQL_DATABASE', 'kunlunads_dev'))
     reader = readonly_runner(app)
     hosts = tuple(x.strip().lower() for x in os.environ.get('DRAMA_YOUTUBE_SOURCE_HOSTS', ','.join(DEFAULT_HOSTS)).split(',') if x.strip())
-    source = CardSource(os.environ.get('YOUTUBE_AUTO_MATERIAL_SQL_FILE', ''), reader,
+    source = MaterialSource(os.environ.get('YOUTUBE_AUTO_MATERIAL_SQL_FILE', ''), reader,
                             allowed_hosts=hosts, async_cache=True,
                             uploader_ids_provider=logged_in_uploader_ids(app, reader))
     ThreadingHTTPServer(('127.0.0.1', 8851), make_handler(source)).serve_forever()

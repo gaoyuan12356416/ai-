@@ -8,6 +8,25 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from .templates import WorkflowError, has_link_source, long_url
 from .cache import ReadCache
+from .direct_media import is_tianmai_video
+
+
+def fill_direct_languages(items, query_runner):
+    # Resolve only the bounded cards, after the indexed uploader/ID lookup.
+    by_content = {}
+    for item in items:
+        if is_tianmai_video(item['url']) and item['content_id'] and not item['language']:
+            by_content.setdefault(item['content_id'], []).append(item)
+    if not by_content:
+        return
+    literals = ','.join("CONVERT(0x%s USING utf8mb4) COLLATE utf8mb4_unicode_ci" %
+                        key.encode('utf-8').hex() for key in by_content)
+    sql = ("SELECT HEX(MIN(content_id)),HEX(MIN(language)) FROM kunlunads_dev.ads_drama_resource "
+           "FORCE INDEX (content_id) WHERE app_id=1479 AND content_id IN (" + literals + ") "
+           "GROUP BY BINARY content_id HAVING COUNT(DISTINCT language)=1")
+    for key, language in query_runner(sql):
+        for item in by_content.get(bytes.fromhex(key).decode(), []):
+            item['language'] = bytes.fromhex(language).decode()
 
 COLUMNS = ('id','name','url','thumbnail_url','content_id','source_job_id','source_kind','macro_name','macro_desc','language','duration','size','app_id','uploader_id','uploader_name')
 DEFAULT_HOSTS = ('advertising-1306474899.cos.ap-hongkong.myqcloud.com','ai.yingliangads.com','gy.g2flow.com','socialkit-cdn.yingliang.tech')
@@ -74,15 +93,28 @@ class MaterialSource:
             # Casting this column scans the catalog for sparse uploaders.
             condition += (" AND (pool.uploader_id=0 OR pool.uploader_id IS NULL)" if uploader_id == '0'
                           else " AND pool.uploader_id=%s" % uploader_id)
-        query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s ORDER BY pool.id DESC LIMIT 100" % (projection,sql,condition)
+        query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s ORDER BY pool.id DESC LIMIT 100"
         try:
-            rows = self.query_runner(query)
+            rows = [(False, row) for row in self.query_runner(query % (projection, sql, condition))]
+            direct_path = Path(self.sql_file).with_suffix('.direct.sql') if self.sql_file else None
+            if direct_path and direct_path.is_file():
+                direct_sql = validate_sql(direct_path.read_text(encoding='utf-8-sig'))
+                visibility = "(pool.intake_deleted=0 AND pool.receipt='')"
+                if material_id or re.fullmatch(r'[1-9][0-9]{0,18}', search):
+                    # An already selected original ID stays valid after the external importer
+                    # retires it, only when its receipt proves the exact live successor.
+                    visibility = "(" + visibility + " OR (pool.intake_deleted=1 AND pool.receipt_id IS NOT NULL))"
+                direct_query = query % (projection, direct_sql, condition + " AND " + visibility)
+                rows.extend((True, row) for row in self.query_runner(direct_query))
             items = []
-            for row in rows:
+            for direct, row in rows:
                 item = json.loads(bytes.fromhex(row[0]).decode('utf-8'))
                 if not isinstance(item,dict) or re.fullmatch(r'[1-9][0-9]{0,18}',str(item.get('id',''))) is None:
                     continue
-                if not safe_url(item.get('url'), self.allowed_hosts):
+                url = item.get('url')
+                if direct and not is_tianmai_video(url):
+                    continue
+                if not direct and (not safe_url(url, self.allowed_hosts) or is_tianmai_video(url)):
                     continue
                 item = {key:str(item.get(key) or '') for key in COLUMNS}
                 if not safe_url(item['thumbnail_url'],self.allowed_hosts): item['thumbnail_url']=''
@@ -92,6 +124,9 @@ class MaterialSource:
             ids=[item['id'] for item in items]
             if len(ids)!=len(set(ids)):
                 raise WorkflowError('material_source_ambiguous','素材查询存在重复 ID，请管理员调整 SQL',503)
+            items.sort(key=lambda item: int(item['id']), reverse=True)
+            items = items[:100]
+            fill_direct_languages(items, self.query_runner)
             if compact:
                 # Cards need only video fields. Resolve drama/link/cover metadata
                 # for the selected ID through the full read before applying it.

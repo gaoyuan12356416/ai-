@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import requests
 
 from .source import safe_url
+from .direct_media import youtube_download_hosts
 from .templates import WorkflowError
 
 SHA = re.compile(r'[a-f0-9]{64}')
@@ -78,7 +79,7 @@ def dimensions(path):
 def stage_snapshot(material, root, allowed_hosts):
     """The reviewed browser stream reads this exact file, never a mutable CDN response."""
     url = material['url']
-    if not safe_url(url, allowed_hosts):
+    if not safe_url(url, youtube_download_hosts(url, allowed_hosts)):
         raise WorkflowError('regular_invalid_source', '素材的视频地址不可用', 409)
     root.mkdir(parents=True, exist_ok=True)
     temporary = None

@@ -1,4 +1,6 @@
 import json
+import tempfile
+from pathlib import Path
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -6,8 +8,10 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import Mock, patch
 
-from features.youtube_auto_publish.material_cards import CardSource, ROUTE, authorize, make_handler
+from features.youtube_auto_publish.material_cards import ROUTE, authorize, make_handler
 from features.youtube_auto_publish.cache import ReadCache
+from features.youtube_auto_publish.source import MaterialSource
+from features.youtube_auto_publish.direct_media import is_tianmai_video, youtube_download_hosts
 from features.youtube_auto_publish.templates import WorkflowError
 
 
@@ -27,35 +31,29 @@ class TransferStatusTests(unittest.TestCase):
         self.assertTrue(cache.read('card', load)[1]['refreshing'])
         self.assertTrue(loaded.wait(2))
 
-    @staticmethod
-    def encoded(**item):
-        return [json.dumps(item).encode().hex()]
-
-    def test_pending_intake_is_visible_but_never_selectable(self):
-        reader = Mock(return_value=[self.encoded(id=42, name='cut', deleted=0, receipt='')])
-        source = CardSource('', reader)
-        with patch.object(source, '_read', return_value=[{'id': '40'}]):
-            result = source._list_snapshot('SELECT 1', 'cut', '947', True)
-        self.assertEqual(result['items'], [{'id': '40'}])
-        self.assertEqual(result['pending_transfers'], [{'id': '42', 'name': 'cut'}])
-        sql = reader.call_args.args[0]
-        self.assertIn('BINARY username FROM kunlunads_dev.admin_users WHERE id=947', sql)
-        self.assertIn("s.is_delete=0", sql)
-        self.assertIn('0x637574', sql)
-
-    def test_completed_intake_id_resolves_to_scoped_official_card(self):
-        source = CardSource('', Mock(return_value=[self.encoded(id=42, deleted=1, receipt='46')]))
-        with patch.object(source, '_read', return_value=[{'id': '46'}]) as ready:
-            result = source._list_snapshot('SELECT 1', '42', '947', True)
-        self.assertEqual(result['pending_transfers'], [])
-        ready.assert_called_once_with('SELECT 1', search='46', uploader_id='947', compact=True)
-
-    def test_transfer_query_failure_preserves_selectable_cards(self):
-        source = CardSource('', Mock(side_effect=WorkflowError('material_query_failed', 'failed', 503)))
-        with patch.object(source, '_read', return_value=[{'id': '4'}]):
-            result = source._list_snapshot('SELECT 1', '', '', True)
-        self.assertTrue(result['transfer_status_unavailable'])
-        self.assertEqual(result['items'], [{'id': '4'}])
+    def test_library_links_remain_selectable_after_receipt(self):
+        url = 'https://marketing.tianmai.cn/materialcopy/translation/en.mp4'
+        record = dict(id='42', name='cut', url=url, content_id='enStory', app_id='1479', uploader_id='947')
+        def read(sql):
+            if 'GROUP BY BINARY content_id' in sql:
+                return [('enStory'.encode().hex(), 'en'.encode().hex())]
+            if 'intake_deleted' in sql:
+                self.assertIn("pool.id='42'", sql)
+                self.assertIn('pool.receipt_id IS NOT NULL', sql)
+                return [[json.dumps(record).encode().hex()]]
+            return []
+        with tempfile.TemporaryDirectory() as temp:
+            sql = Path(temp) / 'source.sql'
+            sql.write_text('SELECT 1', encoding='utf8')
+            sql.with_suffix('.direct.sql').write_text('SELECT 2', encoding='utf8')
+            item = MaterialSource(sql, read).get('42')
+        self.assertEqual((item['id'], item['url'], item['language']), ('42', url, 'en'))
+        self.assertTrue(is_tianmai_video(url))
+        self.assertIn('marketing.tianmai.cn', youtube_download_hosts(url, ()))
+        for invalid in (url.replace('https:', 'http:'), url.replace('/materialcopy/', '/elsewhere/'),
+                        url.replace('.cn/', '.cn.evil.example/'), url.replace('/translation/', '/%2e%2e/'),
+                        url.replace('.cn/', '.cn@elsewhere.invalid/'), url.replace('.mp4','.html')):
+            self.assertEqual(youtube_download_hosts(invalid, ()), ())
 
 
 class CardRoutes(unittest.TestCase):

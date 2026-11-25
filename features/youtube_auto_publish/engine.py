@@ -61,6 +61,10 @@ def approved_cover_bytes(task: Mapping[str, Any], root: Path) -> tuple[bytes, st
 class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
     allowed_upload_privacy = frozenset({"private"})
 
+    def download(self, url, target, *, allowed_hosts, **options):
+        from .direct_media import youtube_download_hosts
+        return super().download(url, target, allowed_hosts=youtube_download_hosts(url, allowed_hosts), **options)
+
     @staticmethod
     def _safe_error_detail(response):
         # Never persist Google's free-form message, request body or credentials.
