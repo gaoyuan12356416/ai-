@@ -1,5 +1,7 @@
 import json
+from collections import defaultdict
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -104,3 +106,47 @@ class ChannelTests(unittest.TestCase):
             actor = dict(self.actor, permissions={key: True})
             self.assertTrue(http_server.permitted(actor, allow, nav))
             self.assertFalse(http_server.permitted(actor, deny, nav))
+
+    def test_profile_failure_keeps_account_policy_progress_and_pending_legacy_job(self):
+        stats = defaultdict(channels._stats)
+        stats["10"].update(today_published=2, slots={"a", "b", "c"})
+        stats["10"]["inflight"].append({"id": 9, "source": "direct_test", "status": "unknown"})
+        with patch("features.tt_promotion.profiles.profiles_for_accounts", side_effect=ValueError("invalid snapshot")), patch.object(
+            channels, "handoff", return_value=stats
+        ):
+            data = channels.channel_data(self.actor, detail="10", path=self.path, facts=self.source)
+        item = data["channel"]
+        self.assertEqual(set(data["meta"]["module_errors"]), {"profile"})
+        self.assertEqual((item["eligible"], item["enabled"], item["today_published"], item["today_expected"]), (True, True, 2, 3))
+        self.assertEqual((item["legacy_scheduled"], item["legacy_conflict"], item["legacy_inflight_count"]), (False, True, 1))
+        self.assertIsNone(item["has_profile"])
+        self.assertIsNone(item["revenue_28d"])
+        self.assertTrue(data["handoff"]["available"])
+
+    def test_unavailable_handoff_is_unknown_including_when_income_is_available(self):
+        profile = {"accounts": {"10": {"status": "available", "windows": {"28d": {"revenue_cents": 512}}}}, "meta": {"status": "complete"}}
+        with patch("features.tt_promotion.profiles.profiles_for_accounts", return_value=profile), patch.object(
+            channels, "handoff", side_effect=sqlite3.OperationalError("read failed")
+        ):
+            data = channels.channel_data(self.actor, detail="10", path=self.path, facts=self.source)
+        item = data["channel"]
+        self.assertEqual(set(data["meta"]["module_errors"]), {"handoff"})
+        self.assertFalse(data["handoff"]["available"])
+        self.assertEqual(item["revenue_28d"], 5.12)
+        for key in ["legacy_conflict", "legacy_scheduled", "today_published", "today_expected"]:
+            self.assertIsNone(item[key])
+
+    def test_module_retry_reads_only_requested_source(self):
+        profile = {"accounts": {}, "meta": {}}
+        with patch("features.tt_promotion.profiles.profiles_for_accounts", return_value=profile) as portraits, patch.object(
+            channels, "handoff", return_value=defaultdict(channels._stats)
+        ) as plans:
+            for section in ["profile", "handoff"]:
+                portraits.reset_mock()
+                plans.reset_mock()
+                data = channels.channel_data(self.actor, path=self.path, facts=self.source, section=section)
+                self.assertEqual(data["meta"]["section"], section)
+                self.assertEqual(portraits.call_count, int(section == "profile"))
+                self.assertEqual(plans.call_count, int(section == "handoff"))
+            with self.assertRaises(channels.ChannelError):
+                channels.channel_data(self.actor, path=self.path, facts=self.source, section="other")

@@ -1,6 +1,7 @@
 """A small native story-copy consumer; drafts belong to the promotion task."""
 
 import argparse
+import hashlib
 import os
 import sqlite3
 import time
@@ -29,14 +30,23 @@ def draft_facts(slot, channel, choice, template, *, episode=None):
     )
 
 
-def submit(db, slot, channel, choice, config, manual, *, episode=None):
+def facts_key(facts):
+    reviewed={k:facts.get(k) for k in ("episode","language","title","content","product","facts","caption_template")}
+    return hashlib.sha256(dump(reviewed).encode()).hexdigest()
+
+
+def submit(db, slot, channel, choice, config, manual, *, episode=None,adopted=None):
     if manual:
         state, body, source = "final", manual, "manual"
+    elif adopted:
+        state,body,source="final",adopted["caption"],adopted["source"]
     elif config.get("ai_copy"):
         state, body, source = "waiting", "", ""
     else:
         state, body, source = "final", config["caption_template"], "template"
     facts = draft_facts(slot, channel, choice, config["caption_template"], episode=episode)
+    if adopted:
+        facts["provenance"]={**adopted,"overridden_by_manual":bool(manual)}
     db.execute(
         "INSERT INTO ttp_copy(slot_key,facts,state,caption_body,source) VALUES(?,?,?,?,?)",
         (slot, dump(facts), state, body, source),

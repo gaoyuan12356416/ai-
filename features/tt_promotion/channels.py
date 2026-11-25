@@ -6,6 +6,7 @@ from collections import defaultdict
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -276,6 +277,13 @@ def _pool_stats(db, stats, today):
         stats,
         "material_pool",
     )
+    _pending(
+        db.execute("""SELECT id,account_id,status,material_id,NULL AS scheduled_at_utc
+            FROM tt_post_direct_test WHERE status IN ('publishing','unknown','reconciling')
+            OR unknown_outcome=1 OR (publish_id<>'' AND status NOT IN ('published','failed'))"""),
+        stats,
+        "direct_test",
+    )
 
 
 def handoff(actor, db_path=None, auto_path=None, pool_path=None):
@@ -299,9 +307,11 @@ def _setting_rows(path, tenant):
         }
 
 
-def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True):
+def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True, section=None):
     from .profiles import profiles_for_accounts
 
+    if section not in (None, "profile", "handoff"):
+        raise ChannelError(400, "未知的频道数据模块")
     tenant = actor["tenant_key"]
     path = path or promotion_db()
     facts = public_accounts() if facts is None else facts
@@ -312,8 +322,27 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
     ids = list(current) if detail is None else [str(detail)]
     if detail is not None and ids[0] not in current:
         raise ChannelError(404, "未找到频道")
-    profile_set = profiles_for_accounts(ids, actor, detail=detail is not None or not with_handoff)
-    stats = handoff(actor, path) if with_handoff else defaultdict(_stats)
+    errors = {}
+    # Optional read models must never supply account identity or execution permission.
+    try:
+        profile_set = (
+            profiles_for_accounts(ids, actor, detail=detail is not None)
+            if section != "handoff" else {"accounts": {}, "meta": {}}
+        )
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, RuntimeError) as exc:
+        logging.getLogger(__name__).warning("TT channel profile unavailable: %s", type(exc).__name__)
+        profile_set = {"accounts": {}, "meta": {"status": "unavailable", "stale": True}}
+    if profile_set["meta"].get("status") == "unavailable":
+        errors["profile"] = "收入画像暂不可用"
+    read_stats = with_handoff and section != "profile"
+    try:
+        stats = handoff(actor, path) if read_stats else defaultdict(_stats)
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+        logging.getLogger(__name__).warning("TT channel handoff unavailable: %s", type(exc).__name__)
+        stats = defaultdict(_stats)
+        errors["handoff"] = "暂时无法核验新旧排期和在途任务"
+    stats_available = read_stats and "handoff" not in errors
+    meta = dict(profile_set["meta"], module_errors=errors, section=section or "all")
     items = []
     for aid in ids:
         account = current[aid]
@@ -333,7 +362,7 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         reason = account.get("eligibility_reason") or ""
         if auth_eligible and not configured:
             reason = "请在频道详情中设置观看范围、互动和推广披露"
-        profile = profile_set["accounts"].get(aid) or {}
+        profile = profile_set["accounts"].get(aid) or {"status": "unavailable", "windows": {}}
         windows = profile.get("windows", {})
         amount = windows.get("28d", {}).get("revenue_cents")
         audiences = windows.get("all", {}).get("audiences") or []
@@ -346,6 +375,7 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
             {},
         )
         st = stats[aid]
+        legacy_jobs = sum(row["source"] != "promotion" for row in st["inflight"])
         enabled = override.get("enabled") is None or bool(override["enabled"])
         channel = dict(
             account_id=aid,
@@ -360,20 +390,26 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
             policy_configured=configured,
             publish_policy=policy,
             revenue_28d=None if amount is None else amount / 100,
-            has_profile=bool(first),
+            has_profile=None if profile.get("status") == "unavailable" else bool(first),
             audience=first.get("name"),
             themes=[t.get("name") for t in first.get("children", [])[:3]],
-            today_expected=len(st["slots"]),
-            today_published=st["today_published"],
-            last_published_at=st["last_published_at"],
-            legacy_scheduled=bool(st["old_templates"]),
+            today_expected=len(st["slots"]) if stats_available else None,
+            today_published=st["today_published"] if stats_available else None,
+            last_published_at=st["last_published_at"] if stats_available else None,
+            legacy_scheduled=bool(st["old_templates"]) if stats_available else None,
+            legacy_template_count=len(st["old_templates"]) if stats_available else None,
+            legacy_inflight_count=legacy_jobs if stats_available else None,
+            legacy_conflict=bool(st["old_templates"] or legacy_jobs) if stats_available else None,
         )
         if detail is not None:
             return {
                 "channel": channel,
                 "profile": profile,
-                "meta": profile_set["meta"],
-                "handoff": {k: st[k] for k in ("old_templates", "new_templates", "inflight")},
+                "meta": meta,
+                "handoff": dict(
+                    available=stats_available,
+                    **{k: st[k] for k in ("old_templates", "new_templates", "inflight")},
+                ),
             }
         effective = dict(
             policy,
@@ -384,7 +420,7 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         items.append(
             dict(channel, profile=profile, account_settings=effective) if not with_handoff else channel
         )
-    return {"items": items, "meta": profile_set["meta"]}
+    return {"items": items, "meta": meta}
 
 
 def worker_channels(actor):

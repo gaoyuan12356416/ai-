@@ -6,15 +6,24 @@ import os
 import random
 import re
 import sqlite3
+import threading
+import time
+import uuid
+from copy import copy
+from decimal import Decimal, InvalidOperation
+from functools import cached_property
 from datetime import datetime, timedelta
 
 from features.tt_auto_posts.core import AuditActor
 from . import pub_copy
 from .pub_native import PublicationError, Runtime, number
-from .pub_store import BEIJING, connection, dump, install, iso, load, now
+from .pub_store import BEIJING, PreviewStore, connection, dump, install, iso, load, now
 
 DEFAULT_DB = "/mnt/data-disk/tt-promotion/promotion.sqlite3"
 TERMINAL = {"published", "failed", "no_candidate", "canceled", "cancelled", "skipped", "missed"}
+_PREVIEW_WORKERS = threading.BoundedSemaphore(3)
+_PREVIEW_LOCK = threading.Lock()
+_PREVIEW_ACTIVE = set()
 
 
 def audit(actor):
@@ -45,6 +54,36 @@ def safe_caption(raw):
     if "{" in raw or "}" in raw:
         raise PublicationError("文案含不支持的推广宏")
     return text
+
+
+def selection_rule(raw, defaults):
+    raw = {} if raw is None else raw
+    if not isinstance(raw, dict) or set(raw) - set(defaults):
+        raise PublicationError("筛选规则字段无效")
+    rule = {**defaults, **raw}
+    if rule["sort_by"] not in ("spend", "roas") or rule["sort_direction"] not in ("asc", "desc"):
+        raise PublicationError("排序字段或方向无效")
+    for lo, hi in [("spend_min","spend_max"),("roas_min","roas_max"),("duration_min_seconds","duration_max_seconds")]:
+        if lo not in rule:
+            continue
+        for name in (lo, hi):
+            val = rule[name]
+            if val is None or val == "":
+                rule[name] = None
+                continue
+            try:
+                dec = Decimal(str(val))
+                if not dec.is_finite() or dec < 0 or dec > 1e15 or (name.startswith("duration") and dec > 3600):
+                    raise ValueError()
+                rule[name] = float(dec)
+            except (ValueError,InvalidOperation):
+                raise PublicationError("筛选范围必须为有效非负数") from None
+        if rule[lo] is not None and rule[hi] is not None and rule[lo] > rule[hi]:
+            raise PublicationError("范围下限超过上限")
+    if "resource_type_v2" in rule:
+        values = rule["resource_type_v2"]
+        rule["resource_type_v2"] = [] if values == [] else clean_ids(values,"资源类型",r"[A-Za-z0-9_-]{1,64}")
+    return rule
 
 
 def config_for(payload, visible, actor, creator=None):
@@ -92,8 +131,8 @@ def config_for(payload, visible, actor, creator=None):
         cooldown_days=number(payload.get("cooldown_days", 0), 0, 3650, "同剧冷却"),
         caption_template=safe_caption(payload.get("caption_template", "{desc}\n{code}")),
         platform=0,
-        drama_rule={**base, "resource_type_v2": []},
-        material_rule={**base, "duration_min_seconds": 0, "duration_max_seconds": 3600},
+        drama_rule=selection_rule(payload.get("drama_rule"),{**base, "resource_type_v2": []}),
+        material_rule=selection_rule(payload.get("material_rule"),{**base, "duration_min_seconds": 0, "duration_max_seconds": 3600}),
         creator=creator or identity(actor),
     )
 
@@ -117,7 +156,17 @@ def options(payload):
     if mode not in ("template", "drama", "material", "pool", "serial"):
         raise PublicationError("推广方式无效")
     result = {"mode": mode}
-    if mode in ("drama", "serial"):
+    if mode == "drama":
+        for key in ("content_ids", "resource_ids"):
+            if payload.get(key):
+                pattern=r"[1-9][0-9]{0,30}" if key=="resource_ids" else r"[A-Za-z0-9_.:-]{1,128}"
+                result[key] = clean_ids(payload[key],"指定剧目",pattern,500)
+        if "content_id" in payload and payload["content_id"]:
+            old = clean_ids([payload["content_id"]],"指定剧目",r"[A-Za-z0-9_.:-]{1,128}")[0]
+            result["content_ids"] = list(dict.fromkeys([*result.get("content_ids", []),old]))
+        if not (result.get("content_ids") or result.get("resource_ids")):
+            raise PublicationError("请选择至少一部剧或一个资源 ID")
+    if mode == "serial":
         ident = str(payload.get("content_id") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", ident):
             raise PublicationError("请填写有效剧目 ID")
@@ -155,10 +204,10 @@ def visible(template, actor, channels):
 
 def summarize(items):
     states = [i["status"] for i in items]
-    if states and all(s == "published" for s in states):
-        return "published"
-    if any(s in ("unknown", "reconciling") for s in states):
+    if any(i["result_bucket"]=="review" for i in items):
         return "needs_review"
+    if items and all(i["result_bucket"]=="confirmed" for i in items):
+        return "published"
     if states and all(s in TERMINAL for s in states):
         return "completed_with_errors"
     return "running" if any(s not in ("planned", "enqueued") for s in states) else "planned"
@@ -178,12 +227,21 @@ def day_slots(template, account, date):
     return [iso(datetime.fromisoformat(date + "T" + v).replace(tzinfo=BEIJING)) for v in times]
 
 
+def selection_seed(t, account, at):
+    day = datetime.fromisoformat(at).astimezone(BEIJING).date()
+    return f"{t.id}:{t.version}:{account}:{day}"
+
+
 class Publisher:
     def __init__(self, db_path=DEFAULT_DB, runtime=None):
         self.path = str(db_path)
         self.runtime = runtime or Runtime(self.path)
         self.store = self.runtime.store
         install(self.path)
+
+    @cached_property
+    def previews(self):
+        return PreviewStore(self.path)
 
     @staticmethod
     def channel_map(channels):
@@ -256,15 +314,14 @@ class Publisher:
             return public(result)
         if action == "draft":
             return self.start_draft(t, actor, scope, payload)
+        if action == "drafts":
+            return self.start_drafts(t, actor, scope, payload)
         opts = options(payload)
         ids = clean_ids(payload.get("account_ids", t.config["account_ids"]), "频道")
         if not set(ids) <= set(t.config["account_ids"]):
             raise PublicationError("频道不属于此模板", 403)
         if action == "preview":
-            if payload.get("plan_date"):
-                return self.preview_day(t, scope, ids, opts, payload)
-            rows = self.preview(t, scope, ids, opts, when(payload))
-            return {"items": rows, "total": len(rows), "offset": 0, "limit": len(rows)}
+            return self.preview_request(t,actor,scope,ids,opts,payload)
         if action == "run":
             if opts["mode"] == "serial":
                 ids = self._series_order(t, scope, ids, opts)
@@ -274,7 +331,12 @@ class Publisher:
             # Scheduled time is omitted from the hash only for immediate requests.
             stamp = when(payload) if not self._already(op, actor) else None
             key = "manual:" + str(actor["tenant_key"]) + ":" + str(actor["user_id"]) + ":" + op
-            digest = dump([t.id, t.version, ids, opts, payload.get("scheduled_at")])
+            digest_fields=[t.id,t.version,ids,opts,payload.get("scheduled_at")]
+            if payload.get("preview_id") or payload.get("drafts"):
+                digest_fields.extend([payload.get("preview_id"),payload.get("drafts")])
+            digest = dump(digest_fields)
+            if stamp and (payload.get("preview_id") or payload.get("drafts")):
+                opts = self.reviewed(t,actor,scope,ids,opts,payload)
             job_id = self.plan(t, actor, [(i, stamp) for i in ids], opts, key, digest, "manual")
             return self.run_detail(job_id, actor, scope)
         raise PublicationError("没有此操作", 404)
@@ -296,6 +358,8 @@ class Publisher:
             account_id=r["account_id"],
             material_id=r["material_id"],
             template_version=r["template_version"],
+            copy_facts_key=pub_copy.facts_key(load(r["facts"])),
+            origin_preview_id=load(r["facts"]).get("preview_id"),
         )
 
     def start_draft(self, t, actor, scope, payload):
@@ -333,6 +397,93 @@ class Publisher:
                 ("manual:" + str(actor["tenant_key"]) + ":" + str(actor["user_id"]) + ":" + op,),
             ).fetchone()
 
+    def snapshot(self,t,actor,scope,key):
+        r = self.previews.get(str(key),t,actor,scope)
+        if not r:
+            raise PublicationError("预演不存在、已过期或不在可见范围",404)
+        if r["version"] != t.version:
+            raise PublicationError("预演对应旧版模板，请重新预演",409)
+        return r
+
+    def start_drafts(self,t,actor,scope,payload):
+        snap=self.snapshot(t,actor,scope,payload.get("preview_id"))
+        if snap["schedule_version"]!=t.version:
+            raise PublicationError("预演使用的是冻结的旧模板版本",409)
+        op=str(payload.get("operation_id") or "")
+        rows=payload.get("items")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{8,100}",op) or not isinstance(rows,list) or not 1<=len(rows)<=200:
+            raise PublicationError("草稿请求无效")
+        available={}
+        for r in self.previews.rows(snap["id"]):
+            choice=load(r["result"])
+            if choice.get("status")=="eligible":
+                available[(r["account"],str(choice["material_id"]))]=choice
+        ids=[]
+        snapshot_channels=load(snap["scope"])
+        with connection(self.path,write=True) as db:
+            for item in rows:
+                if not isinstance(item,dict):
+                    raise PublicationError("草稿请求无效")
+                account,mid=str(item.get("account_id")),str(item.get("material_id"))
+                choice=available.get((account,mid))
+                if not choice:
+                    raise PublicationError("所选频道和素材不属于本次可执行的预演结果",409)
+                key=hashlib.sha256(dump([snap["id"],account,mid,op]).encode()).hexdigest()
+                if key in ids:
+                    raise PublicationError("草稿频道及素材重复")
+                ids.append(key)
+                facts=pub_copy.draft_facts(key,snapshot_channels[account],choice,
+                                           t.config["caption_template"],episode=choice.get("episode"))
+                facts.update(tenant=actor["tenant_key"],preview_id=snap["id"])
+                db.execute("""INSERT OR IGNORE INTO ttp_draft(slot_key,template_id,template_version,actor_id,
+                    account_id,material_id,created_at,facts) VALUES(?,?,?,?,?,?,?,?)""",
+                           (key,t.id,t.version,actor["user_id"],account,mid,iso(now()),dump(facts)))
+        return {"items":[self.draft(t,actor,scope,key) for key in ids]}
+
+    def reviewed(self,t,actor,scope,ids,opts,payload):
+        snap=self.snapshot(t,actor,scope,payload.get("preview_id"))
+        inputs=load(snap["inputs"])
+        expected=inputs["opts"]
+        selection=lambda values:{k:v for k,v in values.items() if k!="manual_caption"}
+        if (snap["schedule_version"]!=t.version or inputs.get("plan_date") or
+            selection(expected)!=selection(opts) or not set(ids)<=set(load(snap["scope"])) or
+            inputs.get("scheduled_at")!=(when(payload) if payload.get("scheduled_at") else None)):
+            raise PublicationError("预演与执行的模板、时间、频道或选材条件不一致",409)
+        by_account={}
+        for r in self.previews.rows(snap["id"]):
+            if r["account"] in ids:
+                row=load(r["result"])
+                if not row:
+                    raise PublicationError("频道预演尚未完成",409)
+                by_account[r["account"]]={k:row.get(k) for k in ("status","content_id","material_id","reason",
+                    "scheduled_at_utc","seed","profile_version","drama_metrics","material_metrics","copy_facts_key")}
+        if set(by_account)!=set(ids):
+            raise PublicationError("缺少本次执行所需的频道预演",409)
+        adoptions={}
+        requested=payload.get("drafts",[])
+        if not isinstance(requested,list) or len(requested)>len(ids):
+            raise PublicationError("逐条文案请求无效")
+        with connection(self.path) as db:
+            for item in requested:
+                if not isinstance(item,dict):
+                    raise PublicationError("逐条文案请求无效")
+                acct,mid=str(item.get("account_id")),str(item.get("material_id"))
+                r=db.execute("""SELECT * FROM ttp_draft WHERE slot_key=? AND template_id=? AND
+                    template_version=? AND actor_id=? AND account_id=? AND material_id=? AND state='final'""",
+                    (str(item.get("draft_id")),t.id,t.version,actor["user_id"],acct,mid)).fetchone()
+                facts=load(r["facts"]) if r else {}
+                if (not r or acct in adoptions or acct not in by_account or
+                    by_account[acct]["status"]!="eligible" or by_account[acct]["material_id"]!=mid or
+                    facts.get("tenant")!=actor["tenant_key"] or not facts.get("preview_id") or
+                    pub_copy.facts_key(facts)!=by_account[acct].get("copy_facts_key")):
+                    raise PublicationError("草稿未定稿或与预演、频道、素材不匹配",409)
+                edited="edited_caption" in item
+                body=safe_caption(item["edited_caption"] if edited else r["caption_body"])
+                adoptions[acct]=dict(draft_id=r["slot_key"],material_id=mid,source="manual" if edited else r["source"],
+                    generated_source=r["source"],edited=edited,caption=body,actor=actor["user_id"],template_version=t.version,
+                    origin_preview_id=facts["preview_id"],copy_facts_key=pub_copy.facts_key(facts))
+        return dict(opts,preview_id=snap["id"],preview_rows=by_account,adoptions=adoptions)
+
     def plan(self, t, actor, pairs, opts, key, facts, trigger):
         stamp = iso(now())
         digest = hashlib.sha256(facts.encode()).hexdigest()
@@ -367,6 +518,11 @@ class Publisher:
                 for m in opts.get("material_ids", []):
                     db.execute("INSERT OR IGNORE INTO ttp_pool VALUES(?,?)", (t.id, m))
             for acct, at in pairs:
+                slot_opts={k:v for k,v in opts.items() if k not in ("preview_rows","adoptions")}
+                if acct in opts.get("preview_rows",{}):
+                    slot_opts["expected"]=opts["preview_rows"][acct]
+                if acct in opts.get("adoptions",{}):
+                    slot_opts["adopted_draft"]=opts["adoptions"][acct]
                 # One new owner per account/minute. Older native run IDs remain separate.
                 dup = db.execute(
                     """SELECT slot_key FROM ttp_slot WHERE account_id=? AND
@@ -377,7 +533,7 @@ class Publisher:
                 db.execute(
                     "INSERT INTO ttp_slot(slot_key,job_id,account_id,scheduled_at,state,reason,opts,changed_at) "
                     "VALUES(?,?,?,?,?,?,?,?)",
-                    (str(job) + ":" + acct, job, acct, at, state, reason, dump(opts), stamp),
+                    (str(job) + ":" + acct, job, acct, at, state, reason, dump(slot_opts), stamp),
                 )
             return job
 
@@ -415,6 +571,11 @@ class Publisher:
             if complete:
                 raise PublicationError("该连载已发完", 409)
             opts.update(episodes=episodes, episode=idx + 1, material_id=episodes[idx])
+        draft = opts.get("adopted_draft")
+        if draft:
+            if opts.get("material_id") not in (None,draft["material_id"]):
+                raise PublicationError("逐条文案与当前选定集或素材不一致",409)
+            opts["material_id"] = draft["material_id"]
         return opts
 
     @staticmethod
@@ -444,27 +605,54 @@ class Publisher:
                 raise PublicationError("上一集尚未确认发布或需要核对", 409)
         return len(episodes), True
 
-    def sample(self, t, channel, opts, at, key, blocked=(), *, inspect=False):
+    def gate(self,channel,at,*,own="",day_template=None):
         acct = str(channel["account_id"])
-        row = dict(
-            account_id=acct, scheduled_at_utc=at, status="skipped", reason="", conflicts=[], caption=""
-        )
         if not channel.get("enabled"):
-            return dict(row, reason="频道已在新版暂停参与")
+            return "频道已在新版暂停参与",[]
         if not channel.get("eligible"):
-            return dict(
-                row, reason=channel.get("reason") or channel.get("eligibility_reason") or "频道当前不可发布"
-            )
+            return channel.get("reason") or channel.get("eligibility_reason") or "频道当前不可发布",[]
         if not channel.get("drama_language"):
-            return dict(row, reason="尚未设置剧语言")
+            return "尚未设置剧语言",[]
         self.runtime.settings(channel)
         hits = self.runtime.conflicts(acct, at)
-        if hits and not inspect:
-            return dict(row, reason="；".join(hits), conflicts=hits)
+        with connection(self.path) as db:
+            other=db.execute("""SELECT 1 FROM ttp_slot s JOIN ttp_job j ON j.id=s.job_id
+                LEFT JOIN tt_auto_task t ON t.run_id=s.native_run_id AND t.account_id=s.account_id
+                WHERE s.account_id=? AND s.slot_key<>? AND s.state NOT IN ('skipped','missed') AND
+                ((abs(julianday(s.scheduled_at)-julianday(?))*86400<60 AND NOT
+                  (j.trigger_type='auto' AND j.template_id=? AND s.scheduled_at=?)) OR
+                 t.status IN ('publishing','reconciling','unknown') OR t.unknown_outcome=1 OR
+                 (t.status='retry_wait' AND (t.claim_phase='reconcile' OR coalesce(t.publish_id,'')<>''))) LIMIT 1""",
+                 (acct,own,at,day_template or -1,at)).fetchone()
+        if other:
+            hits=[*hits,"新版已有排期或待核对发布任务"]
+        return "；".join(hits),hits
+
+    @staticmethod
+    def cooling(db,acct,at,days,omit=""):
+        if not days:
+            return set()
+        return {r[0] for r in db.execute("""SELECT json_extract(choice,'$.content_id') FROM ttp_slot
+              WHERE account_id=? AND slot_key<>? AND material_id IS NOT NULL AND state NOT IN ('missed','skipped')
+              AND abs(julianday(scheduled_at)-julianday(?))<?""",(acct,omit,at,days)) if r[0]}
+
+    def sample(self, t, channel, opts, at, key, blocked=(), *, inspect=False, gate=None,own=""):
+        acct=str(channel["account_id"])
+        row = dict(account_id=acct, scheduled_at_utc=at, status="skipped", reason="", conflicts=[], caption="",seed=key)
+        reason,hits=self.gate(channel,at,own=own) if gate is None else gate
+        if reason and (not hits or not inspect):
+            return dict(row,reason=reason,conflicts=hits)
         with connection(self.path) as db:
             opts = self._spec(db, t, acct, opts)
+            if opts["mode"]!="serial":
+                opts["cooling"]=sorted(set(opts.get("cooling",[])) | self.cooling(db,acct,at,t.config["cooldown_days"]))
         choice = self.runtime.preview(t, channel, opts, key, blocked)
-        opts_caption = opts.get("manual_caption") or t.config["caption_template"]
+        if choice["material_id"] in blocked or (opts["mode"]!="serial" and choice["content_id"] in opts.get("cooling",[])):
+            raise PublicationError("该素材已被占用或频道仍在同剧冷却期",409)
+        fingerprint=pub_copy.facts_key(pub_copy.draft_facts("",channel,choice,t.config["caption_template"],episode=opts.get("episode")))
+        if opts.get("adopted_draft") and opts["adopted_draft"]["copy_facts_key"]!=fingerprint:
+            raise PublicationError("剧目、语言、集序或素材内容已改变，请重新审稿",409)
+        opts_caption = opts.get("manual_caption") or (opts.get("adopted_draft") or {}).get("caption") or t.config["caption_template"]
         sample = opts_caption
         for k, v in {
             "{{drama_name}}": choice["drama_name"],
@@ -483,72 +671,145 @@ class Publisher:
             reason="；".join(hits) if hits else choice["reason"],
             caption=sample,
             options=opts,
+            episode=opts.get("episode"),
+            copy_facts_key=fingerprint,
         )
 
-    def preview(self, t, scope, ids, opts, at):
-        items = []
-        blocked = set()
-        bound = None
-        if opts["mode"] == "serial":
-            ids = self._series_order(t, scope, ids, opts)
-        for acct in ids:
-            try:
-                if bound:
-                    raise PublicationError("此次连载分配到频道 " + bound, 409)
-                item = self.sample(
-                    t, scope[acct], opts, at, f"{t.id}:{t.version}:{acct}:{at[:10]}", blocked, inspect=True
-                )
-                if item["status"] == "eligible":
-                    blocked.add(item["material_id"])
-                    if opts["mode"] == "serial":
-                        bound = acct
-            except Exception as e:
-                item = dict(
-                    account_id=acct,
-                    scheduled_at_utc=at,
-                    status="skipped",
-                    reason=error_text(e),
-                    conflicts=[],
-                )
-            items.append({k: v for k, v in item.items() if k != "options"})
-        return items
+    def preview_request(self,t,actor,scope,ids,opts,payload):
+        limit=number(payload.get("limit", 8 if payload.get("plan_date") or payload.get("async_preview") else 24),1,24,"每页数量")
+        offset=number(payload.get("offset",0),0,100000,"分页")
+        async_mode=payload.get("async_preview") is True or bool(payload.get("preview_id"))
+        inspect=payload.get("include_conflict_candidates",not async_mode) is True
+        key=payload.get("preview_id")
+        if not key:
+            date=payload.get("plan_date")
+            version=t.version
+            if date:
+                try:
+                    date=datetime.strptime(str(date),"%Y-%m-%d").date().isoformat()
+                except ValueError:
+                    raise PublicationError("日排期预演日期无效") from None
+                with connection(self.path) as db:
+                    day=db.execute("SELECT version,slots FROM ttp_day WHERE template_id=? AND day=?",(t.id,date)).fetchone()
+                if day:
+                    version=day["version"]
+                    pairs=[p for p in load(day["slots"]) if p[0] in ids]
+                else:
+                    pairs=[(acct,at) for acct in ids for at in day_slots(t,acct,date)]
+                pairs.sort(key=lambda p:(p[1],p[0]))
+                at=None
+            else:
+                at=when(payload)
+                pairs=[(acct,at) for acct in ids]
+            inputs=dict(plan_date=date or None,scheduled_at=at if payload.get("scheduled_at") else None,opts=opts,inspect=inspect)
+            fields=("account_id","enabled","eligible","drama_language","account_settings","profile","reason","eligibility_reason")
+            channels={acct:{k:scope[acct][k] for k in fields if k in scope[acct]} for acct in ids}
+            key=uuid.uuid4().hex
+            if date and not async_mode:
+                # Preserve the original offset-only day endpoint within a short review interval.
+                key=hashlib.sha256(dump([t.id,t.version,actor["tenant_key"],actor["user_id"],inputs,
+                    channels,pairs,int(now().timestamp())//300]).encode()).hexdigest()
+            self.previews.create(key,t,version,actor,inputs,channels,pairs)
+        snap=self.snapshot(t,actor,scope,key)
+        if inspect and not load(snap["inputs"]).get("inspect") and snap["state"]=="ready":
+            inputs=load(snap["inputs"])
+            inputs["inspect"]=True
+            with connection(self.previews.path,write=True) as db:
+                db.execute("UPDATE preview SET state='working',inputs=? WHERE id=? AND state='ready'",(dump(inputs),key))
+            snap=self.snapshot(t,actor,scope,key)
+        done=self.launch_preview(snap) if snap["state"]=="working" else None
+        if not async_mode and done:
+            done.wait(2)
+        return self.previews.page(key,offset,limit)
 
-    def preview_day(self, t, scope, ids, opts, payload):
-        try:
-            date = datetime.strptime(str(payload["plan_date"]), "%Y-%m-%d").date().isoformat()
-        except ValueError:
-            raise PublicationError("日排期预演日期无效") from None
-        limit = number(payload.get("limit", 8), 1, 24, "每页数量")
-        offset = number(payload.get("offset", 0), 0, 100000, "分页")
-        with connection(self.path) as db:
-            frozen = db.execute(
-                "SELECT version,slots FROM ttp_day WHERE template_id=? AND day=?", (t.id, date)
-            ).fetchone()
-        if frozen:
-            t = self.store.get_template(t.id, version=frozen["version"])
-            pairs = [p for p in load(frozen["slots"]) if p[0] in ids]
-        else:
-            pairs = [(acct, at) for acct in ids for at in day_slots(t, acct, date)]
-        pairs.sort(key=lambda p: (p[1], p[0]))
-        result = []
-        seen = set()
-        for acct, at in pairs[offset : offset + limit]:
+    def launch_preview(self,snap):
+        slot=(str(self.previews.path),snap["id"])
+        done=threading.Event()
+        with _PREVIEW_LOCK:
+            if slot in _PREVIEW_ACTIVE or not _PREVIEW_WORKERS.acquire(blocking=False):
+                return None
+            _PREVIEW_ACTIVE.add(slot)
+        def compute():
             try:
-                item = self.sample(
-                    t, scope[acct], opts, at, f"{t.id}:{t.version}:{acct}:{date}", seen, inspect=True
-                )
-                if item["status"] == "eligible":
-                    seen.add(item["material_id"])
-            except Exception as e:
-                item = dict(
-                    account_id=acct,
-                    scheduled_at_utc=at,
-                    status="skipped",
-                    reason=error_text(e),
-                    conflicts=[],
-                )
-            result.append({k: v for k, v in item.items() if k != "options"})
-        return dict(items=result, total=len(pairs), limit=limit, offset=offset, template_version=t.version)
+                self.compute_preview(snap)
+            finally:
+                with _PREVIEW_LOCK:
+                    _PREVIEW_ACTIVE.discard(slot)
+                    _PREVIEW_WORKERS.release()
+                done.set()
+        threading.Thread(target=compute,name="tt-promotion-preview",daemon=True).start()
+        return done
+
+    def compute_preview(self,snap):
+        key=snap["id"]
+        token=uuid.uuid4().hex
+        if not self.previews.claim(key,token):
+            return
+        try:
+            inputs=load(snap["inputs"])
+            opts=inputs["opts"]
+            scope=load(snap["scope"])
+            t=self.store.get_template(snap["template"],version=snap["schedule_version"])
+            worker=copy(self)
+            if hasattr(self.runtime,"preview_session"):
+                worker.runtime=self.runtime.preview_session()
+            rows=self.previews.rows(key)
+            # Record every cheap gate before fetching or validating the first candidate.
+            for r in rows:
+                if r["checked"]:
+                    continue
+                detail=None
+                try:
+                    reason,hits=worker.gate(scope[r["account"]],r["at"],day_template=t.id if inputs.get("plan_date") else None)
+                    if reason:
+                        detail=dict(reason=reason,conflicts=hits)
+                except Exception as e:
+                    detail=dict(reason=error_text(e),conflicts=[])
+                if detail:
+                    detail.update(account_id=r["account"],scheduled_at_utc=r["at"],status="skipped",caption="",
+                                  seed=selection_seed(t,r["account"],r["at"]))
+                if not self.previews.write_row(key,token,r["pos"],detail):
+                    return
+                r["result"]=dump(detail) if detail else None
+            if opts["mode"]=="serial" and not inputs.get("plan_date"):
+                order={acct:i for i,acct in enumerate(worker._series_order(t,scope,[r["account"] for r in rows],opts))}
+                rows.sort(key=lambda r:order[r["account"]])
+            seen=set()
+            cooling={}
+            bound=None
+            for r in rows:
+                acct,at=r["account"],r["at"]
+                item=load(r["result"])
+                seed=selection_seed(t,acct,at)
+                inspect=bool(item.get("conflicts") and inputs["inspect"] and not item.get("inspected"))
+                if not item or inspect:
+                    previous=cooling.get(acct,[])
+                    stamp=datetime.fromisoformat(at)
+                    banned=[cid for other,cid in previous if abs((stamp-other).total_seconds())<t.config["cooldown_days"]*86400]
+                    spec=dict(opts,cooling=banned,_catalog_at=snap["created_at"])
+                    try:
+                        if bound and opts["mode"]=="serial":
+                            raise PublicationError("此次连载分配到频道 "+bound,409)
+                        item=worker.sample(t,scope[acct],spec,at,seed,seen,inspect=inspect,
+                                           gate=(item.get("reason",""),item.get("conflicts",[])))
+                        item.pop("options",None)
+                    except Exception as e:
+                        item=dict(account_id=acct,scheduled_at_utc=at,seed=seed,status="skipped",
+                                  conflicts=item.get("conflicts",[]),reason=item.get("reason") or error_text(e),
+                                  candidate_error=error_text(e),caption="")
+                    if inspect:
+                        item["inspected"]=True
+                    if not self.previews.write_row(key,token,r["pos"],item):
+                        return
+                if item["status"]=="eligible":
+                    seen.add(str(item["material_id"]))
+                    cooling.setdefault(acct,[]).append((datetime.fromisoformat(at),item["content_id"]))
+                    if opts["mode"]=="serial":
+                        bound=acct
+            self.previews.finish(key,token,"")
+        except Exception as e:
+            self.previews.finish(key,token,error_text(e))
+
 
     def _series_order(self, t, scope, ids, opts):
         from .profiles import match_drama
@@ -581,6 +842,8 @@ class Publisher:
         return {"items": items}
 
     def run_detail(self, job, actor, scope):
+        from .operations import RESULT
+
         with connection(self.path) as db:
             j = db.execute(
                 "SELECT * FROM ttp_job WHERE id=? AND tenant=?", (job, actor["tenant_key"])
@@ -588,7 +851,7 @@ class Publisher:
             if not j:
                 raise PublicationError("运行记录不存在", 404)
             rows = db.execute(
-                """SELECT s.*,t.id task_id,t.status native_status,t.publish_id,t.publish_url,p.video_ids,
+                f"""SELECT s.*,t.id task_id,t.status native_status,t.publish_id,t.publish_url,t.unknown_outcome,p.video_ids,{RESULT} result_bucket,
                        t.error_code,t.error_message,t.caption,t.content_id,t.material_id native_material,
                        c.source copy_source,c.reason copy_reason
                 FROM ttp_slot s LEFT JOIN tt_auto_task t ON t.run_id=s.native_run_id AND t.account_id=s.account_id
@@ -600,11 +863,34 @@ class Publisher:
         items = []
         for r in rows:
             ch = load(r["choice"])
+            opts=load(r["opts"])
+            expected=opts.get("expected") or {}
+            state=r["native_status"] or r["state"]
+            actual_mid=r["native_material"] or r["material_id"]
+            actual_cid=r["content_id"] or ch.get("content_id","")
+            comparison="not_previewed"
+            detail=""
+            if expected:
+                if state in ("skipped","missed","no_candidate"):
+                    comparison="skipped"
+                    detail=r["reason"] or r["error_message"] or "执行时未通过资格或占用检查"
+                elif not actual_mid:
+                    comparison="pending"
+                    detail="等待执行时选材"
+                elif expected.get("status")=="eligible" and actual_mid==expected.get("material_id") and actual_cid==expected.get("content_id"):
+                    comparison="matched"
+                    detail="执行选材与预演一致"
+                else:
+                    comparison="changed"
+                    detail="执行时根据最新候选、预约、冷却或画像重新选材"
+            adopted=opts.get("adopted_draft")
             items.append(
                 dict(
                     id=r["task_id"],
                     account_id=r["account_id"],
                     status=r["native_status"] or r["state"],
+                    unknown_outcome=bool(r["unknown_outcome"]),
+                    result_bucket=r["result_bucket"],
                     scheduled_at_utc=r["scheduled_at"],
                     reason=r["error_message"] or r["reason"] or ch.get("reason", ""),
                     error_code=r["error_code"],
@@ -612,6 +898,10 @@ class Publisher:
                     material_id=r["native_material"] or r["material_id"],
                     drama_name=ch.get("drama_name", ""),
                     decision=ch.get("decision"),
+                    preview_comparison=dict(status=comparison,reason=detail,preview_id=opts.get("preview_id"),
+                        expected_content_id=expected.get("content_id"),expected_material_id=expected.get("material_id"),
+                        expected=expected,actual_content_id=actual_cid,actual_material_id=actual_mid),
+                    copy_provenance={k:v for k,v in (adopted or {}).items() if k!="caption"} | ({"overridden_by_manual":bool(opts.get("manual_caption"))} if adopted else {}),
                     profile_version=ch.get("profile_version"),
                     caption=r["caption"] or ch.get("caption", ""),
                     copy_source=r["copy_source"],
@@ -712,7 +1002,8 @@ class Publisher:
                 ch,
                 load(s["opts"]),
                 s["scheduled_at"],
-                f"{t.id}:{t.version}:{ch['account_id']}:{s['scheduled_at'][:10]}",
+                selection_seed(t,ch["account_id"],s["scheduled_at"]),
+                own=s["slot_key"],
             )
             if item["status"] != "eligible":
                 raise PublicationError(item["reason"], 409)
@@ -745,6 +1036,8 @@ class Publisher:
                         ),
                     )
                     self._spec(db, t, s["account_id"], opts)
+                elif item["content_id"] in self.cooling(db,s["account_id"],s["scheduled_at"],t.config["cooldown_days"],s["slot_key"]):
+                    raise PublicationError("该频道已预约相同剧目，仍在冷却期",409)
                 try:
                     count = db.execute(
                         """UPDATE ttp_slot SET state='reserved',material_id=?,choice=?,account_json=?,opts=?,
@@ -769,6 +1062,7 @@ class Publisher:
                         t.config,
                         opts.get("manual_caption"),
                         episode=opts.get("episode"),
+                        adopted=opts.get("adopted_draft"),
                     )
             return
         if self.runtime.conflicts(s["account_id"], s["scheduled_at"]):

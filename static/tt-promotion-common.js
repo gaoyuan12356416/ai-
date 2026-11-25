@@ -16,11 +16,30 @@
   }
   function badge(text,style="") {return `<span class="pill ${h(style)}">${h(text)}</span>`;}
   function empty(columns,label) {return `<tr><td colspan="${columns}" class="empty">${h(label)}</td></tr>`;}
-  function notify(message, inside=false) {
+  function notify(message, inside=false, kind="success") {
     const target = inside && id("dialog").open && id("modal-error") ? id("modal-error") : id("notice");
     target.hidden = !message;
+    target.dataset.kind = kind;
+    target.setAttribute("role",kind==="error"?"alert":"status");
     target.textContent = message;
     if (message && inside) target.scrollIntoView({block:"nearest"});
+  }
+  function moduleRetry(node,label,retry) {
+    node.replaceChildren();
+    node.hidden=!label;
+    if(!label)return;
+    node.dataset.kind="error";
+    node.setAttribute("role","alert");
+    const button=document.createElement("button");
+    button.type="button";button.className="button";button.textContent="重试";
+    button.setAttribute("aria-label","重试 · "+label);
+    node.append(document.createTextNode(label+" "),button);
+    button.addEventListener("click",async()=>{
+      button.disabled=true;
+      try{await retry();}
+      catch(e){moduleRetry(node,e.message||label,retry);}
+      finally{button.disabled=false;}
+    });
   }
   async function request(path,options) {
     const res = await fetch(path,{credentials:"same-origin",cache:"no-store",...options,headers:{Accept:"application/json",...(options?.body?{"Content-Type":"application/json"}:{})}});
@@ -60,7 +79,7 @@
       const button = ev.target.closest?.("button");
       if (button?.dataset.busy) return;
       if (button) {button.dataset.busy="1";button.setAttribute("aria-busy","true");}
-      try {await fn(ev);} catch(e) {notify(e.message || "操作失败",true);}
+      try {await fn(ev);} catch(e) {notify(e.message || "操作失败",true,"error");}
       finally {if(button){delete button.dataset.busy;button.removeAttribute("aria-busy");}}
     });
   }
@@ -72,19 +91,37 @@
       nav.textContent=expanded?"收起后台导航":"展开后台导航";
     };
     id("authButton").onclick=()=>location.assign(window.UiTopbar.loginUrl({}));
-    let auth;
-    try {
-      auth = await request("/api/ui/topbar");
-      window.UiTopbar.render({auth,userCard:"#userCard",authButton:"#authButton",refreshButton:"#refreshPage"});
+    let busy=false,scope="";
+    async function reload(){
+     if(busy)return;
+     busy=true;
+     try {
+      const auth = await request("/api/ui/topbar");
+      window.UiTopbar.render({auth,userCard:"#userCard",authButton:"#authButton"});
       id("authButton").onclick=()=>window.UiTopbar.handleAuthAction({auth,api:request});
       window.QuickNav.render({auth,container:"#quickNav",activeKey:key}).catch(()=>{});
-      if (!auth.authenticated || !auth.user) {notify("请先登录 AI 自动后台。");return;}
+      if (!auth.authenticated || !auth.user) {
+        id("workspace").hidden=true;notify("请先登录 AI 自动后台。",false,"error");return;
+      }
+      const nextScope=JSON.stringify([auth.user.tenant_key,auth.user.user_id,auth.user.role,auth.user.permissions]);
+      if(scope && nextScope!==scope){location.reload();return;}
+      scope=nextScope;
       await ready(auth.user);
+      if(id("notice").dataset.kind==="error")notify("");
       id("workspace").hidden=false;
     } catch(e) {
-      notify(e.status===401?"登录已过期，请重新登录。":e.status===403?"当前账号没有访问此功能的权限。":e.message);
+      if ([401,403].includes(e.status)) {
+        id("workspace").hidden=true;
+        if(id("dialog").open)id("dialog").close();
+        notify(e.status===401?"登录已过期，请重新登录。":"当前账号没有访问此功能的权限。",false,"error");
+      } else {
+        moduleRetry(id("notice"),e.message||"页面数据读取失败",reload);
+      }
       if(e.status===401){id("authButton").textContent="登录";id("authButton").onclick=()=>location.assign(window.UiTopbar.loginUrl({}));}
-    } finally {id("loading").hidden=true;}
+     } finally {busy=false;id("loading").hidden=true;}
+    }
+    id("refreshPage").onclick=reload;
+    await reload();
   }
   function byId(row) {return String(row.account_id);}
   function name(row) {return row.nickname || row.account_display_name || row.account_username || byId(row);}
@@ -95,5 +132,5 @@
   function statusBadge(raw) {
     return badge(status(raw),["published","confirmed","completed","eligible","matched","ready","enabled","selected"].includes(raw)?"positive":["failed","unknown","blocked"].includes(raw)?"danger":["skipped","reconciling","conflict","partial","no_candidate","completed_with_errors"].includes(raw)?"warning":"");
   }
-  window.TTPromotion={id,h,money,cents,time,badge,empty,notify,get,post,modal,confirmAction,action,boot,byId,name,status,statusBadge};
+  window.TTPromotion={id,h,money,cents,time,badge,empty,notify,moduleRetry,get,post,modal,confirmAction,action,boot,byId,name,status,statusBadge};
 })();

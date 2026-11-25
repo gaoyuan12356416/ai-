@@ -21,18 +21,29 @@
     <div role="alert" id="notice" hidden></div>
     <div role="status" id="loading">正在加载…</div>
     <section id="workspace" hidden><section class="panel">
-      <div class="section-head"><h2>频道列表</h2><div class="actions"><span id="list-meta" class="muted"></span><button id="bulk" class="button primary" disabled>批量设置</button></div></div>
-      <form id="filters" class="filters">
-        <label>频道<input name="search" type="search" placeholder="昵称或账号 ID"></label>
+      <div class="section-head"><div><h2>频道列表</h2><span id="list-meta" class="muted"></span></div><div class="actions"><button id="bulk" class="button" disabled>批量设置</button><button id="new-for-selected" class="button primary" disabled>用所选频道建模板</button></div></div>
+      <div id="channel-summary" class="channel-summary" role="status"></div>
+      <div id="list-profile-error" class="module-error" hidden></div>
+      <div id="list-handoff-error" class="module-error" hidden></div>
+      <form id="filters" class="filters channel-filters">
+        <label class="channel-search">频道<input name="search" type="search" placeholder="昵称或账号 ID"></label>
+        <button id="filter-toggle" class="button mobile-only" type="button" aria-expanded="false" aria-controls="advanced-filters">筛选与排序</button>
+        <div id="advanced-filters">
         <label>剧语言<select name="language"><option value="">全部语言</option></select></label>
         <label>发布资格<select name="eligible"><option value="">全部</option><option value="yes">可发布</option><option value="no">受限</option></select></label>
+        <label>新版参与<select name="participating"><option value="">全部</option><option value="yes">已参与</option><option value="no">已暂停</option></select></label>
         <label>收入画像<select name="profile"><option value="">全部</option><option value="yes">有收入画像</option><option value="no">暂无画像</option></select></label>
+        <label>第一受众<select name="audience"><option value="">全部受众</option></select></label>
+        <label>旧排期与在途<select name="legacy"><option value="">全部</option><option value="yes">有旧排期或在途</option><option value="no">无旧排期和在途</option><option value="unknown">待核验</option></select></label>
         <label>28 天收入下限（USD）<input name="min" type="number" min="0" step="0.01" placeholder="不限"></label>
         <label>28 天收入上限（USD）<input name="max" type="number" min="0" step="0.01" placeholder="不限"></label>
         <label>排序<select name="sort"><option value="desc">收入从高到低</option><option value="asc">收入从低到高</option><option value="name">按频道名称</option></select></label>
         <button class="button" type="reset">重置</button>
+        </div>
       </form>
-      <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前结果"></th><th>频道 / ID</th><th>剧语言</th><th>发布资格</th><th>最近成功发布</th><th>今日已发 / 应发</th><th>28 天收入</th><th>主要受众 / 题材</th></tr></thead><tbody id="channels"></tbody></table></div>
+      <div id="selected-strip" class="selection-strip" hidden><span id="selected-summary"></span><button id="review-selection" class="row-link" type="button">查看所选频道</button><button id="clear-selection" class="row-link" type="button">清空选择</button></div>
+      <div class="mobile-only mobile-checkbox"><label><input id="select-mobile" type="checkbox"> 选择当前结果</label></div>
+      <div class="table-wrap channel-table"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前结果"></th><th>频道 / ID</th><th>剧语言</th><th>参与 / 发布资格</th><th>旧排期与在途</th><th>最近成功发布</th><th>今日已发 / 应发</th><th>28 天收入</th><th>第一受众 / 题材</th></tr></thead><tbody id="channels"></tbody></table></div>
     </section></section>
   </main>
 </div>

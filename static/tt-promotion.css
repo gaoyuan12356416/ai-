@@ -104,3 +104,40 @@ dialog::backdrop { background: rgba(13,31,54,.52); }
 .policy-checks { display:grid; gap:8px; }
 .policy-checks label { display:flex; align-items:center; gap:8px; }
 #brand-fields { margin-inline-start:24px; }
+
+#notice[data-kind="success"], #modal-error[data-kind="success"] { color:#15523a; background:#e9f6ed; border-color:#a9d2b9; }
+#notice[data-kind="error"], #modal-error[data-kind="error"], .module-error { color:#842936; background:#fff1f2; border:1px solid #e9bec4; border-radius:8px; }
+.module-error { padding:9px 12px; margin:10px 0; }
+.panel>.module-error { margin-inline:18px; }
+.module-error .button, #notice .button { margin-inline-start:6px; min-height:30px; padding:3px 9px; }
+.channel-summary { padding:10px 20px; font-size:13px; color:#3b526c; }
+#advanced-filters { display:contents; }
+.mobile-only { display:none; }
+.selection-strip { display:flex; align-items:center; flex-wrap:wrap; gap:5px 14px; padding:7px 18px; border-block:1px solid #d9e6fa; background:#f2f7ff; }
+.chosen { margin-bottom:16px; }
+.chosen ul { max-height:190px; overflow-y:auto; padding:0; list-style:none; }
+.chosen li { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:4px 8px; border-bottom:1px solid #e2e8f0; }
+.chosen small { color:#596c85; }
+.channel-table th, .channel-table td { padding-inline:clamp(6px,.7vw,12px); }
+@media (max-width:740px) {
+  .mobile-only { display:block; }
+  .channel-summary { padding:7px 12px; }
+  .channel-filters { grid-template-columns:minmax(0,1fr) auto; }
+  .channel-filters #advanced-filters { grid-column:1/-1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; align-items:end; }
+  #filter-toggle[aria-expanded="false"] + #advanced-filters { display:none; }
+  .mobile-checkbox { padding:8px 12px; font-size:12px; color:#53657c; }
+  .selection-strip { padding:7px 12px; }
+  .channel-table { overflow:visible; }
+  .channel-table table, .channel-table tbody { display:block; min-width:0; }
+  .channel-table thead, .channel-table .wide-only { display:none; }
+  .channel-table tbody tr { display:grid; grid-template-columns:20px minmax(0,1fr) auto; grid-template-areas:"check identity readiness" ". progress income"; align-items:start; gap:8px; padding:12px; border-top:1px solid #dbe5f1; }
+  .channel-table td { display:block; max-width:none; padding:0; border:0; font-size:13px; }
+  .channel-table .check { grid-area:check; margin-top:6px; }
+  .channel-table .identity { grid-area:identity; }
+  .channel-table .identity .row-link { padding:0; font-size:15px; }
+  .channel-table .readiness { grid-area:readiness; text-align:right; }
+  .channel-table .progress { grid-area:progress; }
+  .channel-table .income { grid-area:income; text-align:right; font-weight:600; }
+  .channel-table td .mobile-only { font-size:11px; color:#596c85; font-weight:400; }
+  .channel-table .empty { grid-column:1/-1; }
+}

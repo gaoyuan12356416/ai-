@@ -73,19 +73,39 @@ def dispatch(method, path, payload, actor, nav):
     if not any(permitted(actor, page, nav) for page in pages):
         raise ChannelError(403, "没有此功能的访问权限")
     if method == "GET" and path == "/channels":
-        return channels.channel_data(actor)
+        return channels.channel_data(actor, section=payload.get("section"))
     if method == "GET" and re.fullmatch(r"/channels/[0-9]+", path):
-        return channels.channel_data(actor, detail=path.rsplit("/", 1)[1])
+        return channels.channel_data(actor, detail=path.rsplit("/", 1)[1], section=payload.get("section"))
     if method == "POST" and path == "/channels/settings":
         return channels.save_settings(actor, payload)
     if method == "POST" and re.fullmatch(r"/channels/[0-9]+/creator-info", path):
         return {"creator_info": channels.creator_info(path.split("/")[2])}
     if channel_path:
         raise ChannelError(404, "未找到请求的频道操作")
+    inventory = re.fullmatch(r"/templates/([0-9]{1,18})/inventory", path)
+    board = path in ("/history", "/stats/templates") or bool(inventory)
+    # Listing tasks, templates and pages from a frozen preview only requires account visibility.
+    # Avoid recomputing every channel's revenue tree for those requests.
+    scope_only = board or method == "GET" or (path.endswith(("/preview", "/drafts")) and bool(payload.get("preview_id")))
+    if scope_only:
+        identities = channels.public_accounts()["items"]
+        ids = {str(c.get("source_account_id") or c["account_id"]) for c in identities}
+        ids.update(channels._setting_rows(channels.promotion_db(), actor["tenant_key"]))
+        scope = [dict(account_id=account) for account in ids]
+    else:
+        scope = channels.worker_channels(actor)
+    if board:
+        from . import operations
+
+        if method == "GET":
+            return operations.read(path, payload, actor, ids, channels.promotion_db())
+        if method == "POST" and inventory:
+            return operations.add_inventory(channels.promotion_db(), int(inventory[1]), payload, actor, ids)
+        raise ChannelError(405, "此操作不支持该请求方式")
     from .publishing import Publisher
 
     pub = Publisher(channels.promotion_db())
-    return pub.handle(method, path, payload, actor, channels.worker_channels(actor))
+    return pub.handle(method, path, payload, actor, scope)
 
 
 class Handler(BaseHTTPRequestHandler):
