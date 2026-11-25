@@ -120,7 +120,8 @@ def refresh_resources(db, reader, before):
     # invalidate the cached descriptions and portrait just as updates do.
     changed = set()
     if before is not None:
-        statuses = reader.query([f'SELECT DISTINCT HEX(JSON_ARRAY(drama_status)) FROM {RESOURCE} FORCE INDEX(du)'])
+        statuses = reader.query([select('drama_status',
+            f'FROM (SELECT DISTINCT drama_status FROM {RESOURCE} FORCE INDEX(du)) status_keys')])
         for (status,) in statuses:
             cond = 'drama_status IS NULL' if status is None else 'drama_status='+str(int(status))
             # Chunk a long interval if the updater was stopped. If the last

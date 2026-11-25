@@ -38,7 +38,7 @@ class ReconciliationTests(unittest.TestCase):
         class Reader:
             def query(self,statements,**kwargs):
                 sql=statements[0]
-                if 'SELECT DISTINCT HEX(JSON_ARRAY(drama_status))' in sql:return [[0]]
+                if 'SELECT DISTINCT drama_status FROM' in sql:return [[0]]
                 if 'INDEX(du)' in sql:return [['b']]
                 if 'COUNT(*)' in sql:return [['a',1],['b',1],['c',1]]
                 return [['a','1479','en','s','','fresh'],['b','1479','en','s','','changed']]
