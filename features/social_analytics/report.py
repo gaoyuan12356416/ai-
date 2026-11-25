@@ -134,9 +134,11 @@ def identity(row):
 
 
 def resolve(candidates):
-    if not candidates or len({row["key"][0] for row in candidates}) != 1:
+    if not candidates:
         return None
-    if len({identity(row) for row in candidates}) != 1:
+    if len(candidates) > 1 and (
+            len({row["key"][0] for row in candidates}) != 1 or
+            len({identity(row) for row in candidates}) != 1):
         return None
     row = candidates[0]
     return row if row.get("tenant") and row.get("owner") and not row.get("excluded") else None
@@ -228,8 +230,13 @@ def validate_metrics(metrics, platform, days, site_id=None):
         seen.add(key)
 
 
+def campaign_ownership(catalog):
+    by_id = campaign_index(catalog)
+    return by_id, {key: resolve(candidates) for key, candidates in by_id.items()}
+
+
 def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_errors=None,
-              source_metadata=None, metric_coverage=None, iaa_coverage=None):
+              source_metadata=None, metric_coverage=None, iaa_coverage=None, *, ownership=None):
     """Resolve globally before filtering; never join names or af_channel.
 
     _system_report is an internal collector capability. HTTP handlers must
@@ -241,8 +248,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     days = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
     platforms = params["platforms"]
     tt_tenant = site_tenant(catalog)
-    by_id = campaign_index(catalog)
-    resolved = {key: resolve(candidates) for key, candidates in by_id.items()}
+    by_id, resolved = ownership if ownership is not None else campaign_ownership(catalog)
     specs = {source_key(platform, spec["site_id"]): dict(spec, platform=platform)
              for platform in platforms for spec in PLATFORMS[platform]["sources"]}
     # Scoped zero is valid only if the unfiltered source supplied that date.
@@ -268,7 +274,11 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     def is_selected(row):
         return selected(row, actor, params)
 
-    def emit(row, value):
+    def accumulate(target, increments):
+        for field, amount in increments.items():
+            target[field] += amount
+
+    def emit(row, increments):
         key = tuple(row[dimension] for dimension in params["groups"])
         if actor.get("_system_report") is True and "owner" in params["groups"]:
             key = (row["tenant"],) + key
@@ -279,13 +289,13 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                 for name in (dimension, dimension + "_label") if name in row})
             if "owner" in params["groups"]:
                 groups[key]["owner_tenant"] = row["tenant"]
-        add(groups[key], value)
         if row["platform"] == "tiktok" and row["owner"] == UNASSIGNED:
-            groups[key]["tiktok_unassigned_cents"] = groups[key].get("tiktok_unassigned_cents", 0) + value.get("revenue_cents", 0)
-        add(totals, value)
-        add(trend[row["date"]], value)
-        add(platform_values[row["platform"]], value)
-        add(source_values[source_key(row["platform"], row["site_id"])], value)
+            groups[key]["tiktok_unassigned_cents"] = groups[key].get("tiktok_unassigned_cents", 0) + increments.get("revenue_cents", 0)
+        if not increments:
+            return
+        for target in (groups[key], totals, trend[row["date"]], platform_values[row["platform"]],
+                       source_values[source_key(row["platform"], row["site_id"])]):
+            accumulate(target, increments)
 
     for metric in metrics:
         platform, day = metric["platform"], metric["date"]
@@ -295,7 +305,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         source_id = source_key(platform, site)
         if failure(errors, source_id):
             continue
-        add(empty(), metric)
+        # Validate once before using the same increments in every report dimension.
+        normalized = empty()
+        add(normalized, metric)
+        increments = {field: amount for field, amount in normalized.items() if amount}
         if day not in trend:
             raise ReportError("源数据日期超出统计范围，待核实", 503)
         populated[source_id].add(day)
@@ -314,25 +327,25 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             if metric.get("tiktok_unassigned") or not row:
                 group = unassigned_row(candidates, metric.get("tiktok_site_tenant", tt_tenant), day)
                 if is_selected(group) and not failure(catalog_errors, source_id):
-                    add(quality["source"], metric)
-                    add(quality["unmatched"], metric)
+                    accumulate(quality["source"], increments)
+                    accumulate(quality["unmatched"], increments)
                     quality["unmatched_keys"].add(key[2])
-                    emit(group, metric)
+                    emit(group, increments)
                 continue
             quality_visible = is_selected(row)
         if quality_visible:
-            add(quality["source"], metric)
+            accumulate(quality["source"], increments)
         if row:
             if quality_visible:
-                add(quality["attributed"], metric)
+                accumulate(quality["attributed"], increments)
             if is_selected(row):
-                emit(dict(row, date=day, site_id=site), metric)
+                emit(dict(row, date=day, site_id=site), increments)
                 if key[2] != row["key"][0]:
                     quality["corrected_keys"].add(key[2])
         elif quality_visible:
             excluded = bool(candidates) and all(candidate.get("excluded") for candidate in candidates)
             bucket = "excluded" if excluded else "unmatched"
-            add(quality[bucket], metric)
+            accumulate(quality[bucket], increments)
             quality[bucket + "_keys"].add(key[2])
 
     counted_links, publications = set(), defaultdict(list)
@@ -344,31 +357,37 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             continue
         for fact in row.get("publications", []):
             publications[fact["id"]].append((row, fact))
+        if "date" in params["groups"] and row["date"] not in trend:
+            continue
         if not resolved.get(key):
             if row["platform"] != "tiktok" or row.get("excluded"):
                 continue
             group = unassigned_row([row], tt_tenant, "9999-12-31")
             row = {**row, **group, "date": row["date"]}
-        if is_selected(row) and row["link_id"] not in counted_links and row["date"] in trend:
+        if not is_selected(row):
+            continue
+        if row["link_id"] not in counted_links and row["date"] in trend:
             counted_links.add(row["link_id"])
             emit(row, {"links": 1})
-        if is_selected(row) and "date" not in params["groups"]:
+        if "date" not in params["groups"]:
             emit(dict(row, date=days[0]), {})
     publication_conflicts = 0
     publication_conflicts_by_platform = defaultdict(int)
     publication_conflicts_by_source = defaultdict(int)
     for candidates in publications.values():
-        if (candidates[0][0]["platform"] == "tiktok"
+        first_row, first_fact = candidates[0]
+        day, kind = first_fact["date"], first_fact["kind"]
+        if (first_row["platform"] == "tiktok"
                 and len({(fact["date"], fact["kind"]) for _, fact in candidates}) == 1
                 and (any(not resolved.get((row["platform"], row["site_id"], row["key"][0])) for row, _ in candidates)
                      or len({identity(row) for row, _ in candidates}) != 1)):
-            day = candidates[0][1]["date"]
             eligible = [row for row, _ in candidates if not row.get("excluded")]
             group = unassigned_row(eligible, tt_tenant, day)
             if eligible and day in trend and is_selected(group):
                 emit(group, {"published_count": 1})
             continue
-        if (len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1
+        if ((len(candidates) > 1 and
+             len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1)
                 or any(not resolved.get((row["platform"], row["site_id"], row["key"][0]))
                        for row, _ in candidates)):
             can_report = actor.get("_system_report") is True or (
@@ -380,11 +399,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                 for source_id in {source_key(row["platform"], row["site_id"]) for row, _ in candidates}:
                     publication_conflicts_by_source[source_id] += 1
             continue
-        row, fact = candidates[0]
-        if is_selected(row) and fact["date"] in trend:
-            emit(dict(row, date=fact["date"]), {
-                "published_count": 1, "post_count": int(row["platform"] == "x" and fact["kind"] == "post"),
-                "repost_count": int(row["platform"] == "x" and fact["kind"] == "repost")})
+        if day in trend and is_selected(first_row):
+            emit(dict(first_row, date=day), {
+                "published_count": 1, "post_count": int(first_row["platform"] == "x" and kind == "post"),
+                "repost_count": int(first_row["platform"] == "x" and kind == "repost")})
 
     def availability(included, day=None, source_ids=None):
         needed = {day} if day else set(days)
