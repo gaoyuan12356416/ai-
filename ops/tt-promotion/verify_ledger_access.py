@@ -24,7 +24,7 @@ with sqlite3.connect(p.as_uri() + '?mode=ro', uri=True) as db:
 
 
 def check(unit):
-    config = configparser.ConfigParser(interpolation=None)
+    config = configparser.ConfigParser(interpolation=None, strict=False)
     config.read(UNITS / unit)
     service = config["Service"]
     user = pwd.getpwnam(service["User"])
