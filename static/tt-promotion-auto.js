@@ -124,7 +124,7 @@
       const channel=channels.find(c=>byId(c)===String(r.account_id));
       const reasons=[...new Set([why(r.reason),...(r.conflicts||[]).map(why)].filter(Boolean))].join("；");
       const preferred=audienceTheme(r.decision,"preferred"),matched=audienceTheme(r.decision,"selected");
-      return `<tr><td>${h(channel?name(channel):r.account_id)}<small class="secondary">#${h(r.account_id)}</small></td><td>${statusBadge(r.status)}<small class="secondary">${h(time(r.scheduled_at_utc))}</small></td><td>${h(r.drama_name||r.content_id||"—")}<small class="secondary">${h(r.material_id?`素材 ${r.material_id}`:"")}</small></td><td>${h(reasons||"—")}${preferred?`<small class="secondary">首选 · ${h(preferred)}</small>`:""}${matched?`<small class="secondary">命中 · ${h(matched)}</small>`:""}</td><td class="caption">${h(r.caption||"—")}${aiEnabled && r.material_id && ["eligible","ready"].includes(r.status)?`<div><button class="row-link" data-draft-account="${h(r.account_id)}" data-draft-material="${h(r.material_id)}">生成单条 AI 稿</button><div data-draft-result aria-live="polite"></div></div>`:""}</td></tr>`;
+      return `<tr><td>${h(channel?name(channel):r.account_id)}<small class="secondary">#${h(r.account_id)}</small></td><td>${statusBadge(r.status)}<small class="secondary">${h(time(r.scheduled_at_utc))}</small></td><td>${h(r.drama_name||r.content_id||"—")}<small class="secondary">${h(r.material_id?`素材 ${r.material_id}`:"")}</small></td><td>${h(reasons||"—")}${preferred?`<small class="secondary">首选 · ${h(preferred)}</small>`:""}${matched?`<small class="secondary">命中 · ${h(matched)}</small>`:""}</td><td class="caption">${h(r.caption||"—")}${aiEnabled && r.material_id && ["eligible","ready"].includes(r.status)?`<div><button class="row-link" data-draft-account="${h(r.account_id)}" data-draft-material="${h(r.material_id)}" data-draft-at="${h(r.scheduled_at_utc)}">生成单条 AI 稿</button><div data-draft-result aria-live="polite"></div></div>`:""}</td></tr>`;
     }).join("")||empty(5,"没有可预演的任务。");
   }
   function beijingIso(value){
@@ -138,7 +138,7 @@
     modal(`${tName(t)} · 预演与执行`,`<form id="execution">
       <fieldset class="group"><legend>本次任务</legend><div class="form-grid">
       <label>推广方式<select name="mode">${Object.entries(modeNames).map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select></label>
-      <label>执行时间<select name="when"><option value="now">立即执行</option><option value="at">一次性预约</option></select></label>
+      <label>时间方式<select name="when"><option value="plan">模板日排期（仅预演）</option><option value="now">立即执行</option><option value="at">一次性预约</option></select></label><label data-day>计划日期（北京）<input name="plan_date" type="date" value="${new Date(Date.now()+8*3600000).toISOString().slice(0,10)}"></label>
       <label data-when hidden>预约时间（北京）<input name="scheduled_at" type="datetime-local"></label>
       <label data-mode="drama serial" hidden>剧目 ID<input name="content_id" placeholder="Drama ID"></label>
       <label data-mode="material" hidden>素材 ID<input name="material_id" inputmode="numeric"></label>
@@ -149,11 +149,13 @@
       <div class="inline"><button class="button" type="submit">只读预演</button><button class="button primary" id="execute" type="button" disabled>确认执行</button></div></form>
       <div id="preview-output" aria-live="polite"></div>`);
     const form=id("execution"),e=form.elements,getIds=setupPicker(form,pickerRows(scope).filter(([v])=>scope.includes(v)),scope);
-    let previewKey="",previewSeq=0;
-    function reset(){previewSeq++;previewKey="";id("execute").disabled=true;id("preview-output").replaceChildren();}
+    let previewKey="",previewSeq=0,offset=0;
+    function reset(){previewSeq++;previewKey="";offset=0;id("execute").disabled=true;id("preview-output").replaceChildren();}
     function displayFields(){
       for(const node of form.querySelectorAll("[data-mode]"))node.hidden=!node.dataset.mode.split(" ").includes(e.mode.value);
       form.querySelector("[data-when]").hidden=e.when.value!=="at";
+      form.querySelector("[data-day]").hidden=e.when.value!=="plan";
+      id("execute").hidden=e.when.value==="plan";
       id("ids-label").textContent=e.mode.value==="serial"?"按集序排列的素材 ID":"候选素材 ID 列表";
       id("execute").textContent=e.when.value==="at"?"确认预约":"确认执行";
     }
@@ -164,6 +166,10 @@
       const mode=e.mode.value,account_ids=getIds();
       if(!account_ids.length)throw new Error("请至少勾选一个目标频道。");
       const payload={expected_version:t.version,mode,account_ids};
+      if(e.when.value==="plan"){
+        if(!e.plan_date.value)throw new Error("请选择要预演的北京时间日期。");
+        payload.plan_date=e.plan_date.value;payload.offset=offset;payload.limit=8;
+      }
       if(e.when.value==="at"){
         if(!e.scheduled_at.value)throw new Error("请选择本次预约的北京时间。");
         payload.scheduled_at=beijingIso(e.scheduled_at.value);
@@ -191,13 +197,21 @@
         const result=await post(path(t,"/preview"),payload);
         if(seq!==previewSeq || !form.isConnected)return;
         const items=result.items||[];
-        id("preview-output").innerHTML=`<h3>预演结果 · ${items.length} 个频道任务</h3>${t.config.ai_copy&&!payload.manual_caption?'<p class="muted">此处为模板样例。可为单条候选生成并审阅 AI 稿，或按模板在执行时生成。</p>':""}<div class="table-wrap"><table><thead><tr><th>频道</th><th>状态 / 排期</th><th>剧目 / 素材</th><th>选材理由 / 冲突</th><th>文案样例</th></tr></thead><tbody>${resultRows(items,t.config.ai_copy&&!payload.manual_caption)}</tbody></table></div>`;
+        const previewVersion=result.template_version??t.version;
+        const total=result.total??items.length,first=(result.offset??0)+1,last=first+items.length-1;
+        id("preview-output").innerHTML=`<h3>预演结果 · ${total} 个频道任务</h3>${payload.plan_date&&total?`<div class="inline"><span class="muted">${h(payload.plan_date)} 北京时间 · v${h(previewVersion)} · 第 ${first}–${last} 条。候选按本页试算，正式执行时核对占用。</span><button class="row-link" type="button" data-page="-1" ${first<=1?"disabled":""}>上一页</button><button class="row-link" type="button" data-page="1" ${last>=total?"disabled":""}>下一页</button></div>`:""}${t.config.ai_copy&&!payload.manual_caption?'<p class="muted">此处为模板样例。可为单条候选生成并审阅 AI 稿，或按模板在执行时生成。</p>':""}<div class="table-wrap"><table><thead><tr><th>频道</th><th>状态 / 排期</th><th>剧目 / 素材</th><th>选材理由 / 冲突</th><th>文案样例</th></tr></thead><tbody>${resultRows(items,t.config.ai_copy&&!payload.manual_caption&&previewVersion===t.version)}</tbody></table></div>`;
         previewKey=key;
         id("execute").disabled=!items.some(row=>!["failed","blocked","conflict","skipped","no_candidate"].includes(row.status) && !(row.conflicts||[]).length);
         notify("",true);
       }finally{button.disabled=false;}
     });
     action(id("preview-output"),"click",async ev=>{
+      const pager=ev.target.closest("[data-page]");
+      if(pager && !pager.disabled){
+        offset=Math.max(0,offset+Number(pager.dataset.page)*8);
+        form.requestSubmit();
+        return;
+      }
       const button=ev.target.closest("[data-draft-account]");
       if(!button || button.disabled)return;
       const account=button.dataset.draftAccount, material=button.dataset.draftMaterial;
@@ -224,6 +238,12 @@
           for(const check of form.querySelectorAll("[data-accounts] input"))check.checked=check.value===account;
           form.querySelector("[data-count]").textContent="已选 1 个";
           e.mode.value="material";e.material_id.value=material;e.manual_caption.value=draft.caption;
+          if(e.when.value==="plan"){
+            const at=Date.parse(button.dataset.draftAt);
+            if(Number.isFinite(at) && at>Date.now()){
+              e.when.value="at";e.scheduled_at.value=new Date(at+8*3600000).toISOString().slice(0,16);
+            }else{e.when.value="now";}
+          }
           reset();displayFields();
           e.manual_caption.focus();
           notify("已采用单条草稿，请检查文案并重新预演。",true);
@@ -234,7 +254,7 @@
     });
     action(id("execute"),"click",async ev=>{
       const btn=ev.currentTarget,payload=values(),key=JSON.stringify(payload);
-      if(previewKey!==key)throw new Error("配置已变更，请重新预演。");
+      if(payload.plan_date || previewKey!==key)throw new Error("请选择立即执行或一次性预约，并重新预演。");
       const verb=payload.scheduled_at?"预约":"执行";
       if(!await confirmAction(`确认${verb}`,`${tName(t)} · ${modeNames[payload.mode]} · ${payload.account_ids.length} 个所选频道\n${payload.scheduled_at?time(payload.scheduled_at)+"（北京时间）":"立即执行"}。确认后系统将为符合条件的频道创建真实发布任务。`,verb))return;
       btn.disabled=true;

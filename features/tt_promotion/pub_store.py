@@ -75,6 +75,10 @@ CREATE TABLE IF NOT EXISTS ttp_draft(
  facts TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'waiting',attempts INTEGER NOT NULL DEFAULT 0,
  caption_body TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL DEFAULT '',
  next_at TEXT NOT NULL DEFAULT '',lease TEXT NOT NULL DEFAULT '',lease_at TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS ttp_public_receipt(
+ task_id INTEGER PRIMARY KEY,account_id TEXT NOT NULL,creator_username TEXT NOT NULL DEFAULT '',
+ publish_id TEXT NOT NULL DEFAULT '',video_ids TEXT NOT NULL DEFAULT '[]',
+ attempts INTEGER NOT NULL DEFAULT 0,next_check TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS ttp_series(
  tenant TEXT NOT NULL, content_id TEXT NOT NULL, template_id INTEGER NOT NULL,
  account_id TEXT NOT NULL, episodes TEXT NOT NULL, PRIMARY KEY(tenant,content_id));
@@ -104,9 +108,16 @@ CREATE VIEW IF NOT EXISTS tt_promotion_report_task AS
 
 def install(path):
     with connection(path, write=True) as db:
-        for sql in DDL.split(';'):
-            if sql.strip():
-                db.execute(sql)
+        for statement in DDL.split(';'):
+            sql=statement.strip()
+            if not sql:continue
+            if sql.startswith('CREATE VIEW IF NOT EXISTS '):
+                definition=sql.replace('CREATE VIEW IF NOT EXISTS ','CREATE VIEW ',1)
+                view=definition.split()[2]
+                current=db.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",(view,)).fetchone()
+                if current and current['sql']!=definition:
+                    db.execute('DROP VIEW '+view)
+            db.execute(sql)
         # The reserved business ID range also separates GPU jobs, four-code
         # broker keys, immutable redirect files and campaign IDs from legacy.
         row = db.execute("SELECT seq FROM sqlite_sequence WHERE name='tt_auto_task'").fetchone()

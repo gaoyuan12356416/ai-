@@ -1,6 +1,7 @@
 """Adapters around the installed TT selection and Direct Post implementation."""
-import contextlib
-import copy
+import logging
+import re
+import sqlite3
 import os
 from dataclasses import replace
 from datetime import timedelta
@@ -32,12 +33,13 @@ class OldHistory:
         self.omit, self.extra = omit or '', set(extra)
 
     def seen_material_ids(self, ids):
-        result = set(self.legacy.seen_material_ids(ids)) | self.extra.intersection(ids)
+        result = self.extra.intersection(ids)
         if not ids:
             return result
         with connection(self.old) as old, connection(self.app) as app:
             for offset in range(0,len(ids),400):
                 batch=list(ids[offset:offset+400]); marks=','.join('?' for _ in batch)
+                result.update(self.legacy.seen_material_ids(batch))
                 result.update(str(row[0]) for row in old.execute(
                     'SELECT material_id FROM tt_auto_material_ledger WHERE material_id IN ('+marks+')',batch))
                 result.update(str(row[0]) for row in app.execute('SELECT material_id FROM ttp_slot '
@@ -72,7 +74,9 @@ def conflicts(account, at):
     acct=str(account)
     with connection(old) as d:
         for row in d.execute("""SELECT id,status,scheduled_at_utc FROM tt_auto_task WHERE account_id=?
-            AND (status IN ('publishing','unknown','reconciling') OR
+            AND (status IN ('publishing','unknown','reconciling') OR unknown_outcome=1 OR
+            (coalesce(publish_id,'')<>'' AND status NOT IN ('published','failed')) OR
+            (status='retry_wait' AND claim_phase='reconcile') OR
             (status IN ('selecting','preparing') AND julianday(lease_expires_at_utc)>julianday('now')) OR
             (abs((julianday(scheduled_at_utc)-julianday(?))*86400)<60 AND
              status NOT IN ('failed','cancelled','canceled','no_candidate'))) ORDER BY id LIMIT 5""",(acct,at)):
@@ -90,11 +94,12 @@ def conflicts(account, at):
                 results.append('旧自动模板固定时段')
     with connection(pool) as d:
         for row in d.execute("""SELECT id,status FROM tt_post_queue WHERE account_id=?
-            AND (status IN ('publishing','reconciling','unknown') OR
+            AND (status IN ('publishing','reconciling','unknown') OR unknown_outcome=1 OR
+            (coalesce(publish_id,'')<>'' AND status NOT IN ('published','failed')) OR
             (abs((julianday(scheduled_at_utc)-julianday(?))*86400)<60 AND
             status NOT IN ('failed','canceled','cancelled'))) ORDER BY id LIMIT 5""",(acct,at)):
             results.append('旧素材池任务 #%s (%s)'%(row[0],row[1]))
-        for row in d.execute("SELECT id,status FROM tt_post_direct_test WHERE account_id=? AND status IN ('publishing','reconciling','unknown') LIMIT 3",(acct,)):
+        for row in d.execute("SELECT id,status FROM tt_post_direct_test WHERE account_id=? AND (status IN ('publishing','reconciling','unknown') OR unknown_outcome=1 OR (publish_id<>'' AND status NOT IN ('published','failed'))) LIMIT 3",(acct,)):
             results.append('旧立即测试 #%s (%s)'%(row[0],row[1]))
         row=d.execute('SELECT publish_times_json,account_ids_json FROM tt_post_auto_publish_config WHERE enabled=1').fetchone()
         if row and acct in map(str,load(row[1])) and local in load(row[0]):
@@ -174,12 +179,15 @@ class Runtime:
     def conflicts(self,account,at):
         return conflicts(account,at)
 
-    def settings(self,account):
-        old=self.native.legacy_reader.get_account_setting(account)
-        cfg=old.as_dict()
-        for k in ('account_id','updated_at','version','drama_language'):
-            cfg.pop(k,None)
-        return cfg,old.version
+    @staticmethod
+    def settings(channel):
+        raw=channel.get('account_settings') or {}
+        flags=('allow_comment','allow_duet','allow_stitch','brand_content_toggle','brand_organic_toggle','is_aigc')
+        privacy=raw.get('privacy_level')
+        if (raw.get('configured') is False or privacy not in {'PUBLIC_TO_EVERYONE','MUTUAL_FOLLOW_FRIENDS','FOLLOWER_OF_CREATOR','SELF_ONLY'}
+                or any(type(raw.get(k)) not in (bool,int) or raw[k] not in (0,1) for k in flags)):
+            raise PublicationError('请先在新版频道管理设置观看范围、互动偏好和内容披露',409)
+        return dict(privacy_level=privacy,**{k:bool(raw[k]) for k in flags}),int(raw.get('version') or 0)
 
     def preview(self,template,channel,opts,seed,blocked):
         from features.tt_auto_posts.service import _PreviewStore
@@ -206,7 +214,64 @@ class Runtime:
             reason=(ranking.get('reason') or ranking.get('fallback_reason') or '频道收入画像') if ranking else '模板规则排序')
 
     def step(self):
-        return self.executor.execute_next('tt-promotion-worker')
+        report=self.executor.execute_next('tt-promotion-worker')
+        try:
+            self.executor.collect_public_link()
+        except Exception as e:
+            logging.getLogger(__name__).warning('TT public receipt refresh deferred: %s',type(e).__name__)
+        return report
+
+
+class ReceiptGPU:
+    """Retain public facts returned by the credential-bound GPU endpoints."""
+    def __init__(self,delegate,path,task):
+        self.delegate,self.path,self.task=delegate,path,task
+
+    def __getattr__(self,name):
+        return getattr(self.delegate,name)
+
+    def creator_info(self,**args):
+        result=self.delegate.creator_info(**args)
+        if (result.get('source_account_id')==args['source_account_id'] and
+                result.get('job_id')==args['job_id'] and args['source_account_id']==self.task.account_id):
+            handle=str((result.get('creator_info') or {}).get('creator_username') or '').lstrip('@')
+            if re.fullmatch(r'[A-Za-z0-9._]{1,50}',handle):
+                try:
+                    with connection(self.path,write=True) as db:
+                        db.execute("""INSERT INTO ttp_public_receipt(task_id,account_id,creator_username)
+                                 VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET creator_username=excluded.creator_username
+                                 WHERE account_id=excluded.account_id""",(self.task.id,self.task.account_id,handle))
+                except sqlite3.Error:
+                    logging.getLogger(__name__).warning('TT creator handle persistence deferred')
+        return result
+
+    def reconcile(self,**args):
+        result=self.delegate.reconcile(**args)
+        if (not isinstance(result,dict) or result.get('job_id')!=args['job_id']
+                or str(result.get('publish_id') or '')!=str(self.task.publish_id or '')
+                or not self.task.publish_id or args['source_account_id']!=self.task.account_id
+                or result.get('state')!='published' or self.task.account_settings.get('privacy_level')!='PUBLIC_TO_EVERYONE'):
+            return result
+        status=result.get('status')
+        ids=status.get('post_ids') if isinstance(status,dict) else None
+        if not isinstance(ids,list):
+            return result
+        ids=list(dict.fromkeys(str(v) for v in ids if re.fullmatch(r'[1-9][0-9]{0,19}',str(v))))
+        if not ids:return result
+        from .pub_store import dump
+        try:
+            with connection(self.path,write=True) as db:
+                db.execute("""INSERT INTO ttp_public_receipt(task_id,account_id,publish_id,video_ids) VALUES(?,?,?,?)
+                    ON CONFLICT(task_id) DO UPDATE SET publish_id=excluded.publish_id,video_ids=excluded.video_ids
+                    WHERE account_id=excluded.account_id AND (publish_id='' OR publish_id=excluded.publish_id)""",
+                    (self.task.id,self.task.account_id,self.task.publish_id,dump(ids)))
+                row=db.execute('SELECT creator_username FROM ttp_public_receipt WHERE task_id=? AND account_id=? AND publish_id=?',
+                               (self.task.id,self.task.account_id,self.task.publish_id)).fetchone()
+                if len(ids)==1 and row and row[0]:
+                    result=dict(result,publish_url=f'https://www.tiktok.com/@{row[0]}/video/{ids[0]}')
+        except sqlite3.Error:
+            logging.getLogger(__name__).warning('TT public video receipt persistence deferred')
+        return result
 
 
 def promotion_executor(native,path):
@@ -214,6 +279,34 @@ def promotion_executor(native,path):
     from features.tt_auto_posts.links import build_auto_w2a_url,build_auto_short_url,write_auto_short_redirect,render_auto_caption
     from datetime import datetime
     class Executor(AutoPostExecutor):
+        def _video_route_for_task(self,task):
+            route=super()._video_route_for_task(task)
+            return replace(route,gpu_client=ReceiptGPU(route.gpu_client,path,task))
+
+        def collect_public_link(self):
+            stamp=now()
+            with connection(path,write=True) as db:
+                r=db.execute("""SELECT t.id,t.account_id FROM tt_auto_task t LEFT JOIN ttp_public_receipt p ON p.task_id=t.id
+                    WHERE t.status='published' AND t.publish_id<>'' AND t.unknown_outcome=0
+                    AND json_extract(t.account_settings_json,'$.privacy_level')='PUBLIC_TO_EVERYONE'
+                    AND t.publish_url='' AND t.published_at_utc>=? AND coalesce(p.next_check,'')<=?
+                    AND coalesce(p.attempts,0)<8 ORDER BY coalesce(p.next_check,''),t.id LIMIT 1""",
+                    (iso(stamp-timedelta(days=7)),iso(stamp))).fetchone()
+                if not r:return
+                db.execute("""INSERT INTO ttp_public_receipt(task_id,account_id,attempts,next_check) VALUES(?,?,1,?)
+                    ON CONFLICT(task_id) DO UPDATE SET attempts=attempts+1,next_check=excluded.next_check""",
+                    (r['id'],r['account_id'],iso(stamp+timedelta(minutes=30))))
+            task=self.store.get_task(r['id'])
+            gpu=self._video_route_for_task(task).gpu_client
+            with self.account_source.publish_credentials(task.account_id) as creds:
+                response=gpu.reconcile(job_id=task.gpu_job_id,source_account_id=task.account_id,access_token=creds.reveal_access_token())
+            from features.tt_auto_posts.publisher import _public_tiktok_url
+            link=_public_tiktok_url(response.get('publish_url'))
+            if link and response.get('publish_id')==task.publish_id and response.get('state')=='published':
+                with connection(path,write=True) as db:
+                    db.execute("UPDATE tt_auto_task SET publish_url=? WHERE id=? AND status='published' AND publish_id=? AND publish_url=''",
+                               (link,task.id,task.publish_id))
+
         def frozen(self,task):
             with connection(path) as db:
                 row=db.execute("""SELECT s.*,c.caption_body,c.source,v.config_json FROM ttp_slot s
@@ -252,8 +345,18 @@ def promotion_executor(native,path):
             write_auto_short_redirect(self.short_link_root,task.id,url)
             code=self.code_route_broker.freeze_route(task.id,content_id=task.content_id,long_url=url,created_at=str(stamp))
             tmpl=row['caption_body'] or load(row['config_json'])['caption_template']
-            caption=render_auto_caption(tmpl,task.content_id,short_url=build_auto_short_url(task.id),
-                m_url=None,description=choice.get('description') or drama_name,code=code,drama_name=drama_name)
+            def render(text):
+                return render_auto_caption(text,task.content_id,short_url=build_auto_short_url(task.id),
+                    m_url=None,description=choice.get('description') or drama_name,code=code,drama_name=drama_name)
+            try:
+                caption=render(tmpl)
+            except Exception:
+                if task.caption or row['source']!='ai':raise
+                original=load(row['config_json'])['caption_template']
+                caption=render(original)
+                with connection(path,write=True) as db:
+                    db.execute("""UPDATE ttp_copy SET source='template',caption_body=?,reason='AI 成稿展开宏后无效'
+                               WHERE slot_key=? AND source='ai'""",(original,row['slot_key']))
             if task.caption and task.caption!=caption:
                 raise AutoPostExecutionError('tt_promotion_caption_conflict','任务文案与定稿不一致',409)
             if choice.get('code')!=code:

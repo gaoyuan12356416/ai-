@@ -1,3 +1,28 @@
+/* Shared only by the independent promotion pages. */
+:root { color-scheme:light; --tt-ink:#182c46; }
+* { box-sizing:border-box; }
+html { min-width:320px; }
+body { margin:0; min-height:100vh; background:#f3f6fb; color:var(--tt-ink); font:14px/1.5 Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+button,input,select,textarea { font:inherit; }
+button,a { touch-action:manipulation; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline:3px solid #7caafb; outline-offset:2px; }
+.app { display:grid; grid-template-columns:250px minmax(0,1fr); min-height:100vh; }
+.sidebar { padding:23px 17px; color:white; background:linear-gradient(170deg,#10213a,#192f52); }
+.brand { display:flex; align-items:center; gap:10px; margin:0 5px 22px; }
+.brand-mark { display:grid; place-items:center; width:42px; height:42px; border-radius:12px; color:#152d49; background:#ddf3fa; font-weight:800; }
+.brand strong,.brand span { display:block; }
+.brand span { color:#c5d2df; font-size:11px; }
+.main { min-width:0; padding:26px clamp(16px,3vw,42px) 48px; }
+.topbar { margin-bottom:22px; }
+h1,h2,h3,h4 { color:#142a47; }
+h1 { margin:0; line-height:1.25; }
+.actions,.top-actions { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.button { min-height:37px; padding:7px 13px; border:1px solid #c7d5e5; border-radius:9px; background:#fff; color:#24394f; cursor:pointer; }
+.button:hover:not(:disabled) { border-color:#84a5d2; }
+.button:disabled { opacity:.55; cursor:not-allowed; }
+.button.primary { border-color:#245de1; background:#245de1; color:#fff; }
+.panel { background:white; border:1px solid #d6e1ee; border-radius:14px; box-shadow:0 7px 23px rgba(22,44,74,.05); }
+@media(max-width:900px) { .app { grid-template-columns: minmax(0,1fr); align-content:start; } .sidebar { padding:12px 15px; } }
 [hidden] { display: none !important; }
 main .breadcrumb { margin: 0 0 7px; color: #526583; font-size: 13px; }
 .main { max-width: 1600px; width: 100%; margin-inline: auto; }
@@ -75,3 +100,7 @@ dialog::backdrop { background: rgba(13,31,54,.52); }
   #quickNav { grid-column:1/-1; }
   #nav-toggle[aria-expanded="false"] + #quickNav { display:none; }
 }
+
+.policy-checks { display:grid; gap:8px; }
+.policy-checks label { display:flex; align-items:center; gap:8px; }
+#brand-fields { margin-inline-start:24px; }

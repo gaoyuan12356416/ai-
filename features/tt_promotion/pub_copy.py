@@ -8,22 +8,23 @@ from datetime import timedelta
 from .pub_store import connection, dump, iso, load, now
 
 
-def draft_facts(slot,channel,choice,template):
+def draft_facts(slot,channel,choice,template,*,episode=None):
     title=choice['drama_name']
     facts={k:v for k,v in [('title',title),('material',choice.get('description'))] if v}
-    return dict(key=slot,endpoint='tt_auto',language=channel['drama_language'],title=title,
+    if episode:facts['episode']=str(episode)
+    return dict(episode=episode,key=slot,endpoint='tt_auto',language=channel['drama_language'],title=title,
                 content=choice['content_id'],product='DramaWave',facts=facts,
                 caption_template=template)
 
 
-def submit(db,slot,channel,choice,config,manual):
+def submit(db,slot,channel,choice,config,manual,*,episode=None):
     if manual:
         state,body,source='final',manual,'manual'
     elif config.get('ai_copy'):
         state,body,source='waiting','',''
     else:
         state,body,source='final',config['caption_template'],'template'
-    facts=draft_facts(slot,channel,choice,config['caption_template'])
+    facts=draft_facts(slot,channel,choice,config['caption_template'],episode=episode)
     db.execute('INSERT INTO ttp_copy(slot_key,facts,state,caption_body,source) VALUES(?,?,?,?,?)',
                (slot,dump(facts),state,body,source))
 

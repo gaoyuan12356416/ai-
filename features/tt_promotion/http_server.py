@@ -72,6 +72,8 @@ def dispatch(method, path, payload, actor, nav):
         return channels.channel_data(actor,detail=path.rsplit("/",1)[1])
     if method == "POST" and path == "/channels/settings":
         return channels.save_settings(actor,payload)
+    if method == "POST" and re.fullmatch(r"/channels/[0-9]+/creator-info",path):
+        return {"creator_info":channels.creator_info(path.split("/")[2])}
     if channel_path:
         raise ChannelError(404,"未找到请求的频道操作")
     from .publishing import Publisher

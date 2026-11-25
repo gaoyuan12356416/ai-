@@ -4,6 +4,7 @@
   const selected=new Set();
   let items=[],meta={},displayed=[],detailRequest=0;
   const filters=id("filters");
+  const privacyNames={PUBLIC_TO_EVERYONE:"所有人",MUTUAL_FOLLOW_FRIENDS:"互相关注的朋友",FOLLOWER_OF_CREATOR:"关注者",SELF_ONLY:"仅自己"};
   const periodNames={all:"累计","28d":"近 28 天","7d":"近 7 天"};
   function topLabel(value){return typeof value==="object" ? value?.name : value;}
   function filtered(){
@@ -45,7 +46,7 @@
       const themes=(row.themes||[]).map(topLabel).filter(Boolean).slice(0,3).join("、");
       return `<tr><td><input type="checkbox" data-select="${account}" aria-label="${h("选择 "+name(row))}" ${selected.has(byId(row))?"checked":""}></td>
       <td><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">${account}</small></td>
-      <td>${h(row.drama_language||"未配置")}</td><td>${badge(row.eligible?"可发布":"受限",row.eligible?"positive":"warning")}<small class="secondary">${h(row.reason || (row.enabled===false?"新版未参与":""))}</small></td>
+      <td>${h(row.drama_language||"未配置")}</td><td>${badge(row.eligible?"可发布":"受限",row.eligible?"positive":"warning")}<small class="secondary">${h([row.reason,row.enabled===false?"新版未参与":"",row.policy_configured===false||row.publish_policy?.configured===false?"待设置发布策略":""].filter(Boolean).join(" · "))}</small></td>
       <td>${h(time(row.last_published_at))}</td><td>${h(row.today_published??"—")} / ${h(row.today_expected??"—")}</td><td>${h(money(row.revenue_28d))}</td>
       <td>${h(topLabel(row.audience)||"—")}<small class="secondary">${h(themes)}</small></td></tr>`;
     }).join("") || empty(8,items.length?"当前条件下没有频道":"暂无可见频道");
@@ -77,6 +78,85 @@
     }
     return `<div class="form-grid handoff"><div>新版模板${list(data.new_templates)}</div><div>旧排期模板${list(data.old_templates)}</div><div>在途任务${list(data.inflight)}</div></div>`;
   }
+  function policySummary(channel){
+    const policy=channel.publish_policy;
+    if(!policy?.privacy_level || policy.configured===false || channel.policy_configured===false)return "待设置发布策略";
+    const labels=[privacyNames[policy.privacy_level]||policy.privacy_level];
+    if(policy.allow_comment)labels.push("允许评论");
+    if(policy.allow_duet)labels.push("允许合拍");
+    if(policy.allow_stitch)labels.push("允许拼接");
+    if(policy.brand_organic_toggle)labels.push("自有品牌");
+    if(policy.brand_content_toggle)labels.push("第三方品牌");
+    if(policy.is_aigc)labels.push("已声明 AI 内容");
+    return labels.join(" · ");
+  }
+  async function policyEditor(channel){
+    const account=byId(channel),seq=++detailRequest;
+    modal("编辑频道发布策略",`<p>${h(name(channel))} · #${h(account)}</p><div id="policy-area" class="empty">正在读取当前 TikTok 创作者权限…</div>`);
+    let info;
+    try{
+      const result=await post("/channels/"+encodeURIComponent(account)+"/creator-info",{});
+      info=result.creator_info||result;
+    }catch(error){
+      if(seq!==detailRequest || !id("dialog").open)return;
+      id("policy-area").innerHTML='<button type="button" class="button" id="retry-policy">重新读取创作者权限</button>';
+      action(id("retry-policy"),"click",()=>policyEditor(channel));
+      throw error;
+    }
+    if(seq!==detailRequest || !id("dialog").open)return;
+    const allowed=(info.privacy_level_options||[]).filter(v=>Object.hasOwn(privacyNames,v));
+    const saved=channel.policy_configured===false || channel.publish_policy?.configured===false ? {} : channel.publish_policy||{};
+    const controls=[
+      ["allow_comment","允许评论","comment_disabled"],
+      ["allow_duet","允许合拍（Duet）","duet_disabled"],
+      ["allow_stitch","允许拼接（Stitch）","stitch_disabled"]
+    ];
+    modal("编辑频道发布策略",`<form id="channel-policy"><p><strong>${h(info.creator_nickname||name(channel))}</strong> · #${h(account)}${info.creator_username?" · @"+h(info.creator_username):""}</p>
+      <fieldset class="group"><legend>观看范围</legend><label class="field">谁可以观看<select name="privacy_level" required><option value="">请手动选择</option>${allowed.map(v=>`<option value="${h(v)}">${h(privacyNames[v])}</option>`).join("")}</select></label></fieldset>
+      <fieldset class="group"><legend>互动偏好</legend><div class="policy-checks">${controls.map(([key,label,restriction])=>`<label><input type="checkbox" name="${key}" ${info[restriction]!==false?"disabled":""}> ${label}${info[restriction]!==false?' <small class="muted">平台当前已关闭</small>':""}</label>`).join("")}</div></fieldset>
+      <fieldset class="group"><legend>商业推广与 AI 内容披露</legend><div class="policy-checks">
+      <label><input name="commercial" type="checkbox"> 包含商业推广</label><div id="brand-fields" class="policy-checks" hidden>
+      <label><input name="brand_organic_toggle" type="checkbox"> 推广自己的品牌或业务</label>
+      <label><input name="brand_content_toggle" type="checkbox"> 推广第三方品牌或合作方</label></div>
+      <label><input name="is_aigc" type="checkbox"> 声明为 AI 生成或经 AI 显著处理的内容</label></div></fieldset>
+      <div class="modal-foot"><span id="policy-state" aria-live="polite" class="muted"></span><button id="recheck-policy" type="button" class="button" hidden>重新检测平台能力</button><button type="submit" class="button primary">保存新版发布策略</button></div></form>`);
+    const form=id("channel-policy"),e=form.elements;
+    if(allowed.includes(saved.privacy_level))e.privacy_level.value=saved.privacy_level;
+    for(const [key,,restriction] of controls)e[key].checked=info[restriction]===false && saved[key]===true;
+    e.commercial.checked=saved.brand_organic_toggle===true||saved.brand_content_toggle===true;
+    for(const key of ["brand_content_toggle","brand_organic_toggle","is_aigc"])e[key].checked=saved[key]===true;
+    let saving=false;
+    function validate(){
+      id("brand-fields").hidden=!e.commercial.checked;
+      let error="";
+      if(!allowed.length)error="平台未返回可用观看范围，请稍后重新检测。";
+      else if(!allowed.includes(e.privacy_level.value))error="请选择当前频道允许的观看范围。";
+      else if(e.commercial.checked && !e.brand_organic_toggle.checked && !e.brand_content_toggle.checked)error="请至少选择一种商业推广类型。";
+      else if(e.commercial.checked && e.brand_content_toggle.checked && e.privacy_level.value==="SELF_ONLY")error="第三方品牌推广不能使用“仅自己”的观看范围。";
+      id("policy-state").textContent=error;
+      form.querySelector("[type=submit]").disabled=saving || !!error;
+      return !error;
+    }
+    form.addEventListener("change",validate);validate();
+    action(form,"submit",async event=>{
+      event.preventDefault();if(saving || !validate())return;
+      const publish_policy={privacy_level:e.privacy_level.value,brand_content_toggle:e.commercial.checked&&e.brand_content_toggle.checked,
+        brand_organic_toggle:e.commercial.checked&&e.brand_organic_toggle.checked,is_aigc:e.is_aigc.checked};
+      for(const [key,,restriction] of controls)publish_policy[key]=info[restriction]===false && e[key].checked;
+      saving=true;validate();
+      try{
+        await post("/channels/settings",{account_ids:[account],settings:{publish_policy}});
+        await refresh();
+        if(seq!==detailRequest || !id("dialog").open)return;
+        await openDetail(account);notify("已保存该频道的新版发布策略。",true);
+      }catch(error){
+        if(form.isConnected && error.status===409){
+          const retry=id("recheck-policy");retry.hidden=false;retry.onclick=()=>policyEditor({...channel,policy_configured:true,publish_policy});
+        }
+        throw error;
+      }finally{if(form.isConnected){saving=false;validate();}}
+    });
+  }
   async function openDetail(accountId){
     const seq=++detailRequest;
     modal("频道详情",'<div class="empty">正在读取频道、收入画像和交接记录…</div>');
@@ -85,7 +165,9 @@
     const channel=result.channel,profile=result.profile||{},snapshot=result.meta||{};
     modal(name(channel),`<div class="group"><div class="inline">${badge(channel.eligible?"可发布":"受限",channel.eligible?"positive":"warning")} ${h(channel.drama_language||"未配置剧语言")} · ID ${h(accountId)} ${channel.enabled===false?"· 新版未参与":""}</div><p class="muted">${h(channel.reason||"")} 最近成功发布 ${h(time(channel.last_published_at))} · 今日已发 / 应发 ${h(channel.today_published??"—")} / ${h(channel.today_expected??"—")}</p></div>
     <div class="group"><div class="heading"><h3>收入画像</h3><div id="periods" class="periods">${Object.entries(periodNames).map(([v,label])=>`<button class="tab" data-period="${v}">${label}</button>`).join("")}</div></div><div id="window"></div></div>
-    <div class="group"><h3>模板与交接</h3>${handoff(result.handoff||{})}</div>`);
+    <div class="group"><h3>模板与交接</h3>${handoff(result.handoff||{})}</div>
+    <div class="group"><div class="heading"><h3>新版发布策略</h3><button id="edit-policy" class="button" type="button">编辑发布策略</button></div><p class="muted">${h(policySummary(channel))}</p></div>`);
+    action(id("edit-policy"),"click",()=>policyEditor(channel));
     function change(period){
       const w=profile.windows?.[period];
       for(const b of id("periods").querySelectorAll("button")){const active=b.dataset.period===period;b.classList.toggle("selected",active);b.setAttribute("aria-pressed",String(active));}

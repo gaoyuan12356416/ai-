@@ -183,7 +183,10 @@ class Publisher:
         ids=clean_ids(payload.get('account_ids',t.config['account_ids']),'频道')
         if not set(ids)<=set(t.config['account_ids']):raise PublicationError('频道不属于此模板',403)
         if action=='preview':
-            return {'items':self.preview(t,scope,ids,opts,when(payload))}
+            if payload.get('plan_date'):
+                return self.preview_day(t,scope,ids,opts,payload)
+            rows=self.preview(t,scope,ids,opts,when(payload))
+            return {'items':rows,'total':len(rows),'offset':0,'limit':len(rows)}
         if action=='run':
             if opts['mode']=='serial': ids=self._series_order(t,scope,ids,opts)
             op=str(payload.get('operation_id') or '')
@@ -280,10 +283,17 @@ class Publisher:
     def _series_state(db,row,episodes):
         if not row:return 0,False
         for idx,m in enumerate(episodes):
-            state=db.execute("""SELECT s.state,t.status FROM ttp_slot s LEFT JOIN tt_auto_task t ON t.run_id=s.native_run_id
+            state=db.execute("""SELECT s.opts,s.account_id,j.tenant,j.template_id,t.status,t.publish_id,t.unknown_outcome
+                FROM ttp_slot s JOIN ttp_job j ON j.id=s.job_id LEFT JOIN tt_auto_task t ON t.run_id=s.native_run_id
                 AND t.account_id=s.account_id WHERE s.material_id=?""",(m,)).fetchone()
             if not state:return idx,False
-            if state['status']!='published':raise PublicationError('上一集尚未确认发布或需要核对',409)
+            opts=load(state['opts'])
+            if (state['tenant']!=row['tenant'] or state['template_id']!=row['template_id']
+                    or state['account_id']!=row['account_id'] or opts.get('mode')!='serial'
+                    or opts.get('content_id')!=row['content_id'] or opts.get('episode')!=idx+1):
+                raise PublicationError('连载素材已被其他任务占用，请核对该集',409)
+            if state['status']!='published' or not state['publish_id'] or state['unknown_outcome']:
+                raise PublicationError('上一集尚未确认发布或需要核对',409)
         return len(episodes),True
 
     def sample(self,t,channel,opts,at,key,blocked=(),*,inspect=False):
@@ -291,6 +301,7 @@ class Publisher:
         row=dict(account_id=acct,scheduled_at_utc=at,status='skipped',reason='',conflicts=[],caption='')
         if not channel.get('eligible') or not channel.get('enabled') or not channel.get('drama_language'):
             return dict(row,reason=channel.get('reason') or channel.get('eligibility_reason') or '频道未参与、不可发布或尚未设置剧语言')
+        self.runtime.settings(channel)
         hits=self.runtime.conflicts(acct,at)
         if hits and not inspect:return dict(row,reason='；'.join(hits),conflicts=hits)
         with connection(self.path) as db:
@@ -321,6 +332,30 @@ class Publisher:
             items.append({k:v for k,v in item.items() if k!='options'})
         return items
 
+    def preview_day(self,t,scope,ids,opts,payload):
+        try:
+            date=datetime.strptime(str(payload['plan_date']),'%Y-%m-%d').date().isoformat()
+        except ValueError:raise PublicationError('日排期预演日期无效') from None
+        limit=number(payload.get('limit',8),1,24,'每页数量')
+        offset=number(payload.get('offset',0),0,100000,'分页')
+        with connection(self.path) as db:
+            frozen=db.execute('SELECT version,slots FROM ttp_day WHERE template_id=? AND day=?',(t.id,date)).fetchone()
+        if frozen:
+            t=self.store.get_template(t.id,version=frozen['version'])
+            pairs=[p for p in load(frozen['slots']) if p[0] in ids]
+        else:
+            pairs=[(acct,at) for acct in ids for at in day_slots(t,acct,date)]
+        pairs.sort(key=lambda p:(p[1],p[0]))
+        result=[];seen=set()
+        for acct,at in pairs[offset:offset+limit]:
+            try:
+                item=self.sample(t,scope[acct],opts,at,f'{t.id}:{t.version}:{acct}:{date}',seen,inspect=True)
+                if item['status']=='eligible':seen.add(item['material_id'])
+            except Exception as e:
+                item=dict(account_id=acct,scheduled_at_utc=at,status='skipped',reason=error_text(e),conflicts=[])
+            result.append({k:v for k,v in item.items() if k!='options'})
+        return dict(items=result,total=len(pairs),limit=limit,offset=offset,template_version=t.version)
+
     def _series_order(self,t,scope,ids,opts):
         from .profiles import match_drama
         source = getattr(getattr(getattr(self.runtime,'native',None),'selector',None),'source',None)
@@ -342,11 +377,11 @@ class Publisher:
         with connection(self.path) as db:
             j=db.execute('SELECT * FROM ttp_job WHERE id=? AND tenant=?',(job,actor['tenant_key'])).fetchone()
             if not j:raise PublicationError('运行记录不存在',404)
-            rows=db.execute("""SELECT s.*,t.id task_id,t.status native_status,t.publish_id,t.publish_url,
+            rows=db.execute("""SELECT s.*,t.id task_id,t.status native_status,t.publish_id,t.publish_url,p.video_ids,
                        t.error_code,t.error_message,t.caption,t.content_id,t.material_id native_material,
                        c.source copy_source,c.reason copy_reason
                 FROM ttp_slot s LEFT JOIN tt_auto_task t ON t.run_id=s.native_run_id AND t.account_id=s.account_id
-                LEFT JOIN ttp_copy c ON c.slot_key=s.slot_key WHERE s.job_id=? ORDER BY s.rowid""",(job,)).fetchall()
+                LEFT JOIN ttp_copy c ON c.slot_key=s.slot_key LEFT JOIN ttp_public_receipt p ON p.task_id=t.id WHERE s.job_id=? ORDER BY s.rowid""",(job,)).fetchall()
         if not all(r['account_id'] in scope for r in rows):raise PublicationError('运行记录不存在',404)
         items=[]
         for r in rows:
@@ -357,7 +392,7 @@ class Publisher:
                 material_id=r['native_material'] or r['material_id'],drama_name=ch.get('drama_name',''),
                 decision=ch.get('decision'),profile_version=ch.get('profile_version'),caption=r['caption'] or ch.get('caption',''),
                 copy_source=r['copy_source'],copy_reason=r['copy_reason'],code=ch.get('code'),publish_id=r['publish_id'],
-                publish_url=r['publish_url']))
+                publish_url=r['publish_url'],public_video_ids=load(r['video_ids']) if r['video_ids'] else []))
         return dict(id=j['id'],template_id=j['template_id'],template_name=j['template_name'],version=j['version'],
              status=summarize(items),trigger_type=j['trigger_type'],created_at=j['created_at'],
              scheduled_at_utc=min((r['scheduled_at'] for r in rows),default=None),items=items)
@@ -419,7 +454,7 @@ class Publisher:
                 f"{t.id}:{t.version}:{ch['account_id']}:{s['scheduled_at'][:10]}")
             if item['status']!='eligible':raise PublicationError(item['reason'],409)
             opts=item.pop('options')
-            settings,setting_version=self.runtime.settings(s['account_id'])
+            settings,setting_version=self.runtime.settings(ch)
             acct=dict(settings=settings,version=setting_version,drama_language=ch['drama_language'],
                       username=ch.get('username') or ch.get('account_username') or '',
                       display_name=ch.get('nickname') or ch.get('display_name') or ch.get('name') or '')
@@ -435,7 +470,7 @@ class Publisher:
                         (item['material_id'],dump(item),dump(acct),dump(opts),iso(current),s['slot_key'])).rowcount
                 except sqlite3.IntegrityError:
                     raise PublicationError('该素材已被其他任务预约',409) from None
-                if count:pub_copy.submit(db,s['slot_key'],ch,item,t.config,opts.get('manual_caption'))
+                if count:pub_copy.submit(db,s['slot_key'],ch,item,t.config,opts.get('manual_caption'),episode=opts.get('episode'))
             return
         if self.runtime.conflicts(s['account_id'],s['scheduled_at']):
             raise PublicationError('旧排期或原发布任务占用该频道',409)

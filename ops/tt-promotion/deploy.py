@@ -117,6 +117,8 @@ def stage(sha_id):
     if (folder/"manifest.json").is_file():
         return folder
     manifest={"commit":sha_id,"files":[],"links":[],"units":list(UNITS),"new_units":{}}
+    for private in ("before","stage"):
+        (folder/private).mkdir(mode=0o700,exist_ok=True)
     runtime=folder/"runtime"
     runtime.mkdir(exist_ok=True)
     fr=runtime/"features"
@@ -137,7 +139,9 @@ def stage(sha_id):
         if p.is_symlink():
             p.unlink()
         if not p.exists():
-            p.symlink_to((WAREHOUSE/"features"/name).resolve())
+            # The warehouse's outer deployment directory is root-only.
+            # Give the TT service its required Python modules, not access to that directory.
+            shutil.copytree(WAREHOUSE/"features"/name,p,ignore=shutil.ignore_patterns("__pycache__","*.pyc"))
     for name in ("vendor","scripts","ops"):
         if not (runtime/name).exists():
             (runtime/name).symlink_to((TT/name).resolve(),target_is_directory=True)
@@ -184,6 +188,7 @@ def stage(sha_id):
         dest=folder/("report-"+name)
         if not dest.exists():
             shutil.copytree(base,dest,symlinks=True,ignore=shutil.ignore_patterns("__pycache__",".git"))
+            dest.chmod(0o700)
         if name!="post":
             if read(base/EFFECTS) not in (old_effects,source_effects):
                 raise ValueError("TT attribution live variant needs review: "+name)

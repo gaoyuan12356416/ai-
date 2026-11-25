@@ -11,7 +11,7 @@ import sqlite3
 import urllib.error
 import urllib.request
 
-from features.tt_posts.core import normalize_drama_language
+from features.tt_posts.core import TTPostAccountSettings, normalize_drama_language
 
 BEIJING = timezone(timedelta(hours=8))
 DEFAULT_DB = "/mnt/data-disk/tt-promotion/promotion.sqlite3"
@@ -38,27 +38,55 @@ def readonly(path):
 
 def initialize(path):
     with closing(sqlite3.connect(path, timeout=10)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
         db.execute("""CREATE TABLE IF NOT EXISTS promotion_channel_setting(
             tenant TEXT NOT NULL, account_id TEXT NOT NULL,
             enabled INTEGER CHECK(enabled IN (0,1)), language TEXT,
             updated_by TEXT NOT NULL, updated_at TEXT NOT NULL,
             PRIMARY KEY(tenant, account_id))""")
+        columns={row[1] for row in db.execute("PRAGMA table_info(promotion_channel_setting)")}
+        if "policy_json" not in columns:
+            db.execute("ALTER TABLE promotion_channel_setting ADD COLUMN policy_json TEXT")
+        if "version" not in columns:
+            db.execute("ALTER TABLE promotion_channel_setting ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
 
 
-def public_accounts():
+def _accounts_request(suffix="", body=None):
     token = os.environ.get("TT_POST_INTERNAL_TOKEN", "")
     if len(token) < 32:
         raise ChannelError(503, "频道身份服务尚未配置")
-    req = urllib.request.Request("http://127.0.0.1:18829/api/admin/tt-posts/account-settings",
-                                 headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
+    req = urllib.request.Request("http://127.0.0.1:18829/api/admin/tt-posts/account-settings"+suffix,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Authorization": "Bearer "+token, "Accept":"application/json","Content-Type":"application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with urllib.request.urlopen(req, timeout=25) as response:
             data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise ChannelError(exc.code if exc.code in (400,403,404,409,429) else 503,
+                           "无法核验频道当前能力，请检查账号授权和平台状态") from exc
     except (ValueError, OSError) as exc:
         raise ChannelError(503, "暂时无法读取 TT 频道身份") from exc
+    return data
+
+
+def public_accounts():
+    data=_accounts_request()
     if not isinstance(data.get("items"), list):
         raise ChannelError(503, "频道身份数据不完整")
     return data
+
+
+POLICY_FIELDS=("privacy_level","allow_comment","allow_duet","allow_stitch","brand_content_toggle","brand_organic_toggle","is_aigc")
+
+
+def creator_info(aid, facts=None):
+    accounts=(public_accounts() if facts is None else facts)["items"]
+    if not any(str(a.get("source_account_id") or a.get("account_id"))==aid and a.get("publish_eligible") for a in accounts):
+        raise ChannelError(404,"找不到可验证的授权频道")
+    live=_accounts_request("/creator-info",{"source_account_id":aid}).get("item")
+    if not isinstance(live, dict) or not isinstance(live.get("privacy_level_options"),list):
+        raise ChannelError(503,"平台尚未返回频道发布能力")
+    return live
 
 
 def _stats():
@@ -200,7 +228,14 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         base = account.get("account_settings") or {}
         override = overrides.get(aid,{})
         language = override.get("language") or base.get("drama_language") or "en"
-        eligible = bool(facts.get("account_source_available",True) and account.get("publish_eligible"))
+        policy = json.loads(override["policy_json"]) if override.get("policy_json") else (
+            {k:base[k] for k in POLICY_FIELDS if k in base} if base.get("configured") else {})
+        configured=all(k in policy for k in POLICY_FIELDS)
+        auth_eligible=bool(facts.get("account_source_available",True) and account.get("publish_eligible"))
+        eligible=auth_eligible and configured
+        reason=account.get("eligibility_reason") or ""
+        if auth_eligible and not configured:
+            reason="请在频道详情中设置观看范围、互动和推广披露"
         profile = profile_set["accounts"].get(aid) or {}
         windows = profile.get("windows", {})
         amount = windows.get("28d",{}).get("revenue_cents")
@@ -210,7 +245,8 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         enabled = override.get("enabled") is None or bool(override["enabled"])
         channel = dict(account_id=aid, nickname=account.get("account_name") or account.get("display_name") or aid,
                        username=account.get("username") or "", drama_language=language, language=language,
-                       enabled=enabled, eligible=eligible, reason=account.get("eligibility_reason") or "",
+                       enabled=enabled, eligible=eligible, auth_eligible=auth_eligible, reason=reason,
+                       policy_configured=configured, publish_policy=policy,
                        revenue_28d=None if amount is None else amount/100, has_profile=bool(first),
                        audience=first.get("name"), themes=[t.get("name") for t in first.get("children",[])[:3]],
                        today_expected=len(st["slots"]), today_published=st["today_published"],
@@ -218,7 +254,8 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         if detail is not None:
             return {"channel":channel,"profile":profile,"meta":profile_set["meta"],
                     "handoff":{k:st[k] for k in ("old_templates","new_templates","inflight")}}
-        items.append(dict(channel,profile=profile,account_settings=base) if not with_handoff else channel)
+        effective=dict(policy,configured=configured,drama_language=language,version=override.get("version") or base.get("version") or 1)
+        items.append(dict(channel,profile=profile,account_settings=effective) if not with_handoff else channel)
     return {"items":items,"meta":profile_set["meta"]}
 
 
@@ -229,7 +266,7 @@ def worker_channels(actor):
 def save_settings(actor, payload, facts=None, path=None):
     account_ids = payload.get("account_ids")
     values = payload.get("settings")
-    if not isinstance(account_ids,list) or not account_ids or not isinstance(values,dict) or not values or set(values)-{"enabled","drama_language"}:
+    if not isinstance(account_ids,list) or not account_ids or not isinstance(values,dict) or not values or set(values)-{"enabled","drama_language","publish_policy"}:
         raise ChannelError(400, "请选择频道和待修改的设置")
     if "enabled" in values and not isinstance(values["enabled"],bool):
         raise ChannelError(400, "参与状态须为布尔值")
@@ -243,10 +280,32 @@ def save_settings(actor, payload, facts=None, path=None):
     ids = set(map(str,account_ids))
     if not ids <= visible:
         raise ChannelError(404, "所选频道不可见")
+    policies={}
+    if "publish_policy" in values:
+        if len(ids)!=1 or not isinstance(values["publish_policy"],dict) or set(values["publish_policy"])!=set(POLICY_FIELDS):
+            raise ChannelError(400,"请完成单个频道的发布设置")
+        aid=next(iter(ids))
+        raw=values["publish_policy"]
+        setting=TTPostAccountSettings.from_mapping(raw)
+        if setting.brand_content_toggle and setting.privacy_level=="SELF_ONLY":
+            raise ChannelError(400,"第三方品牌推广不支持仅自己可见")
+        from features.tt_posts.service import TTPostService
+        TTPostService._assert_creator_settings(creator_info(aid,facts),setting)
+        policies[aid]=json.dumps({k:getattr(setting,k) for k in POLICY_FIELDS})
+    # Seed the first independent configuration from existing trusted defaults.
+    # Later legacy edits cannot silently change a configured new channel.
+    seeds={}
+    for row in facts["items"]:
+        old=row.get("account_settings") or {}
+        if old.get("configured") and all(k in old for k in POLICY_FIELDS):
+            seeds[str(row.get("source_account_id") or row.get("account_id"))]=json.dumps({k:old[k] for k in POLICY_FIELDS})
     now = datetime.now(timezone.utc).isoformat()
     with closing(sqlite3.connect(path,timeout=10)) as db,db:
-        db.executemany("""INSERT INTO promotion_channel_setting(tenant, account_id, enabled, language, updated_by, updated_at)
-        VALUES(?,?,?,?,?,?) ON CONFLICT(tenant,account_id) DO UPDATE SET enabled=COALESCE(excluded.enabled,enabled),
-        language=COALESCE(excluded.language,language),updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
-        [(actor["tenant_key"],aid,values.get("enabled"),lang,actor["user_id"],now) for aid in sorted(ids)])
+        for aid in sorted(ids):
+            policy=policies.get(aid)
+            db.execute("""INSERT INTO promotion_channel_setting(tenant,account_id,enabled,language,updated_by,updated_at,policy_json)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(tenant,account_id) DO UPDATE SET enabled=COALESCE(excluded.enabled,enabled),
+                language=COALESCE(excluded.language,language),policy_json=COALESCE(?,policy_json,excluded.policy_json),
+                updated_by=excluded.updated_by,updated_at=excluded.updated_at,version=version+1""",
+                (actor["tenant_key"],aid,values.get("enabled"),lang,actor["user_id"],now,policy or seeds.get(aid),policy))
     return {"updated":len(ids)}

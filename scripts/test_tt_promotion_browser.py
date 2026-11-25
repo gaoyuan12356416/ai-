@@ -17,7 +17,7 @@ def run(screens=None):
         dict(account_id='101', nickname='剧场甲', drama_language='en', eligible=True, enabled=True,
              today_published=3, today_expected=5, revenue_28d=125.50, has_profile=True, audience='女频', themes=['悬疑']),
         dict(account_id='102', nickname='剧场乙', drama_language='fr', eligible=False, enabled=True,
-             reason='暂缺授权', today_published=0, today_expected=2, revenue_28d=None, has_profile=False, themes=[])]
+             policy_configured=False,reason='暂缺授权', today_published=0, today_expected=2, revenue_28d=None, has_profile=False, themes=[])]
     drama = dict(content_id='d28', name='剧集 A', language='en', iap_cents=12500, iaa_cents=50,
                  allocated_cents=12550, published_count=3)
     theme = dict(key='suspense', name='悬疑', share_bp=10000, revenue_cents=12550,
@@ -33,13 +33,15 @@ def run(screens=None):
     errors = []
     fail_first_run = True
     auth_state = "ok"
+    creator_fails = True
+    save_fails = True
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={'width': 1440, 'height': 960}, timezone_id='America/Los_Angeles')
         page.on('pageerror', lambda e: errors.append(str(e)))
 
         def handle(route):
-            nonlocal fail_first_run
+            nonlocal fail_first_run, creator_fails, save_fails
             req = route.request
             url = urlsplit(req.url)
             assert url.hostname == '127.0.0.1', url
@@ -73,11 +75,24 @@ def run(screens=None):
                                       iaa_cents=None,published_count=None,audiences=[])
                     data=dict(channel=channels[1],profile=dict(windows={'all':window_empty,'7d':window_empty,'28d':window_empty}),
                               meta=dict(stale=True),handoff={})
+                elif endpoint == '/channels/102/creator-info':
+                    if creator_fails:
+                        creator_fails=False
+                        route.fulfill(status=503,json={'message':'暂时无法取得创作者权限'})
+                        return
+                    data=dict(creator_info=dict(creator_nickname='剧场乙',creator_username='drama_b',
+                              privacy_level_options=['MUTUAL_FOLLOW_FRIENDS','SELF_ONLY'],comment_disabled=False,
+                              duet_disabled=True,stitch_disabled=False))
                 elif endpoint == '/channels/settings':
                     mutations.append((endpoint, post))
+                    if post['settings'].get('publish_policy') and save_fails:
+                        save_fails=False
+                        route.fulfill(status=409,json={'message':'当前平台权限已变化，请重新检测'})
+                        return
                     for item in channels:
                         if item['account_id'] in post['account_ids']:
                             item.update(post['settings'])
+                            if post['settings'].get('publish_policy'):item['policy_configured']=True
                     data = {'updated':len(post['account_ids'])}
                 elif endpoint == '/templates' and req.method == 'GET':
                     data = {'items':templates}
@@ -93,6 +108,10 @@ def run(screens=None):
                 elif endpoint == '/templates/7/preview':
                     data = {'items':[dict(account_id=a,status='blocked' if a=='102' else 'ready', reason='暂缺授权' if a=='102' else '题材匹配',
                          conflicts=['旧排期占用'] if a=='102' else [],content_id='d28',material_id='51',caption=post.get('manual_caption','预览文案')) for a in post['account_ids']]}
+                    if post.get('plan_date'):
+                        full = data['items'] * 5
+                        offset=post['offset']
+                        data.update(total=len(full),offset=offset,limit=post['limit'],items=full[offset:offset+post['limit']])
                 elif endpoint == '/templates/7/draft':
                     assert post['account_id']=='101' and post['material_id']=='51' and post['operation_id']
                     data={'id':8,'state':'waiting','account_id':'101','material_id':'51'}
@@ -140,6 +159,35 @@ def run(screens=None):
         page.get_by_role('button',name='剧场乙').click()
         expect(page.locator('.kpis')).to_contain_text('待回传')
         expect(page.locator('.kpis')).not_to_contain_text('0.00')
+        expect(page.locator('#dialog')).to_contain_text('待设置发布策略')
+        assert not any('/creator-info' in path for _,path,_ in requests)
+        page.get_by_role('button',name='编辑发布策略').click()
+        expect(page.locator('#modal-error')).to_contain_text('暂时无法取得')
+        page.get_by_role('button',name='重新读取创作者权限').click()
+        policy=page.locator('#channel-policy')
+        expect(policy.locator('[name=privacy_level]')).to_have_value('')
+        expect(policy.locator('option[value=PUBLIC_TO_EVERYONE]')).to_have_count(0)
+        expect(policy.locator('[name=allow_duet]')).to_be_disabled()
+        save=policy.get_by_role('button',name='保存新版发布策略')
+        expect(save).to_be_disabled()
+        policy.locator('[name=privacy_level]').select_option('SELF_ONLY')
+        policy.locator('[name=commercial]').check()
+        expect(save).to_be_disabled()
+        policy.locator('[name=brand_content_toggle]').check()
+        expect(save).to_be_disabled()
+        expect(policy.locator('#policy-state')).to_contain_text('第三方品牌')
+        policy.locator('[name=privacy_level]').select_option('MUTUAL_FOLLOW_FRIENDS')
+        policy.locator('[name=allow_comment]').check()
+        policy.locator('[name=is_aigc]').check()
+        expect(save).to_be_enabled()
+        save.click()
+        expect(page.locator('#modal-error')).to_contain_text('当前平台权限已变化')
+        expect(policy.locator('[name=privacy_level]')).to_have_value('MUTUAL_FOLLOW_FRIENDS')
+        save.click()
+        expect(page.locator('#dialog')).to_contain_text('已保存该频道的新版发布策略')
+        assert mutations[-1][1] == {'account_ids':['102'],'settings':{'publish_policy':{
+            'privacy_level':'MUTUAL_FOLLOW_FRIENDS','allow_comment':True,'allow_duet':False,'allow_stitch':False,
+            'brand_organic_toggle':False,'brand_content_toggle':True,'is_aigc':True}}}
         page.get_by_role('button',name='关闭',exact=True).click()
         page.locator('[name=language]').select_option('fr')
         expect(page.locator('#channels tr')).to_have_count(1)
@@ -170,7 +218,11 @@ def run(screens=None):
         page.get_by_role('button',name='预演与执行').click()
         form=page.locator('#execution')
         form.get_by_role('button',name='只读预演').click()
-        page.get_by_role('button',name='生成单条 AI 稿').click()
+        expect(form.locator('#execute')).not_to_be_visible()
+        expect(page.locator('#preview-output')).to_contain_text('10 个频道任务')
+        page.get_by_role('button',name='下一页').click()
+        expect(page.locator('#preview-output')).to_contain_text('第 9–10 条')
+        page.get_by_role('button',name='生成单条 AI 稿').first.click()
         page.get_by_role('button',name='采用AI 稿并锁定频道和素材').click()
         expect(form.locator('[name=mode]')).to_have_value('material')
         expect(form.locator('[name=material_id]')).to_have_value('51')
