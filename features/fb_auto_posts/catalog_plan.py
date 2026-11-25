@@ -67,7 +67,7 @@ class Catalog:
         self.required_description = (any(required for _, required in scopes)
                                      or config.get('_page_caption_description')
                                      or '{{desc}}' in config.get('message_template', ''))
-        self.deadline = time.monotonic() + 3300
+        self.deadline = time.monotonic() + config.get('_catalog_seconds', 3300)
 
     def select(self, sql, args=()):
         # Interactive Page reads use the same FIFO broker. Wait at this
@@ -250,7 +250,7 @@ class Catalog:
 
         facts, descriptions, classes, error = {}, {}, {}, ''
         processed = 0
-        for detail, copy, labels, failed in self.read_batches(chunk, ids, 300):
+        for detail, copy, labels, failed in self.read_batches(chunk, ids, 144):
             facts.update(detail)
             descriptions.update(copy)
             classes.update(labels)

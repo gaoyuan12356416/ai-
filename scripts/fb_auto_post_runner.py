@@ -22,7 +22,7 @@ from features.fb_auto_posts.validation import valid_internal_bearer
 
 ROUTE_TIMEOUT_SECONDS = {
     "/internal/fb-auto-post/tick": 50,
-    "/internal/fb-auto-post/plan-next": 3600,
+    "/internal/fb-auto-post/plan-next": 7260,
     "/internal/fb-auto-post/prepare-next": 9600,
     "/internal/fb-auto-post/execute-next": 1300,
     "/internal/fb-auto-post/reconcile-next": 1300,
@@ -61,7 +61,9 @@ def main() -> int:
     parser.add_argument("--max-tasks", type=int, default=int(os.environ.get("FB_AUTO_POST_MAX_TASKS_PER_RUN", "100")))
     parser.add_argument("--max-seconds", type=int, default=600, help="Stop new claims after this time; always finish in-flight work")
     args = parser.parse_args()
-    max_lease = 10800 if args.mode == "prepare" else 3600
+    if args.mode == "plan" and os.environ.get("FB_AUTO_CATALOG_PLAN_LEASE_SECONDS"):
+        args.lease_seconds = max(args.lease_seconds, int(os.environ["FB_AUTO_CATALOG_PLAN_LEASE_SECONDS"]))
+    max_lease = {"plan": 7200, "prepare": 10800}.get(args.mode, 3600)
     if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,120}", args.worker_id) or not 120 <= args.lease_seconds <= max_lease or not 1 <= args.workers <= 8 or not 1 <= args.max_tasks <= 1000 or not 1 <= args.max_seconds <= 3600:
         raise SystemExit("runner参数无效")
     if args.mode == "tick":

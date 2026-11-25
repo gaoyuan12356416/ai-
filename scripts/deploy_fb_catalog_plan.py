@@ -17,8 +17,10 @@ from scripts.deploy_pipeline_runtime import preserve_tree_owners, verify_source
 
 BASE = 'a70742e9fd1c42abe0dc6c49651ffb0b9ce56288'
 FILES = ['features/fb_auto_posts/' + name + '.py' for name in
-         ('core','page_caption','profile_material','catalog_plan')]
+         ('core','page_caption','profile_material','catalog_plan')] + ['scripts/fb_auto_post_runner.py']
 TEST = 'tests/test_fb_catalog_plan.py'
+PLAN_UNIT = Path('/etc/systemd/system/fb-auto-post-plan.service.d/95-catalog-budget.conf')
+PLAN_CONFIG = SOURCE / 'deploy/fb-auto-post-plan-catalog.conf'
 
 
 def prepare(folder):
@@ -30,6 +32,8 @@ def prepare(folder):
     subprocess.run(['git','-C',str(SOURCE),'merge-base','--is-ancestor',baseline,commit],check=True)
     folder.mkdir(exist_ok=False)
     folder.chmod(0o755)
+    if PLAN_UNIT.exists():
+        shutil.copyfile(PLAN_UNIT, folder/'previous-plan.conf')
     shutil.copytree(old, candidate, symlinks=True, ignore=shutil.ignore_patterns('.git','__pycache__','*.pyc'))
     preserve_tree_owners(old, candidate)
     patch = subprocess.check_output(['git','-C',str(SOURCE),'diff','--binary',baseline,commit,'--',*FILES,TEST])
@@ -50,6 +54,21 @@ def prepare(folder):
     print(json.dumps(dict(status='prepared',commit=commit)),flush=True)
 
 
+def apply_plan_budget(folder, rollback):
+    previous = folder / 'previous-plan.conf'
+    original = previous.read_bytes() if previous.exists() else None
+    configured = PLAN_CONFIG.read_bytes()
+    actual = PLAN_UNIT.read_bytes() if PLAN_UNIT.exists() else None
+    if actual not in (original, configured):
+        raise RuntimeError('planner_timeout_dropin_changed')
+    desired = original if rollback else configured
+    if desired is None:
+        PLAN_UNIT.unlink(missing_ok=True)
+    elif desired != actual:
+        release.atomic(PLAN_UNIT, desired)
+    subprocess.run(['systemctl','daemon-reload'], check=True)
+
+
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['prepare','apply','rollback'])
@@ -61,4 +80,6 @@ if __name__ == '__main__':
         prepare(folder)
     else:
         fb.native_active=owner_active
-        release.activate('fb',folder,args.action=='rollback',defer_plan_read=False)
+        rollback = args.action=='rollback'
+        release.activate('fb',folder,rollback,defer_plan_read=False)
+        apply_plan_budget(folder,rollback)

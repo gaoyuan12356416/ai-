@@ -687,7 +687,13 @@ class FBAutoPostStore:
             mobo_plan = upcoming.discover(materials,config,self.now_fn())
         page_reviews = upcoming.reviews(materials,mobo_plan,[page_language(p.language) for p in source_pages],self.now_fn())
         source_config = dict(config, _mobo_reviews=page_reviews) if mobo_plan is not None else config
+        catalog_seconds = 3300
+        if expected_due_lease_expires_at_utc:
+            remaining = (datetime.fromisoformat(expected_due_lease_expires_at_utc) - self.now_fn()).total_seconds()
+            # Leave the Page refresh and atomic queue insert inside the same lease.
+            catalog_seconds = max(1, min(6900, int(remaining) - 300))
         candidate_snapshots = page_caption.candidate_snapshots({**source_config,'_candidate_limit':candidate_limit,
+            '_catalog_seconds':catalog_seconds,
             '_profile_selection':profile_enabled,
             '_page_caption_description':page_caption.needs_description(caption_snapshot)},source_pages,materials,caption_snapshot)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})

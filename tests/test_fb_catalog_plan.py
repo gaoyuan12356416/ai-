@@ -13,6 +13,16 @@ from features.fb_auto_posts.metrics import MetricTotals, MetricWindow
 
 
 class PlanTests(unittest.TestCase):
+    def test_plan_lease_and_client_deadline(self):
+        from scripts import fb_auto_post_runner as runner
+        with patch.dict(runner.os.environ, {'FB_AUTO_CATALOG_PLAN_LEASE_SECONDS':'7200'}), \
+             patch.object(runner.sys,'argv',['runner','plan','--workers','1','--max-tasks','1','--lease-seconds','3600']), \
+             patch.object(runner,'call',return_value={'status':'no_due_slot'}) as request, patch('builtins.print'):
+            self.assertEqual(runner.main(),0)
+        path,payload = request.call_args.args
+        self.assertEqual(payload['lease_seconds'],7200)
+        self.assertGreater(runner.ROUTE_TIMEOUT_SECONDS[path],payload['lease_seconds'])
+
     def test_xml_control_character_fallback_checks_the_same_replica(self):
         bad = catalog.RepositoryError('source_readonly_check_failed','fixture',503)
         cat = catalog.Catalog.__new__(catalog.Catalog)
