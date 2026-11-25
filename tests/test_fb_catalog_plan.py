@@ -13,6 +13,15 @@ from features.fb_auto_posts.metrics import MetricTotals, MetricWindow
 
 
 class PlanTests(unittest.TestCase):
+    def test_reconnect_replays_only_current_select(self):
+        mysql=SimpleNamespace(schema='main',blacklist_schema='blocked')
+        with patch.object(catalog,'BrokerReadOnlyMySQL',return_value=mysql), patch.object(catalog.time,'sleep'):
+            cat=catalog.Catalog(None,dict(product='Dramawave'),{('en',False)},datetime.now(timezone.utc),None)
+            with patch.object(mysql,'select',create=True,side_effect=[
+                    catalog.TemplateError('source_query_failed','connection closed',503), [{'hi':'9'}]]) as read:
+                self.assertEqual(cat.select('SELECT MAX(id) hi FROM t'),[{'hi':'9'}])
+                self.assertEqual(read.call_count,2)
+
     def test_ready_order_and_cancelled_request(self):
         with tempfile.TemporaryDirectory() as temp:
             store = FBAutoPostStore(Path(temp) / 'ledger.sqlite3', now_fn=lambda: datetime(2026,11,25,4,tzinfo=timezone.utc))

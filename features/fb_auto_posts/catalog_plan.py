@@ -74,7 +74,10 @@ class Catalog:
             except TemplateError as exc:
                 attempt += 1
                 busy = exc.code == 'source_busy' and time.monotonic() < busy_until
-                reconnect = exc.code == 'source_connection_failed' and attempt < 3
+                # The broker also returns source_query_failed when its HTTP
+                # connection closes during a main API restart. SELECT replay
+                # is safe and only repeats this slice.
+                reconnect = exc.code in {'source_connection_failed','source_query_failed'} and attempt < 3
                 if not busy and not reconnect:
                     raise RepositoryError(exc.code, '素材目录只读查询暂不可用', 503) from exc
                 time.sleep(min(attempt, 5))
@@ -102,11 +105,19 @@ class Catalog:
                           OR (LOWER(s.product)='dramawavesource' AND TRIM(COALESCE(s.language,''))=''))
                    ORDER BY s.id LIMIT 16000"""
         hi = int(bounds['hi'])
-        def chunk(lo):
-            end = min(hi, lo + 63999)
+        def read_range(lo, end):
             part = defaultdict(list)
             while lo <= end:
-                rows = self.select(sql, (lo, end, *args, *self.languages))
+                try:
+                    rows = self.select(sql, (lo, end, *args, *self.languages))
+                except RepositoryError as exc:
+                    if exc.code not in {'source_query_timeout','source_query_failed','source_result_too_large'} or lo == end:
+                        raise
+                    middle = (lo + end) // 2
+                    for section in (read_range(lo, middle), read_range(middle + 1, end)):
+                        for key, mids in section.items():
+                            part[key].extend(mids)
+                    break
                 for row in rows:
                     if row['cid']:
                         part[row['cid'], row['lang']].append(int(row['id']))
@@ -114,6 +125,8 @@ class Catalog:
                     break
                 lo = int(rows[-1]['id']) + 1
             return part
+        def chunk(lo):
+            return read_range(lo, min(hi, lo + 63999))
         for index, part in enumerate(self.pool.map(chunk, range(0, hi + 1, 64000)), 1):
             for key, mids in part.items():
                 groups[key].extend(mids)
