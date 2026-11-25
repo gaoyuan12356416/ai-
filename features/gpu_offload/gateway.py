@@ -65,12 +65,15 @@ def request(port, target, *, cookie='', token='', body=None, timeout=10, limit=6
 class Gateway(ThreadingHTTPServer):
     daemon_threads = False
 
-    def __init__(self, address, config_path, token):
+    def __init__(self, address, config_path, token, local_reports=None):
         super().__init__(address, Handler)
         self.config_path, self.token = Path(config_path), token
+        self.local_reports = local_reports
+        self.allowed_paths = local_reports.paths if local_reports else PATHS | MONITOR_PATHS
         self.report_cache, self.monitor_cache = SingleFlightCache(), SingleFlightCache(ttl=10, max_bytes=32*1024*1024)
-        self.monitor_snapshots = MonitorSnapshots(self.monitor_cache)
-        self.monitor_snapshots.start()
+        if local_reports is None:
+            self.monitor_snapshots = MonitorSnapshots(self.monitor_cache)
+            self.monitor_snapshots.start()
 
     def server_close(self):
         if hasattr(self, 'monitor_snapshots'): self.monitor_snapshots.close()
@@ -109,10 +112,26 @@ class Handler(BaseHTTPRequestHandler):
         self.response_status = 500
         try:
             path = urlsplit(self.path).path
-            if path not in PATHS | MONITOR_PATHS or len(self.path) > 16000: return self.error(404, 'not_found')
+            if path not in self.server.allowed_paths or len(self.path) > 16000: return self.error(404, 'not_found')
             config = json.loads(self.server.config_path.read_text())
             cookie = self.headers.get('Cookie', '')
             if not cookie or len(cookie) > 16384: raise Denied(401, 'cookie_auth_required')
+            local = self.server.local_reports
+            percentage = min(100, max(0, int(config.get('report_percentage', 0))))
+            choose_origin = random.randrange(100) >= percentage if path in PATHS else False
+            snapshot = None
+            if choose_origin and local and local.compatible():
+                # This existing cookie/permission-checked GET reads the published version;
+                # it never starts a collection. Resolve the current actor after this check.
+                try:
+                    checked = request(config['api_port'], '/api/social-analytics/refresh?after=', cookie=cookie,
+                                      timeout=5, limit=65536)
+                    if checked.status in (401, 403):
+                        return self.reply(checked)
+                    if checked.status == 200:
+                        snapshot = local.confirmed_snapshot(json.loads(checked.body))
+                except (OSError, ValueError, http.client.HTTPException, RuntimeError):
+                    pass  # The unmodified origin performs its own authorization on fallback.
             # No caller Authorization, actor, tenant or role headers are forwarded.
             auth = request(config['api_port'], '/api/auth/status', cookie=cookie, timeout=5, limit=256*1024)
             if auth.status != 200: raise Denied(auth.status if auth.status in (401, 403) else 503, 'authentication_unavailable')
@@ -151,8 +170,12 @@ class Handler(BaseHTTPRequestHandler):
                 navigation = json.loads(Path(config['navigation_path']).read_text(encoding='utf-8'))
                 if not navigation_allowed(actor, navigation, 'socialAnalytics'):
                     raise Denied(403, 'navigation_item_unavailable')
-                percentage = min(100, max(0, int(config.get('report_percentage', 0))))
-                if random.randrange(100) >= percentage:
+                if choose_origin:
+                    if local and snapshot:
+                        response = local.render(actor, self.path, snapshot)
+                        if response is not None:
+                            route, outcome = 'cpu-origin-optimized', 'computed'
+                            return self.reply(response)
                     route, outcome = 'cpu-origin', 'forwarded'
                     return self.reply(request(config['api_port'], self.path, cookie=cookie, timeout=40))
                 route = 'hk-snapshot'

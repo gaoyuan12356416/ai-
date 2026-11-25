@@ -1,0 +1,35 @@
+[Unit]
+Description=96 authenticated social report and CSV snapshot reads
+After=network.target drama-material-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/social96/current
+EnvironmentFile=/etc/ai-backend-offload/social96.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SOCIAL_ORIGIN_RELEASE=/mnt/data-disk/gpu-backend-offload-20261123/social96/current/runtime.json
+Environment=SOCIAL_ORIGIN_PORT=19990
+Environment=OFFLOAD_GATEWAY_CONFIG=/etc/ai-backend-offload/gateway.json
+ExecStart=/usr/bin/python3 -B -m features.gpu_offload.local_social
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=infinity
+KillSignal=SIGTERM
+SendSIGKILL=no
+CPUQuota=150%
+MemoryMax=2G
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+InaccessiblePaths=-/usr/bin/mysql -/usr/bin/mariadb
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
