@@ -4,6 +4,22 @@ from features.social_analytics.bill_income import merge_settled
 
 
 class BillIncomeTest(unittest.TestCase):
+    def test_socialkit_rounds_the_reconciled_daily_total_once(self):
+        from features.socialkit_analytics.collector import allocate_bill_cents, CollectionError
+        def allocate(values):
+            rows = [dict(short_code=code, iaa_usd_1e4=amount) for code, amount in values]
+            total = allocate_bill_cents(rows, 'iaa', sum(amount for _, amount in values))
+            by_code = {row['short_code']: row['iaa_cents'] for row in rows}
+            self.assertEqual(sum(by_code.values()), total)
+            return by_code
+        cases = [('A', 49), ('C', 49), ('B', 49), ('empty', 0)]
+        self.assertEqual(allocate(cases), {'A': 1, 'B': 0, 'C': 0, 'empty': 0})
+        self.assertEqual(allocate(cases), allocate(list(reversed(cases))))
+        self.assertEqual(allocate([('A', -51), ('B', -51)]), {'A': 0, 'B': -1})
+        self.assertEqual(allocate([('A', 50), ('B', -50)]), {'A': 1, 'B': -1})
+        with self.assertRaises(CollectionError):
+            allocate_bill_cents([dict(iaa_usd_1e4=101)], 'iaa', 100)
+
     def test_settlement_replaces_money_and_includes_ad_only_identities(self):
         insight = dict(campaign_id="a", revenue_cents=180, clicks=7)
         bills = [dict(date="2026-11-23", site_id="2116", campaign_id=key, platform="x",

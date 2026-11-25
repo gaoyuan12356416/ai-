@@ -155,8 +155,8 @@ def income_statements(day):
     bills_where = f""" FROM kunlunads_dev.ads_drama_bills FORCE INDEX(idx_event_cursor_filter)
         WHERE event_time >= {start} AND event_time < {stop}
           AND af_channel='socialkit' AND event_name IN ('af_purchase','ad_revenue')"""
-    amounts = """'iap_cents',CAST(COALESCE(SUM(IF(event_name='af_purchase',event_revenue_usd,0)),0)*100 AS SIGNED),
-                 'iaa_cents',CAST(COALESCE(SUM(IF(event_name='ad_revenue',event_revenue_usd,0)),0)*100 AS SIGNED),
+    amounts = """'iap_usd_1e4',CAST(COALESCE(SUM(IF(event_name='af_purchase',event_revenue_usd,0)),0)*10000 AS SIGNED),
+                 'iaa_usd_1e4',CAST(COALESCE(SUM(IF(event_name='ad_revenue',event_revenue_usd,0)),0)*10000 AS SIGNED),
                  'ad_events',COALESCE(SUM(event_name='ad_revenue'),0),
                  'purchase_events',COALESCE(SUM(event_name='af_purchase'),0),'updated_at',CAST(MAX(updated_at) AS CHAR)"""
     grouped = (f"SELECT HEX(JSON_OBJECT('kind','bill','date','{day}','site_id',site_id,"
@@ -171,7 +171,7 @@ def provisional_purchases(day, site):
     site_literal = "X'" + str(site or "").encode("utf-8").hex() + "'"
     return f"""SELECT HEX(JSON_OBJECT('date','{day}','site_id',site_id,'short_code',MIN(campaign),
         'country',MIN(country_code),'device_os',MIN(platform),
-        'iap_cents',CAST(SUM(event_revenue_usd)*100 AS SIGNED),'iaa_cents',0,'ad_events',0,
+        'iap_usd_1e4',CAST(SUM(event_revenue_usd)*10000 AS SIGNED),'iaa_cents',0,'ad_events',0,
         'updated_at',CAST(MAX(updated_at) AS CHAR)))
         FROM kunlunads_dev.ads_drama_bills_t0 FORCE INDEX(idx_site_event_name_time)
         WHERE site_id={site_literal} AND event_name='af_purchase' AND af_channel='socialkit'
@@ -320,6 +320,34 @@ def control_totals(rows):
     return {field: sum(int(row[field]) for row in rows) for field in EFFECT_METRICS}
 
 
+def allocate_bill_cents(rows, metric, total_units):
+    """Reconcile DECIMAL(10,4) before allocating the daily total to cent-valued groups."""
+    units, cents = metric + '_usd_1e4', metric + '_cents'
+    if sum(row[units] for row in rows) != total_units:
+        raise CollectionError('social bill totals do not match grouped facts')
+
+    def rounded(value):
+        magnitude = (abs(value) + 50) // 100
+        return -magnitude if value < 0 else magnitude
+
+    for row in rows:
+        row[cents] = rounded(row[units])
+    total_cents = rounded(total_units)
+    difference = total_cents - sum(row[cents] for row in rows)
+    if difference:
+        step = 1 if difference > 0 else -1
+        # Correct the largest rounding errors first. Exact source keys break ties
+        # so SQL row order cannot change which short link receives a residual cent.
+        def priority(row):
+            keys = tuple((row.get(k) is not None, str(row.get(k) or ''))
+                         for k in ('site_id', 'short_code', 'country', 'device_os'))
+            return -step * (row[units] - 100 * row[cents]), keys
+
+        for row in sorted(rows, key=priority)[:abs(difference)]:
+            row[cents] += step
+    return total_cents
+
+
 def collect_days(reader, source, start, end):
     """Release each day's gated RR read before external attribution or warehouse writes."""
     days = days_between(start, end)
@@ -355,8 +383,10 @@ def collect_days(reader, source, start, end):
         pending_sites = set()
         if day >= FIRST_DAY:
             if bill_control is None or any(sum(row[k] for row in bills) != bill_control[k]
-                                           for k in ('iap_cents', 'iaa_cents', 'ad_events', 'purchase_events')):
+                                           for k in ('ad_events', 'purchase_events')):
                 raise CollectionError('social bill totals do not match grouped facts')
+            for metric in ('iap', 'iaa'):
+                bill_control[metric + '_cents'] = allocate_bill_cents(bills, metric, bill_control[metric + '_usd_1e4'])
             site_bills = defaultdict(list)
             for bill in bills:
                 site_bills[bill["site_id"]].append(bill)
@@ -366,7 +396,7 @@ def collect_days(reader, source, start, end):
             for site in (covered_sites | pending_sites) if covered_sites else ():
                 if not any(b["purchase_events"] for b in site_bills[site]):
                     preliminary = reader.query([provisional_purchases(day, site)])
-                    provisional_cents += sum(b["iap_cents"] for b in preliminary)
+                    provisional_cents += allocate_bill_cents(preliminary, 'iap', sum(b['iap_usd_1e4'] for b in preliminary))
                     bills.extend(preliminary)
             current, settled = merge_settled(current, bills, ('site_id', 'short_code', 'country', 'device_os'),
                                               dict.fromkeys(EFFECT_METRICS, 0))
