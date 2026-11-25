@@ -82,6 +82,20 @@ class Catalog:
                     raise RepositoryError(exc.code, '素材目录只读查询暂不可用', 503) from exc
                 time.sleep(min(attempt, 5))
 
+    def read_text(self, sql, args, columns):
+        try:
+            return self.select(sql, args)
+        except RepositoryError as exc:
+            if exc.code != 'source_readonly_check_failed':
+                raise
+        # The mysql CLI transports rows as XML. An XML-forbidden control
+        # character can invalidate even a one-row, correctly read-only result.
+        # Retry with an ASCII representation, through the same replica check.
+        projection = ','.join(f'HEX(CONVERT(t.`{name}` USING utf8mb4)) AS `{name}`' for name in columns)
+        rows = self.select(f'SELECT {projection} FROM ({sql}) AS t', args)
+        return [{name: bytes.fromhex(value).decode('utf-8') if value is not None else None
+                 for name, value in row.items()} for row in rows]
+
     def source_predicate(self):
         rule = self.config['material_rule']
         sql = ("s.data_source=%s AND s.product IN (" + placeholders(self.products) + ")"
@@ -109,7 +123,7 @@ class Catalog:
             part = defaultdict(list)
             while lo <= end:
                 try:
-                    rows = self.select(sql, (lo, end, *args, *self.languages))
+                    rows = self.read_text(sql, (lo, end, *args, *self.languages), ('cid','lang','id'))
                 except RepositoryError as exc:
                     if exc.code not in {'source_query_timeout','source_query_failed','source_result_too_large'} or lo == end:
                         raise
@@ -123,7 +137,7 @@ class Catalog:
                         part[row['cid'], row['lang']].append(int(row['id']))
                 if len(rows) < 16000:
                     break
-                lo = int(rows[-1]['id']) + 1
+                lo = max(int(row['id']) for row in rows) + 1
             return part
         def chunk(lo):
             return read_range(lo, min(hi, lo + 63999))
@@ -166,7 +180,7 @@ class Catalog:
         with_classes = bool(self.config.get('_profile_selection'))
         apps = self.resource_apps() if self.required_description or with_classes else []
         def chunk(batch):
-            rows = self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ d.id,d.content_id,d.app_id,
+            rows = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ d.id,d.content_id,d.app_id,
                      d.name,d.language,d.series_code,d.resource_type,d.deploy_time,d.release_status,
                      CAST(d.resource_type_v2 AS CHAR) resource_type_v2
                   FROM {self.schema}.ads_drama_info d FORCE INDEX(ac)
@@ -177,7 +191,8 @@ class Catalog:
                                     JOIN {self.blacklist} b ON b.content_id=other.series_code
                                      AND b.is_delete=0 AND b.type=0
                                    WHERE other.content_id=d.content_id AND other.app_id=d.app_id)""",
-                               (*batch, self.config['app_id']))
+                               (*batch, self.config['app_id']), ('id','content_id','app_id','name','language',
+                                'series_code','resource_type','deploy_time','release_status','resource_type_v2'))
             details = {}
             for row in rows:
                 cid = row['content_id'].strip()
@@ -192,11 +207,16 @@ class Catalog:
                 profile_cols = ',r.series_code,r.labels' if with_classes else ''
                 desc_col = ",CASE WHEN r.type=2 THEN BINARY TRIM(r.`desc`) ELSE NULL END description" if self.required_description else ''
                 filter_type = '' if with_classes else ' AND r.type=2'
-                resources = self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT r.content_id,r.app_id,
+                columns = ['content_id','app_id','language']
+                if with_classes:
+                    columns.extend(('series_code','labels'))
+                if self.required_description:
+                    columns.append('description')
+                resources = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT r.content_id,r.app_id,
                               r.language{profile_cols}{desc_col}
                          FROM {self.schema}.ads_drama_resource r FORCE INDEX(actcld)
                         WHERE r.app IN ({placeholders(apps)}) AND r.content_id IN ({placeholders(details)})
-                          AND r.app_id=%s{filter_type}""", (*apps, *details, self.config['app_id']))
+                          AND r.app_id=%s{filter_type}""", (*apps, *details, self.config['app_id']), columns)
                 for row in resources:
                     text = row.get('description')
                     if text:
@@ -219,7 +239,7 @@ class Catalog:
 
         facts, descriptions, classes, error = {}, {}, {}, ''
         processed = 0
-        for detail, copy, labels, failed in self.read_batches(chunk, ids, 160):
+        for detail, copy, labels, failed in self.read_batches(chunk, ids, 300):
             facts.update(detail)
             descriptions.update(copy)
             classes.update(labels)
@@ -232,12 +252,13 @@ class Catalog:
     def hydrate(self, ids):
         predicate, args = self.source_predicate()
         def chunk(batch):
-            return self.select(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ s.id,TRIM(s.data_source_id) cid,
+            return self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ s.id,TRIM(s.data_source_id) cid,
                           s.url,s.name,s.tag_name,s.product,LOWER(TRIM(s.language)) lang,s.video_duration
                       FROM {self.schema}.ads_custom_source s FORCE INDEX(PRIMARY)
-                     WHERE s.id IN ({placeholders(batch)}) AND {predicate}""", (*batch, *args))
+                     WHERE s.id IN ({placeholders(batch)}) AND {predicate}""", (*batch, *args),
+                     ('id','cid','url','name','tag_name','product','lang','video_duration'))
         result = {}
-        for rows in self.read_batches(chunk, ids, 500):
+        for rows in self.read_batches(chunk, ids, 1100):
             for row in rows:
                 url = _https(row['url'])
                 if url:
@@ -317,6 +338,7 @@ def snapshots(repo, config, scopes):
                       if mid not in loaded}
             if not needed:
                 break
+            print(f'fb_catalog_hydrate requested={len(needed)} already_loaded={len(loaded)}', flush=True)
             details = cat.hydrate(sorted(needed))
             for mid, (lang, cid) in needed.items():
                 pair = details.get(mid)
