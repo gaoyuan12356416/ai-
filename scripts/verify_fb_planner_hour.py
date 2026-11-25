@@ -55,7 +55,7 @@ def main():
             raise ValueError('baseline contains unrelated pending due slots')
     started=time.time()
     day=(datetime.now(timezone(timedelta(hours=8)))+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
-    enqueued=store.enqueue_due_slots(live_enabled=True,at=day,prebuild_days_ahead=0)
+    store.enqueue_due_slots(live_enabled=True,at=day,prebuild_days_ahead=2)
     with store.connect() as db:
         due=[dict(r) for r in db.execute("SELECT id,template_id,trigger_type,created_at_utc FROM fb_auto_due_slot WHERE status='pending' ORDER BY id")]
     if len(due)!=3 or {i['template_id'] for i in due}!={1,3,8} or any(i['trigger_type']!='auto' for i in due):

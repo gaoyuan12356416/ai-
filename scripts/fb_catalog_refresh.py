@@ -126,9 +126,18 @@ def refresh_resources(db, reader, before):
             # Chunk a long interval if the updater was stopped. If the last
             # snapshot is very old use the full refresh instead.
             for start in range(before,int(time.time())+1,1800):
-                changed.update(r[0] for r in reader.query([f"""SELECT DISTINCT HEX(JSON_ARRAY(content_id))
-                    FROM {RESOURCE} FORCE INDEX(du) WHERE {cond} AND updated_at>=FROM_UNIXTIME({start})
-                    AND updated_at<FROM_UNIXTIME({start+1800}) AND app_id=1479"""]))
+                def changes(lo,hi):
+                    sql=f"""SELECT DISTINCT HEX(JSON_ARRAY(content_id)) FROM {RESOURCE} FORCE INDEX(du)
+                        WHERE {cond} AND updated_at>=FROM_UNIXTIME({lo}) AND updated_at<FROM_UNIXTIME({hi})
+                          AND app_id=1479"""
+                    try:
+                        return reader.query([sql])
+                    except StoreError as exc:
+                        if exc.code!='fb_auto_metric_query_mysql_3024' or hi-lo<=1:
+                            raise
+                        mid=(lo+hi)//2
+                        return changes(lo,mid)+changes(mid,hi)
+                changed.update(r[0] for r in changes(start,start+1800))
     def load(batch):
         keys = ','.join(map(literal,batch))
         where = f'app_id=1479 AND app IN ({app_sql}) AND content_id IN ({keys})'

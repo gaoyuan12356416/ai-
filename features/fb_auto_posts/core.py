@@ -1663,6 +1663,10 @@ class FBAutoPostStore:
     def defer_due_slot(self, due_id: int, error_code: str, *, delay_seconds: int = 300, expected_lease_owner: str | None = None, expected_lease_expires_at_utc: str | None = None) -> bool:
         if error_code == 'fb_auto_catalog_refresh_pending':
             delay_seconds = 60
+        elif error_code == 'fb_auto_metric_window_not_ready':
+            local_now = self.now_fn().astimezone(BEIJING)
+            if local_now.hour == 0 and 33 <= local_now.minute <= 40:
+                delay_seconds = 60
         available = utc_iso(self.now_fn() + timedelta(seconds=max(60, min(int(delay_seconds), 3600))))
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")

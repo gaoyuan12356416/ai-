@@ -31,7 +31,19 @@ def open_for_plan(config, now, root=ROOT):
         conn.close()
     # The timer detects new native due slots independently of metric readiness.
     # An unavailable builder must not indefinitely hold the original live path.
-    if now.timestamp()-trigger < 2400:
+    age = now.timestamp()-trigger
+    refreshing = False
+    if 120 <= age < 5400:
+        try:
+            import fcntl
+            with (root/'refresh.lock').open('rb') as lock:
+                try:
+                    fcntl.flock(lock,fcntl.LOCK_SH|fcntl.LOCK_NB)
+                except BlockingIOError:
+                    refreshing = True
+        except (ImportError,OSError):
+            pass
+    if age < 120 or refreshing:
         raise RepositoryError('fb_auto_catalog_refresh_pending','正在更新本次触发的共享素材目录',409)
     return None
 
