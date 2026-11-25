@@ -1,0 +1,23 @@
+[Unit]
+Description=DramaWave TT promotion channels and automation API
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/tt-promotion
+[Service]
+User=tt-post
+Group=tt-post
+WorkingDirectory=/opt/tt-promotion/current
+EnvironmentFile=/etc/tt-auto-post.env
+EnvironmentFile=/etc/tt-auto-post.secrets
+EnvironmentFile=/etc/tt-post.secrets
+EnvironmentFile=-/etc/pipeline-native-tt.env
+EnvironmentFile=-/etc/tt-auto-post-execution-policy-20261016.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -B -m features.tt_promotion.http_server
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/tt-promotion
+UMask=0027
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=Tick independent DramaWave TT promotion
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=3s
+[Install]
+WantedBy=timers.target

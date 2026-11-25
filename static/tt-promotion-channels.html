@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>频道管理（新版） · TT 平台推广</title>
+  <link rel="stylesheet" href="/ui-topbar.css">
+  <link rel="stylesheet" href="/tt-auto-publish.css">
+  <link rel="stylesheet" href="/tt-promotion.css">
+  <script defer src="/ui-topbar.js"></script>
+  <script defer src="/quick-nav.js"></script>
+  <script defer src="/tt-promotion-common.js"></script>
+  <script defer src="/tt-promotion-channels.js"></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar"><div class="brand"><div class="brand-mark">AI</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div><button id="nav-toggle" type="button" class="button" aria-controls="quickNav" aria-expanded="false">展开后台导航</button><nav id="quickNav" aria-label="后台导航"></nav></aside>
+  <main class="main">
+    <header class="topbar"><div class="title"><p class="breadcrumb">TT 平台推广 / DramaWave</p><h1>频道管理（新版）</h1></div>
+      <div class="top-actions"><div id="userCard" class="user-card"></div><button class="button" id="refreshPage">刷新</button><button class="button" id="authButton">登录</button></div>
+    </header>
+    <div role="alert" id="notice" hidden></div>
+    <div role="status" id="loading">正在加载…</div>
+    <section id="workspace" hidden><section class="panel">
+      <div class="section-head"><h2>频道列表</h2><div class="actions"><span id="list-meta" class="muted"></span><button id="bulk" class="button primary" disabled>批量设置</button></div></div>
+      <form id="filters" class="filters">
+        <label>频道<input name="search" type="search" placeholder="昵称或账号 ID"></label>
+        <label>剧语言<select name="language"><option value="">全部语言</option></select></label>
+        <label>发布资格<select name="eligible"><option value="">全部</option><option value="yes">可发布</option><option value="no">受限</option></select></label>
+        <label>收入画像<select name="profile"><option value="">全部</option><option value="yes">有收入画像</option><option value="no">暂无画像</option></select></label>
+        <label>28 天收入下限（USD）<input name="min" type="number" min="0" step="0.01" placeholder="不限"></label>
+        <label>28 天收入上限（USD）<input name="max" type="number" min="0" step="0.01" placeholder="不限"></label>
+        <label>排序<select name="sort"><option value="desc">收入从高到低</option><option value="asc">收入从低到高</option><option value="name">按频道名称</option></select></label>
+        <button class="button" type="reset">重置</button>
+      </form>
+      <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前结果"></th><th>频道 / ID</th><th>剧语言</th><th>发布资格</th><th>最近成功发布</th><th>今日已发 / 应发</th><th>28 天收入</th><th>主要受众 / 题材</th></tr></thead><tbody id="channels"></tbody></table></div>
+    </section></section>
+  </main>
+</div>
+<dialog id="dialog" aria-labelledby="dialog-title"><form method="dialog" class="modal-head"><h2 id="dialog-title"></h2><button class="button" value="cancel" aria-label="关闭">关闭</button></form><div id="dialog-content"></div></dialog>
+<dialog id="confirm" aria-labelledby="confirm-title"><div class="modal-head"><h2 id="confirm-title">确认操作</h2></div><p id="confirm-text"></p><div class="modal-foot"><button class="button" id="confirm-cancel">返回</button><button class="button primary" id="confirm-apply">确认</button></div></dialog>
+</body>
+</html>

@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh TT promotion profiles hourly
+[Timer]
+OnCalendar=*-*-* *:42:00
+Persistent=true
+[Install]
+WantedBy=timers.target

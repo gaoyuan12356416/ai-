@@ -12,6 +12,7 @@ from .adapters import normalized, rows, snapshot, utc_day
 
 POST_DB = '/mnt/data-disk/tt-post-publisher/tt-post.sqlite3'
 AUTO_DB = '/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3'
+PROMOTION_DB = '/mnt/data-disk/tt-promotion/promotion.sqlite3'
 USERS_DB = '/root/drama_material_service/data/drama_material_jobs.sqlite3'
 # The publisher reserves this offset in the shared tt_post_code_route ledger.
 AUTO_QUEUE_ID_NAMESPACE = 7_000_000_000_000_000_000
@@ -105,6 +106,21 @@ def _previous(app):
     return {row['link_id']: row for row in prior if 'tt_identity' in row}
 
 
+def _promotion_sources(app):
+    path = app.get('SOCIAL_ANALYTICS_TT_PROMOTION_DB_PATH') or os.environ.get('TT_PROMOTION_REPORT_DB')
+    if not path:
+        # Isolated fixture/alternate installations explicitly supply their own ledgers.
+        if str(app.get('SOCIAL_ANALYTICS_TT_AUTO_DB_PATH') or AUTO_DB) != AUTO_DB:
+            return []
+        path = PROMOTION_DB
+    with snapshot(path) as db:
+        return rows(db, """SELECT id, template_id, template_creator_user_id AS template_creator,template_tenant,
+            account_id,account_username,account_display_name,drama_language AS language,
+            drama_name,content_id,material_id,published_at_utc AS confirmed_at,publish_id,
+            code,route_queue_id FROM tt_promotion_report_task
+            WHERE status='published' AND unknown_outcome=0 AND privacy_level='PUBLIC_TO_EVERYONE'""")
+
+
 def _catalog_row(task, route, users, previous, kind):
     local_id = str(task['id'])
     route_missing = route is None
@@ -115,6 +131,9 @@ def _catalog_row(task, route, users, previous, kind):
             route = None
     else:
         creator = task['template_creator'] or ''
+        if kind == 'promotion' and route and (route['code'] != task['code'] or
+                task['route_queue_id'] != AUTO_QUEUE_ID_NAMESPACE + task['id']):
+            route = None
     link = _route_key(route, task)
     confirmed_day = utc_day(task['confirmed_at'])
     if not confirmed_day or not task['publish_id']:
@@ -129,8 +148,8 @@ def _catalog_row(task, route, users, previous, kind):
         channel=str(task['account_id'] or ''),
         channel_label=task['account_display_name'] or task['account_username'] or str(task['account_id']),
         language=task['language'] or '未记录', language_label=task['language'] or '未记录',
-        link_type='auto_template' if kind == 'auto' else 'tt_post',
-        link_type_label='自动模板' if kind == 'auto' else 'TikTok Post',
+        link_type='tt_post' if kind == 'post' else 'auto_template',
+        link_type_label='TikTok Post' if kind == 'post' else '自动模板',
         date=utc_day(route['created_at']) if link else '', excluded=False,
         publications=[dict(id='tiktok:post:' + task['publish_id'], date=confirmed_day, kind='video')]))
     # Source IDs are frozen separately from labels so a renamed account or
@@ -158,7 +177,7 @@ def _catalog_row(task, route, users, previous, kind):
                 record['tt_frozen_route'] = prior['tt_frozen_route']
     elif creator and len(users[creator]) == 1:
         person = users[creator][0]
-        if person['tenant_key']:
+        if person['tenant_key'] and (kind!='promotion' or person['tenant_key']==task['template_tenant']):
             record.update(owner=creator, tenant=person['tenant_key'], owner_label=person['name'] or creator)
     record['tt_frozen_owner'] = (prior['tt_frozen_owner'] if prior else
                                  {field: record[field] for field in ('tenant', 'owner', 'owner_label')})
@@ -183,7 +202,8 @@ def read_tiktok(app):
     for queue_id, route in routes.items():
         route_queues[campaign_key(route['af_c_id'], route['c'])].add(queue_id)
     catalog = {}
-    for kind, tasks, offset in [('post', legacy, 0), ('auto', automatic, AUTO_QUEUE_ID_NAMESPACE)]:
+    for kind, tasks, offset in [('post', legacy, 0), ('auto', automatic, AUTO_QUEUE_ID_NAMESPACE),
+                                ('promotion', _promotion_sources(app), AUTO_QUEUE_ID_NAMESPACE)]:
         for task in tasks:
             queue_id = offset + task['id']
             row = _catalog_row(task, routes.get(queue_id), users, previous, kind)

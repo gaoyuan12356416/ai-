@@ -1,0 +1,12 @@
+[Unit]
+Description=Generate due DramaWave TT captions
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/tt-promotion
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/tt-promotion/current
+ExecStart=/usr/bin/python3 -B -m features.tt_promotion.pub_copy
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/mnt/data-disk/tt-promotion

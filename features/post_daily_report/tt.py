@@ -432,6 +432,8 @@ def collect(paths: dict, window) -> dict:
         finally:
             if conn is not None:
                 conn.close()
+    from .tt_promotion import collect_promotion
+    collect_promotion(paths, window, output)
     for row in output["rows"]:
         reasons = row.pop("_reasons")
         row["reasons"] = [{"code": code, "reason": reason, "count": count,

@@ -191,8 +191,29 @@
     "key": "tiktok_platform",
     "label": "TikTok 社媒",
     "order": 35,
-    "module": "tt_posts",
     "items": [
+      {
+        "key": "ttPromotionChannels",
+        "label": "频道管理（新版）",
+        "description": "查看 DramaWave TT 频道收入画像和排期，独立管理频道设置",
+        "kind": "page",
+        "href": "/tt-promotion-channels.html",
+        "enabled": true,
+        "order": 5,
+        "module": "tt_promotion_channels",
+        "adminOnly": false
+      },
+      {
+        "key": "ttPromotionAuto",
+        "label": "自动发布（新版）",
+        "description": "按频道收入画像预演、排期并查看发布回执",
+        "kind": "page",
+        "href": "/tt-promotion-auto.html",
+        "enabled": true,
+        "order": 6,
+        "module": "tt_promotion_auto",
+        "adminOnly": false
+      },
       {
         "key": "ttAccountSettings",
         "label": "TT 个号管理",

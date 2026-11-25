@@ -1,0 +1,8 @@
+[Unit]
+Description=Process requested TT promotion AI captions
+[Timer]
+OnBootSec=40s
+OnUnitInactiveSec=20s
+AccuracySec=3s
+[Install]
+WantedBy=timers.target

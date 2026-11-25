@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>自动发布（新版） · TT 平台推广</title>
+  <link rel="stylesheet" href="/ui-topbar.css">
+  <link rel="stylesheet" href="/tt-auto-publish.css">
+  <link rel="stylesheet" href="/tt-promotion.css">
+  <script defer src="/ui-topbar.js"></script>
+  <script defer src="/quick-nav.js"></script>
+  <script defer src="/tt-promotion-common.js"></script>
+  <script defer src="/tt-promotion-auto.js"></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar"><div class="brand"><div class="brand-mark">AI</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div><button id="nav-toggle" type="button" class="button" aria-controls="quickNav" aria-expanded="false">展开后台导航</button><nav id="quickNav" aria-label="后台导航"></nav></aside>
+  <main class="main">
+    <header class="topbar"><div class="title"><p class="breadcrumb">TT 平台推广 / DramaWave</p><h1>自动发布（新版）</h1></div>
+      <div class="top-actions"><div id="userCard" class="user-card"></div><button class="button" id="refreshPage">刷新</button><button class="button" id="authButton">登录</button></div>
+    </header>
+    <div role="alert" id="notice" hidden></div>
+    <div role="status" id="loading">正在加载…</div>
+    <section id="workspace" hidden><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
+    <section id="templates-view" class="panel"><div class="section-head"><h2>发布模板</h2><div class="actions"><span id="templates-meta" class="muted"></span><button class="button primary" id="new-template">创建模板</button></div></div>
+      <div class="table-wrap"><table><thead><tr><th>模板 / 版本</th><th>状态</th><th>频道</th><th>选材方式</th><th>北京时间排期</th><th>AI 文案</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
+    </section>
+    <section id="runs-view" class="panel" hidden><div class="section-head"><h2>运行记录</h2><div class="actions"><select id="run-filter" aria-label="按模板查看运行记录"><option value="">全部模板</option></select><button class="button" id="refresh-runs">刷新记录</button></div></div>
+      <div class="table-wrap"><table><thead><tr><th>批次</th><th>模板</th><th>触发方式</th><th>排期 / 创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody id="runs"></tbody></table></div>
+    </section></section>
+  </main>
+</div>
+<dialog id="dialog" aria-labelledby="dialog-title"><form method="dialog" class="modal-head"><h2 id="dialog-title"></h2><button class="button" value="cancel" aria-label="关闭">关闭</button></form><div id="dialog-content"></div></dialog>
+<dialog id="confirm" aria-labelledby="confirm-title"><div class="modal-head"><h2 id="confirm-title">确认操作</h2></div><p id="confirm-text"></p><div class="modal-foot"><button class="button" id="confirm-cancel">返回</button><button class="button primary" id="confirm-apply">确认</button></div></dialog>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[Unit]
+Description=Schedule and execute independent DramaWave TikTok promotions
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/tt-promotion
+[Service]
+Type=oneshot
+User=tt-post
+Group=tt-post
+WorkingDirectory=/opt/tt-promotion/current
+EnvironmentFile=/etc/tt-auto-post.env
+EnvironmentFile=/etc/tt-auto-post.secrets
+EnvironmentFile=/etc/tt-post.secrets
+EnvironmentFile=-/etc/pipeline-native-tt.env
+EnvironmentFile=-/etc/tt-auto-post-execution-policy-20261016.env
+ExecStart=/usr/bin/python3 -B -m features.tt_promotion.publishing tick
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/tt-promotion /mnt/data-disk/tt-auto-post-public
+UMask=0027
