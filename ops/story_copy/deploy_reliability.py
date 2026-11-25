@@ -126,6 +126,6 @@ if __name__ == "__main__":
             current = Path(record["previous_reliability_release"])
             record = json.loads((current / "record.json").read_text())
         fb_root = Path(fb_release) if fb_release else current
-        switch_fb(fb_root / "fb", True)
+        switch_fb(fb_root / "fb", True, args.settled_prepare)
         if current == fb_root:
             central.switch(current, True)
