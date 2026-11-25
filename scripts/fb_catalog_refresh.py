@@ -3,7 +3,7 @@ import argparse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime
 import fcntl
 import itertools
 import json
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 
@@ -165,6 +166,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--force',action='store_true')
     args=parser.parse_args()
+    mounted=subprocess.check_output(['findmnt','-rn','-o','UUID','--mountpoint','/mnt/data-disk'],text=True).strip()
+    if mounted!='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':
+        raise RuntimeError('catalog data mount unavailable')
     directory=DIRECTORY
     directory.mkdir(exist_ok=True)
     with (directory/'refresh.lock').open('a') as lock:
@@ -187,7 +191,10 @@ def main():
             if not evening and (not due or (int(datetime.fromisoformat(due).timestamp())<=previous and now-previous<7200)):
                 return
         reader=GatedMetricReader(dict(user=os.environ['FB_AUTO_MYSQL_USER'],password=os.environ['FB_AUTO_MYSQL_PASSWORD']))
-        remote=int(reader.query([select('UNIX_TIMESTAMP()', '')])[0][0])
+        remote,concat_limit=reader.query([select('UNIX_TIMESTAMP(),@@group_concat_max_len', '')])[0]
+        remote=int(remote)
+        if int(concat_limit)<1024:
+            raise ValueError('source group_concat limit is too low for complete membership')
         tmp=directory/'building.sqlite3'
         tmp.unlink(missing_ok=True)
         if active.exists(): shutil.copyfile(active,tmp)

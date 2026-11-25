@@ -75,4 +75,3 @@ class PlanningCatalog:
                     result[mid]=(dict(id=mid,cid=cid,lang=lang,product=product,video_duration=duration,
                                       name=name,tag_name=tag),url)
         return result
-

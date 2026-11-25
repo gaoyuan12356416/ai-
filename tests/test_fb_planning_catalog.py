@@ -57,4 +57,3 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNone(open_for_plan(dict(self.config,_catalog_trigger=None),self.time(200),self.root))
         (self.root/'enabled').unlink()
         self.assertIsNone(open_for_plan(self.config,self.time(200),self.root))
-
