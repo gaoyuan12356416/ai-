@@ -1,0 +1,63 @@
+.tool-filters,.picker-filters,.metric-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:9px;align-items:end; }
+.tool-filters { padding:14px 18px; border-bottom:1px solid #e1e9f3; }
+.tool-filters label,.picker-filters label,.metric-grid label { display:grid;gap:4px;color:#435b75;font-size:12px; }
+.tool-filters .actions { flex-wrap:nowrap; }
+.tool-filters button { white-space:nowrap; }
+.tool-pages,.batch-summary,.review-footer { display:flex;align-items:center;gap:10px;flex-wrap:wrap; }
+.tool-pages { justify-content:flex-end;padding:12px 16px; }
+.metrics-block { border:1px solid #d8e3ef;border-radius:10px;padding:12px;margin:10px 0; }
+.metrics-block h4 { margin:0 0 9px; }
+.picker-filters { margin-bottom:10px;grid-template-columns:repeat(auto-fit,minmax(108px,1fr)); }
+.check-list { grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); }
+.sticky-edit,.review-footer { position:sticky;bottom:0;z-index:2;display:flex;justify-content:space-between;align-items:center;gap:10px;background:#f5f8fe;border-top:1px solid #c9d9ea;padding:10px 14px;box-shadow:0 -4px 12px #1433520b; }
+.sticky-edit strong,.review-footer strong { display:block; }
+#preview-output { margin-top:16px; }
+.preview-header { padding:10px 0; }
+.preview-header h3 { margin:3px 0 8px; }
+.preview-signal { border-left:3px solid #7290ba;background:#f0f5fa;padding:10px 13px;margin:8px 0; }
+.preview-signal:empty { display:none; }
+.preview-signal[role=alert] { border-color:#d38431; }
+.batch-summary { gap:6px;margin:8px 0; }
+.batch-summary button { background:#f5f8fd;border:1px solid #d0deed;border-radius:7px;color:#214868;cursor:pointer;padding:5px 8px; }
+.batch-summary button.selected { background:#e0edff;border-color:#5986d0;color:#164890; }
+.counts-line { display:flex;flex-wrap:wrap;gap:4px;min-width:135px; }
+.counts-line span,.counts-line button { display:inline-block;padding:2px 4px;line-height:1.5;font-size:12px; }
+.batch-copy { padding:10px 12px;margin:8px 0;border:1px solid #cfdef0;border-radius:9px;background:#f8fbff; }
+.batch-copy strong { display:block;margin-bottom:5px; }
+#preview-output td { min-width:85px; }
+#preview-output td:nth-last-child(2), #preview-output td:last-child { min-width:175px; }
+.adopted-copy { display:grid;gap:8px; }
+.tool-pair { color:#38536e;font-size:12px;white-space:normal; }
+.inline-error { padding:7px 10px;background:#fff4e3;color:#764507; }
+.inventory-summary { display:flex;align-items:center;gap:12px;flex-wrap:wrap; }
+.preview-tools { display:flex;gap:9px;align-items:center;flex-wrap:wrap; }
+.preview-tools .row-link,.batch-summary button,.tool-pages button { min-height:32px; }
+@media(max-width:620px) {
+  .tool-filters,.picker-filters,.metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .tool-filters { padding:10px; }
+  .tool-filters .actions { grid-column:1/-1; }
+  .sticky-edit,.review-footer { margin-inline:-3px;padding:8px; }
+  .sticky-edit .muted,.review-footer .muted { font-size:11px; }
+  #templates-view .table-wrap,#runs-view .table-wrap,#preview-output .table-wrap { overflow-x:auto; }
+  .tool-pages { justify-content:center;padding:8px; }
+  .batch-summary { gap:4px; }
+}
+
+@media(max-width:620px) {
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) .table-wrap table { display:block;min-width:0; }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) .table-wrap thead { position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%); }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) .table-wrap tbody { display:grid;gap:9px;padding:4px 8px; }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) tbody tr { display:grid;grid-template-columns:1fr 1fr;gap:6px 9px;padding:10px;border:1px solid #d7e2ee;border-radius:8px; }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) tbody td { display:block;border:0;padding:0;min-width:0;max-width:none; }
+  :is(#templates-view,#runs-view,#preview-output) tbody td:first-child,tbody td[colspan],#templates td:nth-child(n+5),#runs td:nth-child(n+5),#preview-output td:nth-child(n+3) { grid-column:1/-1; }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) tbody td::before { display:block;color:#60738a;font-size:11px; }
+  #templates td:nth-child(4)::before { content:"排期"; } #templates td:nth-child(5)::before { content:"最近批次"; }
+  #runs td:nth-child(3)::before { content:"排期"; } #runs td:nth-child(5)::before { content:"任务统计"; }
+  #preview-output td:nth-child(3)::before { content:"候选剧目与素材"; }
+  #preview-output td:nth-child(5)::before { content:"选材原因"; } #preview-output td:nth-child(6)::before { content:"文案"; }
+  #inventory-table td:nth-child(1)::before { content:"素材 ID"; } #inventory-table td:nth-child(3)::before { content:"频道"; }
+  #inventory-table td:nth-child(4)::before { content:"占用批次"; }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) td[colspan]::before { content:none; }
+  :is(#templates-view,#runs-view,#preview-output,#inventory-table) .row-link { min-height:36px; }
+}
+

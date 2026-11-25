@@ -135,6 +135,7 @@ def install(path):
 
 class PreviewStore:
     """Read-only publishing simulations and resumable progress, outside the publication ledger."""
+
     def __init__(self, app_path):
         self.path = Path(app_path).with_name("preview.sqlite3")
         with contextlib.closing(sqlite3.connect(self.path, timeout=10)) as db:
@@ -152,58 +153,114 @@ class PreviewStore:
             """)
 
     def create(self, key, t, version, actor, inputs, channels, pairs):
-        with connection(self.path,write=True) as db:
+        with connection(self.path, write=True) as db:
             # Completed snapshots remain reviewable for 7 days. Run comparisons are separately frozen.
-            db.execute("DELETE FROM preview WHERE created_at<? AND (state<>'working' OR lease_at<?)",
-                       (iso(now()-timedelta(days=7)),iso(now()-timedelta(days=1))))
-            inserted = db.execute("""INSERT OR IGNORE INTO preview(id,tenant,author,template,version,schedule_version,
+            db.execute(
+                "DELETE FROM preview WHERE created_at<? AND (state<>'working' OR lease_at<?)",
+                (iso(now() - timedelta(days=7)), iso(now() - timedelta(days=1))),
+            )
+            inserted = db.execute(
+                """INSERT OR IGNORE INTO preview(id,tenant,author,template,version,schedule_version,
                      created_at,inputs,scope) VALUES(?,?,?,?,?,?,?,?,?)""",
-                     (key,actor["tenant_key"],actor["user_id"],t.id,t.version,version,iso(now()),dump(inputs),dump(channels))).rowcount
+                (
+                    key,
+                    actor["tenant_key"],
+                    actor["user_id"],
+                    t.id,
+                    t.version,
+                    version,
+                    iso(now()),
+                    dump(inputs),
+                    dump(channels),
+                ),
+            ).rowcount
             if inserted:
-                db.executemany("INSERT INTO preview_row(preview,pos,account,at) VALUES(?,?,?,?)",
-                               [(key,pos,a,at) for pos,(a,at) in enumerate(pairs)])
+                db.executemany(
+                    "INSERT INTO preview_row(preview,pos,account,at) VALUES(?,?,?,?)",
+                    [(key, pos, a, at) for pos, (a, at) in enumerate(pairs)],
+                )
 
-    def get(self,key,t,actor,visible):
+    def get(self, key, t, actor, visible):
         with connection(self.path) as db:
-            r=db.execute("SELECT * FROM preview WHERE id=? AND template=? AND tenant=? AND author=?",
-                         (key,t.id,actor["tenant_key"],actor["user_id"])).fetchone()
+            r = db.execute(
+                "SELECT * FROM preview WHERE id=? AND template=? AND tenant=? AND author=?",
+                (key, t.id, actor["tenant_key"], actor["user_id"]),
+            ).fetchone()
         if not r or not set(load(r["scope"])) <= set(visible):
             return None
         return dict(r)
 
-    def rows(self,key):
+    def rows(self, key):
         with connection(self.path) as db:
-            return [dict(r) for r in db.execute("SELECT * FROM preview_row WHERE preview=? ORDER BY pos",(key,))]
+            return [
+                dict(r) for r in db.execute("SELECT * FROM preview_row WHERE preview=? ORDER BY pos", (key,))
+            ]
 
-    def claim(self,key,token):
-        with connection(self.path,write=True) as db:
-            return db.execute("""UPDATE preview SET lease=?,lease_at=? WHERE id=? AND state='working'
+    def claim(self, key, token):
+        with connection(self.path, write=True) as db:
+            return db.execute(
+                """UPDATE preview SET lease=?,lease_at=? WHERE id=? AND state='working'
                                   AND (lease='' OR lease_at<?)""",
-                              (token,iso(now()),key,iso(now()-timedelta(minutes=5)))).rowcount
+                (token, iso(now()), key, iso(now() - timedelta(minutes=5))),
+            ).rowcount
 
-    def write_row(self,key,token,pos,item):
-        with connection(self.path,write=True) as db:
-            if not db.execute("UPDATE preview SET lease_at=? WHERE id=? AND lease=?",(iso(now()),key,token)).rowcount:
+    def write_row(self, key, token, pos, item):
+        with connection(self.path, write=True) as db:
+            if not db.execute(
+                "UPDATE preview SET lease_at=? WHERE id=? AND lease=?", (iso(now()), key, token)
+            ).rowcount:
                 return False
-            db.execute("UPDATE preview_row SET checked=1,result=? WHERE preview=? AND pos=?",
-                       (dump(item) if item else None,key,pos))
+            db.execute(
+                "UPDATE preview_row SET checked=1,result=? WHERE preview=? AND pos=?",
+                (dump(item) if item else None, key, pos),
+            )
             return True
 
-    def finish(self,key,token,error):
-        with connection(self.path,write=True) as db:
-            db.execute("UPDATE preview SET state=?,error=?,lease='',lease_at='' WHERE id=? AND lease=?",
-                       ("failed" if error else "ready",error,key,token))
+    def finish(self, key, token, error):
+        with connection(self.path, write=True) as db:
+            db.execute(
+                "UPDATE preview SET state=?,error=?,lease='',lease_at='' WHERE id=? AND lease=?",
+                ("failed" if error else "ready", error, key, token),
+            )
 
-    def page(self,key,offset,limit):
+    def page(self, key, offset, limit):
         with connection(self.path) as db:
-            meta=db.execute("SELECT state,error,schedule_version FROM preview WHERE id=?",(key,)).fetchone()
-            counts = dict(db.execute("""SELECT coalesce(json_extract(result,'$.status'),'pending'),count(*)
-                FROM preview_row WHERE preview=? GROUP BY 1""",(key,)))
-            rows=db.execute("SELECT * FROM preview_row WHERE preview=? ORDER BY pos LIMIT ? OFFSET ?",
-                            (key,limit,offset)).fetchall()
-        items=[load(r["result"]) if r["result"] else dict(account_id=r["account"],scheduled_at_utc=r["at"],
-                status="pending",conflicts=[],reason="正在核对候选") for r in rows]
-        summary={k:counts.get(k,0) for k in ("eligible","skipped","pending")}
-        return dict(preview_id=key,state=meta["state"],error=meta["error"],template_version=meta["schedule_version"],
-                    summary=summary,items=items,total=sum(counts.values()),offset=offset,limit=limit,
-                    computed=summary["eligible"]+summary["skipped"])
+            meta = db.execute(
+                "SELECT state,error,schedule_version FROM preview WHERE id=?", (key,)
+            ).fetchone()
+            counts = dict(
+                db.execute(
+                    """SELECT coalesce(json_extract(result,'$.status'),'pending'),count(*)
+                FROM preview_row WHERE preview=? GROUP BY 1""",
+                    (key,),
+                )
+            )
+            rows = db.execute(
+                "SELECT * FROM preview_row WHERE preview=? ORDER BY pos LIMIT ? OFFSET ?",
+                (key, limit, offset),
+            ).fetchall()
+        items = [
+            load(r["result"])
+            if r["result"]
+            else dict(
+                account_id=r["account"],
+                scheduled_at_utc=r["at"],
+                status="pending",
+                conflicts=[],
+                reason="正在核对候选",
+            )
+            for r in rows
+        ]
+        summary = {k: counts.get(k, 0) for k in ("eligible", "skipped", "pending")}
+        return dict(
+            preview_id=key,
+            state=meta["state"],
+            error=meta["error"],
+            template_version=meta["schedule_version"],
+            summary=summary,
+            items=items,
+            total=sum(counts.values()),
+            offset=offset,
+            limit=limit,
+            computed=summary["eligible"] + summary["skipped"],
+        )

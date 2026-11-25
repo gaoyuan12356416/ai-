@@ -7,7 +7,7 @@ import os
 from collections import OrderedDict
 from dataclasses import replace
 from copy import copy
-from datetime import datetime,timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .pub_store import connection, iso, load, now
@@ -174,12 +174,16 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
     content_ids = set(spec.get("content_ids") or [])
     resources = spec.get("resource_ids") or []
     if resources:
-        for i in range(0,len(resources),200):
-            part=resources[i:i+200]
-            marks=",".join(["%s"]*len(part))
-            content_ids.update(str(r["content_id"]) for r in source._stream_select(
-                f"SELECT DISTINCT content_id FROM `{source.schema}`.ads_drama_resource WHERE app_id=%s AND type=2 AND id IN ({marks})",
-                [native_selector.app_id,*part]))
+        for i in range(0, len(resources), 200):
+            part = resources[i : i + 200]
+            marks = ",".join(["%s"] * len(part))
+            content_ids.update(
+                str(r["content_id"])
+                for r in source._stream_select(
+                    f"SELECT DISTINCT content_id FROM `{source.schema}`.ads_drama_resource WHERE app_id=%s AND type=2 AND id IN ({marks})",
+                    [native_selector.app_id, *part],
+                )
+            )
     allowed = set(spec.get("material_ids") or [])
     if spec.get("material_id"):
         allowed = {str(spec["material_id"])}
@@ -190,24 +194,28 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
             marks = ",".join("?" for _ in chunk).replace("?", "%s")
             sql = f"SELECT DISTINCT data_source_id FROM `{source.schema}`.ads_custom_source WHERE id IN ({marks})"
             parents.update(str(r["data_source_id"]) for r in source._stream_select(sql, chunk))
-    asof=datetime.fromisoformat(spec["_catalog_at"]) if spec.get("_catalog_at") else now()
+    asof = datetime.fromisoformat(spec["_catalog_at"]) if spec.get("_catalog_at") else now()
     cutoff = asof - timedelta(days=spec.get("material_window_days", 0))
-    excluded=set(spec.get("cooling") or [])
+    excluded = set(spec.get("cooling") or [])
 
     class ScopedSource:
-        def __getattr__(self,name):
-            return getattr(source,name)
+        def __getattr__(self, name):
+            return getattr(source, name)
 
-        def list_drama_rows(self,**kwargs):
-            rows=source.list_drama_rows(**kwargs)
-            return [r for r in rows if (not exact or r.content_id==exact)
-                    and (not (content_ids or resources) or r.content_id in content_ids)
-                    and (not allowed or r.content_id in parents)]
+        def list_drama_rows(self, **kwargs):
+            rows = source.list_drama_rows(**kwargs)
+            return [
+                r
+                for r in rows
+                if (not exact or r.content_id == exact)
+                and (not (content_ids or resources) or r.content_id in content_ids)
+                and (not allowed or r.content_id in parents)
+            ]
 
     class Selector(TwoStageSelector):
         def _eligible_dramas(self, request, rows, *args):
             if excluded:
-                rows=[r for r in rows if r.content_id not in excluded]
+                rows = [r for r in rows if r.content_id not in excluded]
             candidates = super()._eligible_dramas(request, rows, *args)
             self.ranking = {}
             if spec.get("model") != "income" or not candidates:
@@ -248,33 +256,39 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
 
 class SnapshotReads:
     """Reuse immutable source reads while simulating one snapshot. Never used by the executor."""
-    def __init__(self,delegate,methods,budget=50000):
-        self.delegate=delegate
-        self.methods=set(methods)
-        self.values=OrderedDict()
-        self.budget=budget
-        self.used=0
 
-    def __getattr__(self,name):
-        fn=getattr(self.delegate,name)
+    def __init__(self, delegate, methods, budget=50000):
+        self.delegate = delegate
+        self.methods = set(methods)
+        self.values = OrderedDict()
+        self.budget = budget
+        self.used = 0
+
+    def __getattr__(self, name):
+        fn = getattr(self.delegate, name)
         if name not in self.methods:
             return fn
-        def cached(*args,**kwargs):
-            key=(name,repr(args),repr(sorted(kwargs.items())))
+
+        def cached(*args, **kwargs):
+            key = (name, repr(args), repr(sorted(kwargs.items())))
             if key not in self.values:
-                result=fn(*args,**kwargs)
-                if name=="_stream_select":
-                    result=tuple(result)
-                units=len(result.by_material)+len(result.by_drama) if name=="load" else (
-                      len(result) if isinstance(result,(tuple,list,dict,set)) else 1)
-                units=max(units,1)
-                while self.values and (self.used+units>self.budget or len(self.values)>=512):
-                    _,(_,removed)=self.values.popitem(last=False)
-                    self.used-=removed
-                self.used+=units
-                self.values[key]=(result,units)
+                result = fn(*args, **kwargs)
+                if name == "_stream_select":
+                    result = tuple(result)
+                units = (
+                    len(result.by_material) + len(result.by_drama)
+                    if name == "load"
+                    else (len(result) if isinstance(result, (tuple, list, dict, set)) else 1)
+                )
+                units = max(units, 1)
+                while self.values and (self.used + units > self.budget or len(self.values) >= 512):
+                    _, (_, removed) = self.values.popitem(last=False)
+                    self.used -= removed
+                self.used += units
+                self.values[key] = (result, units)
             self.values.move_to_end(key)
             return self.values[key][0]
+
         return cached
 
 
@@ -301,12 +315,14 @@ class Runtime:
         return conflicts(account, at)
 
     def preview_session(self):
-        runtime=copy(self)
-        runtime.native=copy(self.native)
-        s=runtime.native.selector=copy(self.native.selector)
-        s.source=SnapshotReads(s.source,("list_drama_rows","list_material_rows","blacklist_snapshot","_stream_select"))
-        s.metrics=SnapshotReads(s.metrics,("load",),budget=250000)
-        s.material_validator=SnapshotReads(s.material_validator,("validate",))
+        runtime = copy(self)
+        runtime.native = copy(self.native)
+        s = runtime.native.selector = copy(self.native.selector)
+        s.source = SnapshotReads(
+            s.source, ("list_drama_rows", "list_material_rows", "blacklist_snapshot", "_stream_select")
+        )
+        s.metrics = SnapshotReads(s.metrics, ("load",), budget=250000)
+        s.material_validator = SnapshotReads(s.material_validator, ("validate",))
         return runtime
 
     @staticmethod
@@ -561,7 +577,10 @@ def promotion_executor(native, path):
                         model="rules",
                         material_window_days=load(row["config_json"]).get("material_window_days", 0),
                     )
-                    request = replace(request,rules=replace(request.rules,drama=replace(request.rules.drama,cooldown_days=0)))
+                    request = replace(
+                        request,
+                        rules=replace(request.rules, drama=replace(request.rules.drama, cooldown_days=0)),
+                    )
                     sel = make_selector(
                         native,
                         _ClaimedSelectionStore(self.store, claim_token),

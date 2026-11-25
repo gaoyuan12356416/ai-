@@ -86,7 +86,11 @@ def dispatch(method, path, payload, actor, nav):
     board = path in ("/history", "/stats/templates") or bool(inventory)
     # Listing tasks, templates and pages from a frozen preview only requires account visibility.
     # Avoid recomputing every channel's revenue tree for those requests.
-    scope_only = board or method == "GET" or (path.endswith(("/preview", "/drafts")) and bool(payload.get("preview_id")))
+    scope_only = (
+        board
+        or method == "GET"
+        or (path.endswith(("/preview", "/drafts")) and bool(payload.get("preview_id")))
+    )
     if scope_only:
         identities = channels.public_accounts()["items"]
         ids = {str(c.get("source_account_id") or c["account_id"]) for c in identities}
@@ -163,10 +167,13 @@ class Handler(BaseHTTPRequestHandler):
                 message = "推广服务暂不可用，请稍后重试"
             else:
                 message = str(exc)
-            return self.reply(
-                status,
-                {"error": str(getattr(exc, "code", HTTPStatus(status).name.lower())), "message": message},
-            )
+            error = {
+                "error": str(getattr(exc, "code", HTTPStatus(status).name.lower())),
+                "message": message,
+            }
+            if getattr(exc, "preview_id", None):
+                error["preview_id"] = exc.preview_id
+            return self.reply(status, error)
 
     do_GET = serve
     do_POST = serve

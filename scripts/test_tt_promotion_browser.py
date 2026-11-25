@@ -73,6 +73,7 @@ def run(screens=None):
         ],
     )
     templates = []
+    snapshots = {}
     mutations = []
     jobs = []
     requests = []
@@ -214,35 +215,46 @@ def run(screens=None):
                     mutations.append((endpoint, post))
                     templates[0]["enabled"] = True
                     data = templates[0]
+                elif endpoint == "/stats/templates":
+                    data = {"items": []}
+                elif endpoint == "/history":
+                    data = dict(items=jobs, page=1, page_size=25, total=len(jobs))
                 elif endpoint == "/templates/7/preview":
-                    data = {
-                        "items": [
+                    if post.get("async_preview"):
+                        assert post["expected_version"] == 1
+                        key = "snapshot-" + str(len(snapshots))
+                        slots = post["account_ids"] * (5 if post.get("plan_date") else 1)
+                        snapshots[key] = [
                             dict(
                                 account_id=a,
-                                status="blocked" if a == "102" else "ready",
+                                status="skipped" if a == "102" else "eligible",
                                 reason="暂缺授权" if a == "102" else "题材匹配",
                                 conflicts=["旧排期占用"] if a == "102" else [],
                                 content_id="d28",
-                                material_id="51",
+                                material_id=str(51 + i),
                                 caption=post.get("manual_caption", "预览文案"),
                             )
-                            for a in post["account_ids"]
+                            for i, a in enumerate(slots)
                         ]
-                    }
-                    if post.get("plan_date"):
-                        full = data["items"] * 5
-                        offset = post["offset"]
-                        data.update(
-                            total=len(full),
-                            offset=offset,
-                            limit=post["limit"],
-                            items=full[offset : offset + post["limit"]],
-                        )
-                elif endpoint == "/templates/7/draft":
-                    assert (
-                        post["account_id"] == "101" and post["material_id"] == "51" and post["operation_id"]
+                    else:
+                        key = post["preview_id"]
+                    full = snapshots[key]
+                    offset, limit = post["offset"], post["limit"]
+                    eligible = sum(r["status"] == "eligible" for r in full)
+                    data = dict(
+                        preview_id=key,
+                        state="ready",
+                        total=len(full),
+                        computed=len(full),
+                        offset=offset,
+                        limit=limit,
+                        items=full[offset : offset + limit],
+                        summary=dict(eligible=eligible, skipped=len(full) - eligible, pending=0),
                     )
-                    data = {"id": 8, "state": "waiting", "account_id": "101", "material_id": "51"}
+                elif endpoint == "/templates/7/drafts":
+                    assert post["operation_id"] and post["preview_id"] in snapshots
+                    assert post["items"] == [{"account_id": "101", "material_id": "59"}]
+                    data = {"items": [dict(id=8, state="waiting", account_id="101", material_id="59")]}
                 elif endpoint == "/templates/7/draft/8":
                     data = {
                         "id": 8,
@@ -250,10 +262,12 @@ def run(screens=None):
                         "caption": "AI 审阅稿 {code}",
                         "source": "ai",
                         "account_id": "101",
-                        "material_id": "51",
+                        "material_id": "59",
                     }
                 elif endpoint == "/templates/7/run":
                     mutations.append((endpoint, post))
+                    assert post["preview_id"] in snapshots and post["drafts"] == []
+                    assert post["account_ids"] == ["101", "102"]
                     if fail_first_run:
                         fail_first_run = False
                         route.fulfill(status=503, json={"message": "上次提交结果待核对"})
@@ -386,18 +400,19 @@ def run(screens=None):
         page.get_by_role("button", name="预演与执行").click()
         form = page.locator("#execution")
         form.get_by_role("button", name="只读预演").click()
-        expect(form.locator("#execute")).not_to_be_visible()
+        expect(page.locator("#execute")).not_to_be_visible()
         expect(page.locator("#preview-output")).to_contain_text("10 个频道任务")
         page.get_by_role("button", name="下一页").click()
-        expect(page.locator("#preview-output")).to_contain_text("第 9–10 条")
+        expect(page.locator("#preview-output")).to_contain_text("2 / 2 页")
         page.get_by_role("button", name="生成单条 AI 稿").first.click()
-        page.get_by_role("button", name="采用AI 稿并锁定频道和素材").click()
-        expect(form.locator("[name=mode]")).to_have_value("material")
-        expect(form.locator("[name=material_id]")).to_have_value("51")
-        expect(form.locator("[name=manual_caption]")).to_have_value("AI 审阅稿 {code}")
-        expect(form.locator("[data-accounts] :checked")).to_have_count(1)
-        expect(form.locator("#execute")).to_be_disabled()
+        page.get_by_role("button", name="采用此条稿件").click()
+        expect(form.locator("[name=mode]")).to_have_value("template")
+        expect(form.locator("[name=manual_caption]")).to_have_value("")
+        expect(form.locator("[data-accounts] :checked")).to_have_count(2)
+        expect(page.locator("#adopted-copy")).to_contain_text("素材 59")
+        expect(page.locator("#adopted-copy textarea")).to_have_value("AI 审阅稿 {code}")
         page.get_by_role("button", name="关闭", exact=True).click()
+        page.get_by_role("button", name="舍弃更改", exact=True).click()
         page.get_by_role("button", name="预演与执行").click()
         form = page.locator("#execution")
         form.locator("[name=mode]").select_option("serial")
@@ -414,12 +429,12 @@ def run(screens=None):
         if screens:
             page.screenshot(path=str(screens / "template-preview.png"))
         form.locator("[name=manual_caption]").fill("人工定稿修订")
-        expect(form.locator("#execute")).to_be_disabled()
+        expect(page.locator("#review-footer")).not_to_be_visible()
         form.get_by_role("button", name="只读预演").click()
-        form.get_by_role("button", name="确认预约").click()
+        page.get_by_role("button", name="确认预约").click()
         page.get_by_role("button", name="预约", exact=True).click()
         expect(page.locator("#modal-error")).to_have_text("上次提交结果待核对")
-        form.get_by_role("button", name="确认预约").click()
+        page.get_by_role("button", name="确认预约").click()
         page.get_by_role("button", name="预约", exact=True).click()
         expect(page.locator("#dialog-title")).to_contain_text("批次 #19")
         page.locator("#dialog summary").click()

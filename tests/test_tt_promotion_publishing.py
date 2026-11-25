@@ -191,9 +191,7 @@ class PublisherTest(unittest.TestCase):
         )
         self.p.work(lambda actor: self.channels)
         with connection(self.path, write=True) as db:
-            db.execute(
-                "INSERT INTO ttp_series VALUES('one','cid',?,'12','[\"51\",\"52\"]')", (self.t["id"],)
-            )
+            db.execute("INSERT INTO ttp_series VALUES('one','cid',?,'12','[\"51\",\"52\"]')", (self.t["id"],))
             series = db.execute("SELECT * FROM ttp_series").fetchone()
             with self.assertRaisesRegex(PublicationError, "其他任务占用"):
                 self.p._series_state(db, series, ["51", "52"])
@@ -280,162 +278,256 @@ class PublisherTest(unittest.TestCase):
         with self.assertRaises(PublicationError):
             self.call("GET", "/runs/not-a-number")
 
-    def ready(self,key,**args):
+    def ready(self, key, **args):
         for _ in range(200):
-            data=self.call("POST",self.base+"/preview",dict(expected_version=1,preview_id=key,**args))
-            if data["state"]=="ready":
+            data = self.call("POST", self.base + "/preview", dict(expected_version=1, preview_id=key, **args))
+            if data["state"] == "ready":
                 return data
-            self.assertNotEqual(data["state"],"failed",data.get("error"))
-            time.sleep(.025)
+            self.assertNotEqual(data["state"], "failed", data.get("error"))
+            time.sleep(0.025)
         self.fail("preview did not finish")
 
     def test_52_slots_across_pages_share_occupancy_cooldown_and_beijing_seed(self):
-        accounts=[str(i) for i in range(15,28)]
-        self.channels=[dict(self.channels[0],account_id=i) for i in accounts]
-        self.t=self.call("POST","/templates",dict(self.data,account_ids=accounts,cooldown_days=7,
-                             schedule=dict(mode="fixed",times=["00:10","09:00","17:00","23:10"])))
-        self.base="/templates/"+str(self.t["id"])
-        def pick(t,ch,opts,seed,blocked):
-            series=next(i for i in range(4) if str(i) not in opts.get("cooling",[]))
-            material=next(str(1000+series*100+n) for n in range(30) if str(1000+series*100+n) not in blocked)
-            return dict(content_id=str(series),material_id=material,drama_name="Show",reason="rules")
-        self.runtime.preview=pick
-        start=self.call("POST",self.base+"/preview",dict(async_preview=True,plan_date="2027-01-20",
-                             expected_version=1,limit=1))
-        key=start["preview_id"]
-        self.p=Publisher(self.path,self.runtime)
-        result=self.ready(key,limit=24)
-        self.assertEqual(result["summary"],dict(eligible=52,skipped=0,pending=0))
-        all_rows=result["items"]+self.ready(key,offset=24,limit=24)["items"]+self.ready(key,offset=48,limit=8)["items"]
-        self.assertEqual(len({r["material_id"] for r in all_rows}),52)
+        accounts = [str(i) for i in range(15, 28)]
+        self.channels = [dict(self.channels[0], account_id=i) for i in accounts]
+        self.t = self.call(
+            "POST",
+            "/templates",
+            dict(
+                self.data,
+                account_ids=accounts,
+                cooldown_days=7,
+                schedule=dict(mode="fixed", times=["00:10", "09:00", "17:00", "23:10"]),
+            ),
+        )
+        self.base = "/templates/" + str(self.t["id"])
+
+        def pick(t, ch, opts, seed, blocked):
+            series = next(i for i in range(4) if str(i) not in opts.get("cooling", []))
+            material = next(
+                str(1000 + series * 100 + n) for n in range(30) if str(1000 + series * 100 + n) not in blocked
+            )
+            return dict(content_id=str(series), material_id=material, drama_name="Show", reason="rules")
+
+        self.runtime.preview = pick
+        start = self.call(
+            "POST",
+            self.base + "/preview",
+            dict(async_preview=True, plan_date="2027-01-20", expected_version=1, limit=1),
+        )
+        key = start["preview_id"]
+        self.p = Publisher(self.path, self.runtime)
+        result = self.ready(key, limit=24)
+        self.assertEqual(result["summary"], dict(eligible=52, skipped=0, pending=0))
+        all_rows = (
+            result["items"]
+            + self.ready(key, offset=24, limit=24)["items"]
+            + self.ready(key, offset=48, limit=8)["items"]
+        )
+        self.assertEqual(len({r["material_id"] for r in all_rows}), 52)
         for acct in accounts:
-            self.assertEqual(len({r["content_id"] for r in all_rows if r["account_id"]==acct}),4)
+            self.assertEqual(len({r["content_id"] for r in all_rows if r["account_id"] == acct}), 4)
         self.assertTrue(all(r["seed"].endswith(":2027-01-20") for r in all_rows))
-        self.assertEqual(all_rows[7],self.ready(key,offset=7,limit=1)["items"][0])
-        self.assertEqual(self.rows("SELECT * FROM ttp_slot"),[])
+        self.assertEqual(all_rows[7], self.ready(key, offset=7, limit=1)["items"][0])
+        self.assertEqual(self.rows("SELECT * FROM ttp_slot"), [])
 
     def test_native_rules_and_resource_union_filter_metrics_before_loading(self):
         from scripts import test_tt_auto_post_selector as mocks
         from features.tt_promotion.pub_native import Runtime
         from features.tt_promotion.publishing import options
-        source=mocks.FakeSource([mocks.drama("C1"),mocks.drama("C2"),mocks.drama("C3")],
-            {f"C{i}":[mocks.material(str(i*100+n),f"C{i}") for n in [1,2]] for i in range(1,4)})
-        source.schema="catalog"
-        def resource_query(sql,values):
-            self.assertIn("ads_drama_resource",sql)
-            self.assertEqual(values,[1479,"700"])
-            return [{"content_id":"C2"}]
-        source._stream_select=resource_query
-        day=mocks.complete_beijing_dates(mocks.NOW,7)[-1]
-        metrics=mocks.FakeMetricStore([mocks.metric_row(day,f"C{i}",100*i+n,i*20+n,i*10)
-                 for i in range(1,4) for n in [1,2]])
-        rt=Runtime.__new__(Runtime)
-        rt.store=self.runtime.store
-        rt.native=SimpleNamespace(selector=mocks.selector(source,metrics),legacy_reader=mocks.FakeLegacyReader(),store=rt.store)
-        template=self.call("POST","/templates",dict(self.data,model="rules",drama_launch_window_days=0,material_window_days=0,
-                    drama_rule=dict(sort_by="spend",sort_direction="desc",roas_min=10),
-                    material_rule=dict(sort_by="spend",sort_direction="asc",duration_min_seconds=20)))
-        t=rt.store.get_template(template["id"])
-        args=options(dict(mode="drama",content_ids=["C1"],resource_ids=["700"]))
-        args["_catalog_at"]=mocks.NOW.isoformat()
-        with patch("features.tt_promotion.pub_native.old_databases",return_value=(self.path,self.path)):
-            session=rt.preview_session()
-            first=session.preview(t,self.channels[0],args,"seed",())
-            second=session.preview(t,self.channels[1],args,"seed",("201",))
-        self.assertEqual((first["material_id"],second["material_id"]),("201","202"))
-        self.assertEqual(first["material_metrics"]["spend"],"41")
-        self.assertEqual([r[3] for r in metrics.loads if r[0]=="rows"],[("C1","C2")])
-        self.assertEqual(source.material_calls,[("C2","en")])
+
+        source = mocks.FakeSource(
+            [mocks.drama("C1"), mocks.drama("C2"), mocks.drama("C3")],
+            {f"C{i}": [mocks.material(str(i * 100 + n), f"C{i}") for n in [1, 2]] for i in range(1, 4)},
+        )
+        source.schema = "catalog"
+
+        def resource_query(sql, values):
+            self.assertIn("ads_drama_resource", sql)
+            self.assertEqual(values, [1479, "700"])
+            return [{"content_id": "C2"}]
+
+        source._stream_select = resource_query
+        day = mocks.complete_beijing_dates(mocks.NOW, 7)[-1]
+        metrics = mocks.FakeMetricStore(
+            [
+                mocks.metric_row(day, f"C{i}", 100 * i + n, i * 20 + n, i * 10)
+                for i in range(1, 4)
+                for n in [1, 2]
+            ]
+        )
+        rt = Runtime.__new__(Runtime)
+        rt.store = self.runtime.store
+        rt.native = SimpleNamespace(
+            selector=mocks.selector(source, metrics), legacy_reader=mocks.FakeLegacyReader(), store=rt.store
+        )
+        template = self.call(
+            "POST",
+            "/templates",
+            dict(
+                self.data,
+                model="rules",
+                drama_launch_window_days=0,
+                material_window_days=0,
+                drama_rule=dict(sort_by="spend", sort_direction="desc", roas_min=10),
+                material_rule=dict(sort_by="spend", sort_direction="asc", duration_min_seconds=20),
+            ),
+        )
+        t = rt.store.get_template(template["id"])
+        args = options(dict(mode="drama", content_ids=["C1"], resource_ids=["700"]))
+        args["_catalog_at"] = mocks.NOW.isoformat()
+        with patch("features.tt_promotion.pub_native.old_databases", return_value=(self.path, self.path)):
+            session = rt.preview_session()
+            first = session.preview(t, self.channels[0], args, "seed", ())
+            second = session.preview(t, self.channels[1], args, "seed", ("201",))
+        self.assertEqual((first["material_id"], second["material_id"]), ("201", "202"))
+        self.assertEqual(first["material_metrics"]["spend"], "41")
+        self.assertEqual([r[3] for r in metrics.loads if r[0] == "rows"], [("C1", "C2")])
+        self.assertEqual(source.material_calls, [("C2", "en")])
         with self.assertRaises(PublicationError):
-            self.call("POST","/templates",dict(self.data,drama_rule=dict(spend_min=100,spend_max=90)))
+            self.call("POST", "/templates", dict(self.data, drama_rule=dict(spend_min=100, spend_max=90)))
 
     def test_batch_draft_adoption_scope_and_frozen_provenance(self):
-        preview=self.call("POST",self.base+"/preview",dict(expected_version=1))
-        key=preview["preview_id"]
-        args=dict(expected_version=1,preview_id=key,operation_id="draft-batch",
-            items=[dict(account_id=r["account_id"],material_id=r["material_id"]) for r in preview["items"]])
+        preview = self.call("POST", self.base + "/preview", dict(expected_version=1))
+        key = preview["preview_id"]
+        args = dict(
+            expected_version=1,
+            preview_id=key,
+            operation_id="draft-batch",
+            items=[dict(account_id=r["account_id"], material_id=r["material_id"]) for r in preview["items"]],
+        )
         with self.assertRaises(PublicationError):
-            self.call("POST",self.base+"/drafts",args,actor=dict(self.actor,user_id="colleague"))
-        drafts=self.call("POST",self.base+"/drafts",args)["items"]
+            self.call("POST", self.base + "/drafts", args, actor=dict(self.actor, user_id="colleague"))
+        drafts = self.call("POST", self.base + "/drafts", args)["items"]
         for _ in drafts:
-            pub_copy.process_one(self.path,lambda _: "AI {code}",table="ttp_draft")
-        items=[dict(draft_id=d["id"],account_id=d["account_id"],material_id=d["material_id"]) for d in drafts]
-        items[0]["edited_caption"]="Revised {code}"
-        args=dict(expected_version=1,operation_id="reviewed-drafts",preview_id=key,drafts=items)
+            pub_copy.process_one(self.path, lambda _: "AI {code}", table="ttp_draft")
+        items = [
+            dict(draft_id=d["id"], account_id=d["account_id"], material_id=d["material_id"]) for d in drafts
+        ]
+        items[0]["edited_caption"] = "Revised {code}"
+        args = dict(expected_version=1, operation_id="reviewed-drafts", preview_id=key, drafts=items)
         with self.assertRaises(PublicationError):
-            self.call("POST",self.base+"/run",dict(args,drafts=[dict(items[0],material_id="500")]))
-        job=self.call("POST",self.base+"/run",args)
-        self.p.work(lambda a:self.channels)
-        self.assertEqual(self.rows("select source,caption_body from ttp_copy order by rowid"),
-                   [dict(source="manual",caption_body="Revised {code}"),dict(source="ai",caption_body="AI {code}")])
-        detail=self.call("GET","/runs/"+str(job["id"]))
-        self.assertEqual([r["preview_comparison"]["status"] for r in detail["items"]],["matched","matched"])
-        self.assertEqual(detail["items"][0]["copy_provenance"]["draft_id"],drafts[0]["id"])
-        self.assertEqual(self.call("POST",self.base+"/run",args)["id"],job["id"])
+            self.call("POST", self.base + "/run", dict(args, drafts=[dict(items[0], material_id="500")]))
+        job = self.call("POST", self.base + "/run", args)
+        self.p.work(lambda a: self.channels)
+        self.assertEqual(
+            self.rows("select source,caption_body from ttp_copy order by rowid"),
+            [
+                dict(source="manual", caption_body="Revised {code}"),
+                dict(source="ai", caption_body="AI {code}"),
+            ],
+        )
+        detail = self.call("GET", "/runs/" + str(job["id"]))
+        self.assertEqual([r["preview_comparison"]["status"] for r in detail["items"]], ["matched", "matched"])
+        self.assertEqual(detail["items"][0]["copy_provenance"]["draft_id"], drafts[0]["id"])
+        self.assertEqual(self.call("POST", self.base + "/run", args)["id"], job["id"])
 
     def test_recheck_and_missing_receipt_bucket(self):
-        preview=self.call("POST",self.base+"/preview",dict(expected_version=1,account_ids=["12"]))
-        job=self.call("POST",self.base+"/run",dict(expected_version=1,operation_id="changed-item",
-                             account_ids=["12"],preview_id=preview["preview_id"]))
-        fn=self.runtime.preview
-        self.runtime.preview=lambda *args,**kw:dict(fn(*args,**kw),material_id="99")
+        preview = self.call("POST", self.base + "/preview", dict(expected_version=1, account_ids=["12"]))
+        job = self.call(
+            "POST",
+            self.base + "/run",
+            dict(
+                expected_version=1,
+                operation_id="changed-item",
+                account_ids=["12"],
+                preview_id=preview["preview_id"],
+            ),
+        )
+        fn = self.runtime.preview
+        self.runtime.preview = lambda *args, **kw: dict(fn(*args, **kw), material_id="99")
         for _ in range(2):
-            self.p.work(lambda a:self.channels)
-        url="/runs/"+str(job["id"])
-        self.assertEqual(self.call("GET",url)["items"][0]["preview_comparison"]["status"],"changed")
-        for status,unknown,publish,expected in [("retry_wait",1,"","review"),("published",0,"","review"),
-                                                ("published",0,"real-receipt","confirmed")]:
-            with connection(self.path,write=True) as db:
-                db.execute("UPDATE tt_auto_task SET status=?,unknown_outcome=?,publish_id=?",(status,unknown,publish))
-            result=self.call("GET",url)
-            self.assertEqual(result["items"][0]["result_bucket"],expected)
-            self.assertEqual(result["status"],"needs_review" if expected=="review" else "published")
+            self.p.work(lambda a: self.channels)
+        url = "/runs/" + str(job["id"])
+        self.assertEqual(self.call("GET", url)["items"][0]["preview_comparison"]["status"], "changed")
+        for status, unknown, publish, expected in [
+            ("retry_wait", 1, "", "review"),
+            ("published", 0, "", "review"),
+            ("published", 0, "real-receipt", "confirmed"),
+        ]:
+            with connection(self.path, write=True) as db:
+                db.execute(
+                    "UPDATE tt_auto_task SET status=?,unknown_outcome=?,publish_id=?",
+                    (status, unknown, publish),
+                )
+            result = self.call("GET", url)
+            self.assertEqual(result["items"][0]["result_bucket"], expected)
+            self.assertEqual(result["status"], "needs_review" if expected == "review" else "published")
 
     def test_daily_draft_reuse_checks_story_facts_and_manual_has_priority(self):
-        args=dict(expected_version=1,account_ids=["12"])
-        day=self.call("POST",self.base+"/preview",dict(args,plan_date="2027-01-20"))
-        orig=day["items"][0]
-        drafts=self.call("POST",self.base+"/drafts",dict(args,operation_id="day-draft-reuse",preview_id=day["preview_id"],
-                             items=[dict(account_id="12",material_id=orig["material_id"])]))
-        d=drafts["items"][0]
-        pub_copy.process_one(self.path,lambda _: "AI {code}",table="ttp_draft")
-        adopt=[dict(draft_id=d["id"],account_id="12",material_id=orig["material_id"])]
-        fn=self.runtime.preview
-        self.runtime.preview=lambda *a,**kw:dict(fn(*a,**kw),description="Different episode facts")
-        bad=self.call("POST",self.base+"/preview",args)
-        self.assertNotEqual(bad["items"][0]["copy_facts_key"],orig["copy_facts_key"])
+        args = dict(expected_version=1, account_ids=["12"])
+        day = self.call("POST", self.base + "/preview", dict(args, plan_date="2027-01-20"))
+        orig = day["items"][0]
+        drafts = self.call(
+            "POST",
+            self.base + "/drafts",
+            dict(
+                args,
+                operation_id="day-draft-reuse",
+                preview_id=day["preview_id"],
+                items=[dict(account_id="12", material_id=orig["material_id"])],
+            ),
+        )
+        d = drafts["items"][0]
+        pub_copy.process_one(self.path, lambda _: "AI {code}", table="ttp_draft")
+        adopt = [dict(draft_id=d["id"], account_id="12", material_id=orig["material_id"])]
+        fn = self.runtime.preview
+        self.runtime.preview = lambda *a, **kw: dict(fn(*a, **kw), description="Different episode facts")
+        bad = self.call("POST", self.base + "/preview", args)
+        self.assertNotEqual(bad["items"][0]["copy_facts_key"], orig["copy_facts_key"])
         with self.assertRaises(PublicationError):
-            self.call("POST",self.base+"/run",dict(args,operation_id="wrong-facts",preview_id=bad["preview_id"],drafts=adopt))
-        self.runtime.preview=fn
-        good=self.call("POST",self.base+"/preview",args)
-        self.call("POST",self.base+"/run",dict(args,operation_id="right-facts",preview_id=good["preview_id"],
-                  manual_caption="Human final",drafts=adopt))
-        self.p.work(lambda a:self.channels)
-        self.assertEqual(self.rows("SELECT source,caption_body FROM ttp_copy"),[dict(source="manual",caption_body="Human final")])
+            self.call(
+                "POST",
+                self.base + "/run",
+                dict(args, operation_id="wrong-facts", preview_id=bad["preview_id"], drafts=adopt),
+            )
+        self.runtime.preview = fn
+        good = self.call("POST", self.base + "/preview", args)
+        self.call(
+            "POST",
+            self.base + "/run",
+            dict(
+                args,
+                operation_id="right-facts",
+                preview_id=good["preview_id"],
+                manual_caption="Human final",
+                drafts=adopt,
+            ),
+        )
+        self.p.work(lambda a: self.channels)
+        self.assertEqual(
+            self.rows("SELECT source,caption_body FROM ttp_copy"),
+            [dict(source="manual", caption_body="Human final")],
+        )
 
     def test_async_conflicts_appear_before_cold_eligible_selection(self):
         import threading
+
         self.runtime.blocked.add("13")
-        entered,release=threading.Event(),threading.Event()
-        fn=self.runtime.preview
-        def slow(*a,**kw):
+        entered, release = threading.Event(), threading.Event()
+        fn = self.runtime.preview
+
+        def slow(*a, **kw):
             entered.set()
             release.wait(3)
-            return fn(*a,**kw)
-        self.runtime.preview=slow
-        key=self.call("POST",self.base+"/preview",dict(expected_version=1,async_preview=True))["preview_id"]
+            return fn(*a, **kw)
+
+        self.runtime.preview = slow
+        key = self.call("POST", self.base + "/preview", dict(expected_version=1, async_preview=True))[
+            "preview_id"
+        ]
         try:
             self.assertTrue(entered.wait(2))
-            peek=self.call("POST",self.base+"/preview",dict(expected_version=1,preview_id=key))
-            self.assertEqual([r["status"] for r in peek["items"]],["pending","skipped"])
+            peek = self.call("POST", self.base + "/preview", dict(expected_version=1, preview_id=key))
+            self.assertEqual([r["status"] for r in peek["items"]], ["pending", "skipped"])
             self.assertTrue(peek["items"][1]["conflicts"])
         finally:
             release.set()
-        ready=self.ready(key)
-        self.assertNotIn("material_id",ready["items"][1])
-        full=self.ready(key,include_conflict_candidates=True)
-        self.assertEqual(full["items"][1]["status"],"skipped")
-        self.assertIn("material_id",full["items"][1])
+        ready = self.ready(key)
+        self.assertNotIn("material_id", ready["items"][1])
+        full = self.ready(key, include_conflict_candidates=True)
+        self.assertEqual(full["items"][1]["status"], "skipped")
+        self.assertIn("material_id", full["items"][1])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
   <title>自动发布（新版） · TT 平台推广</title>
   <link rel="stylesheet" href="/ui-topbar.css">
   <link rel="stylesheet" href="/tt-promotion.css">
+  <link rel="stylesheet" href="/tt-promotion-auto-tools.css">
   <script defer src="/ui-topbar.js"></script>
   <script defer src="/quick-nav.js"></script>
   <script defer src="/tt-promotion-common.js"></script>
@@ -21,11 +22,23 @@
     <div role="alert" id="notice" hidden></div>
     <div role="status" id="loading">正在加载…</div>
     <section id="workspace" hidden><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
-    <section id="templates-view" class="panel"><div class="section-head"><h2>发布模板</h2><div class="actions"><span id="templates-meta" class="muted"></span><button class="button primary" id="new-template">创建模板</button></div></div>
-      <div class="table-wrap"><table><thead><tr><th>模板 / 版本</th><th>状态</th><th>频道</th><th>选材方式</th><th>北京时间排期</th><th>AI 文案</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
+    <section id="templates-view" class="panel">
+      <div class="section-head"><h2>发布模板</h2><div class="actions"><span id="templates-meta" class="muted"></span><button class="button primary" id="new-template">创建模板</button></div></div>
+      <div class="tool-filters"><label>查找模板<input type="search" id="template-search" placeholder="名称或模板 ID"></label><label>最近批次<select id="template-state"><option value="">全部结果</option><option value="anomaly">有异常</option><option value="failed">有失败</option><option value="skipped">有跳过</option><option value="review">待核对</option></select></label><span id="stats-error" aria-live="polite"></span></div>
+      <div class="table-wrap"><table><thead><tr><th>模板 / 版本</th><th>状态 / 选材</th><th>频道 / 文案</th><th>排期 / 下次执行</th><th>最近批次</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
     </section>
-    <section id="runs-view" class="panel" hidden><div class="section-head"><h2>运行记录</h2><div class="actions"><select id="run-filter" aria-label="按模板查看运行记录"><option value="">全部模板</option></select><button class="button" id="refresh-runs">刷新记录</button></div></div>
-      <div class="table-wrap"><table><thead><tr><th>批次</th><th>模板</th><th>触发方式</th><th>排期 / 创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody id="runs"></tbody></table></div>
+    <section id="runs-view" class="panel" hidden><div class="section-head"><h2>运行记录</h2><span id="history-total" class="muted"></span></div>
+      <form id="history-filters" class="tool-filters">
+        <label>模板<select name="template_id" id="run-filter"><option value="">全部模板</option></select></label>
+        <label>频道<select name="account_id" id="history-channel"><option value="">全部频道</option></select></label>
+        <label>状态<select name="status"><option value="">全部状态</option><option value="failed">失败</option><option value="review">待核对</option><option value="skipped">跳过</option><option value="pending">进行中</option><option value="confirmed">已确认</option></select></label>
+        <label>触发方式<select name="trigger_type"><option value="">全部触发</option><option value="auto">自动</option><option value="manual">手动</option></select></label>
+        <label>起始日期（北京）<input type="date" name="start"></label><label>截止日期（北京）<input type="date" name="end"></label>
+        <div class="actions"><button class="button primary" type="submit" id="refresh-runs">查询记录</button><button class="button" type="reset">重置</button></div>
+      </form>
+      <div id="history-error" role="status"></div>
+      <div class="table-wrap"><table><thead><tr><th>批次 / 模板</th><th>触发方式</th><th>排期 / 创建时间</th><th>状态</th><th>任务统计</th><th>操作</th></tr></thead><tbody id="runs"></tbody></table></div>
+      <div id="history-pages" class="tool-pages"></div>
     </section></section>
   </main>
 </div>
