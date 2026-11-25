@@ -10,6 +10,7 @@ from datetime import timedelta, timezone
 from heapq import nsmallest
 from itertools import islice
 import time
+from contextlib import ExitStack
 import re
 
 from features.material_products import contains as has_product, selected
@@ -58,6 +59,7 @@ def matches(totals, rule):
 class Catalog:
     def __init__(self, repo, config, scopes, now, pool):
         self.repo, self.config, self.scopes, self.pool = repo, config, scopes, pool
+        self.local = None
         self.mysql = BrokerReadOnlyMySQL()
         self.schema = '`' + self.mysql.schema + '`'
         self.blacklist = '`' + self.mysql.blacklist_schema + '`.ads_facebook_post_blacklist'
@@ -118,6 +120,8 @@ class Catalog:
                      rule['duration_min_seconds'], rule['duration_max_seconds'])
 
     def index(self):
+        if self.local:
+            return self.local.index(self)
         bounds = self.select(f'SELECT MAX(id) hi FROM {self.schema}.ads_custom_source')[0]
         groups = defaultdict(list)
         if bounds['hi'] is None:
@@ -192,7 +196,8 @@ class Catalog:
         from features.x_tag_revenue.taxonomy import classification_index
         types = {str(t) for t in self.config['drama_rule'].get('resource_type_v2') or []}
         with_classes = bool(self.config.get('_profile_selection'))
-        apps = self.resource_apps() if self.required_description or with_classes else []
+        need_resources = self.required_description or with_classes
+        apps = self.resource_apps() if need_resources and not self.local else []
         def chunk(batch):
             fields = [(name,'d.'+name) for name in ('id','content_id','app_id','name','language',
                                                      'series_code','resource_type','deploy_time','release_status')]
@@ -217,14 +222,14 @@ class Catalog:
                     details[cid] = row
             resources = []
             descriptions = {}
-            if details and apps:
+            if details and (apps or (need_resources and self.local)):
                 filter_type = '' if with_classes else ' AND r.type=2'
                 columns = [(name,'r.'+name) for name in ('content_id','app_id','language')]
                 if with_classes:
                     columns.extend((('series_code','r.series_code'),('labels','r.labels')))
                 if self.required_description:
                     columns.append(('description','CASE WHEN r.type=2 THEN BINARY TRIM(r.`desc`) ELSE NULL END'))
-                resources = self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT {{fields}}
+                resources = self.local.resources(details) if self.local else self.read_text(f"""SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT {{fields}}
                          FROM {self.schema}.ads_drama_resource r FORCE INDEX(actcld)
                         WHERE r.app IN ({placeholders(apps)}) AND r.content_id IN ({placeholders(details)})
                           AND r.app_id=%s{filter_type}""", (*apps, *details, self.config['app_id']), columns)
@@ -250,7 +255,7 @@ class Catalog:
 
         facts, descriptions, classes, error = {}, {}, {}, ''
         processed = 0
-        for detail, copy, labels, failed in self.read_batches(chunk, ids, 144):
+        for detail, copy, labels, failed in self.read_batches(chunk, ids, 1000 if self.local else 144):
             facts.update(detail)
             descriptions.update(copy)
             classes.update(labels)
@@ -261,6 +266,8 @@ class Catalog:
         return facts, descriptions, {} if error else classes, error
 
     def hydrate(self, ids):
+        if self.local:
+            return self.local.hydrate(ids)
         predicate, args = self.source_predicate()
         def chunk(batch):
             columns = [(name,'s.'+name) for name in ('id','url','name','tag_name','product','video_duration')]
@@ -296,8 +303,14 @@ def snapshots(repo, config, scopes):
     dates = tuple((day - timedelta(days=i)).isoformat() for i in range(config['metric_window_days'], 0, -1))
     metrics = repo.metric_store.load_metric_window(product=config['metric_product'],
                                                    platform=config['metric_platform'], dates=dates)
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    from .planning_catalog import open_for_plan
+    with ExitStack() as stack:
+        pool = stack.enter_context(ThreadPoolExecutor(max_workers=2))
         cat = Catalog(repo, config, scopes, now, pool)
+        cat.local = open_for_plan(config, now)
+        if cat.local:
+            stack.callback(cat.local.db.close)
+            print('fb_catalog_shared_snapshot', flush=True)
         raw = cat.index()
         zero = MetricTotals()
         drama_rule, rule = config['drama_rule'], config['material_rule']

@@ -549,7 +549,7 @@ class FBAutoPostStore:
         expected_due_lease_expires_at_utc: str | None,
     ) -> sqlite3.Row:
         due = conn.execute(
-            "SELECT id,status,template_version,trigger_type,error_code,lease_owner,lease_expires_at_utc FROM fb_auto_due_slot WHERE template_id=? AND slot_key=?",
+            "SELECT id,status,template_version,trigger_type,error_code,lease_owner,lease_expires_at_utc,created_at_utc FROM fb_auto_due_slot WHERE template_id=? AND slot_key=?",
             (template_id, slot_key),
         ).fetchone()
         paused = (
@@ -607,13 +607,15 @@ class FBAutoPostStore:
             if expected_template_version is not None and template["status"] != "enabled" and not hit_drama:
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
+            catalog_trigger = None
             if expected_template_version is not None and not hit_drama and upcoming_claim is None:
-                self._validate_due_claim(
+                due_row = self._validate_due_claim(
                     conn, template_id=template_id, slot_key=slot_key, trigger_type=trigger_type,
                     expected_template_version=int(expected_template_version), expected_due_id=expected_due_id,
                     expected_due_lease_owner=expected_due_lease_owner,
                     expected_due_lease_expires_at_utc=expected_due_lease_expires_at_utc,
                 )
+                catalog_trigger = due_row['created_at_utc']
             if trigger_type == "auto" and (
                 template["status"] != "enabled"
                 or expected_template_version is None
@@ -693,7 +695,7 @@ class FBAutoPostStore:
             # Leave the Page refresh and atomic queue insert inside the same lease.
             catalog_seconds = max(1, min(6900, int(remaining) - 300))
         candidate_snapshots = page_caption.candidate_snapshots({**source_config,'_candidate_limit':candidate_limit,
-            '_catalog_seconds':catalog_seconds,
+            '_catalog_seconds':catalog_seconds, '_catalog_trigger':catalog_trigger,
             '_profile_selection':profile_enabled,
             '_page_caption_description':page_caption.needs_description(caption_snapshot)},source_pages,materials,caption_snapshot)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
@@ -1659,6 +1661,8 @@ class FBAutoPostStore:
             return updated == 1
 
     def defer_due_slot(self, due_id: int, error_code: str, *, delay_seconds: int = 300, expected_lease_owner: str | None = None, expected_lease_expires_at_utc: str | None = None) -> bool:
+        if error_code == 'fb_auto_catalog_refresh_pending':
+            delay_seconds = 60
         available = utc_iso(self.now_fn() + timedelta(seconds=max(60, min(int(delay_seconds), 3600))))
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
