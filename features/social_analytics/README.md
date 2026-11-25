@@ -28,8 +28,10 @@ publisher, initializes a database, or imports `app.py`.
 
 ## Attribution and quality
 
-The only join key is `(platform, site_id, campaign_id)` against the frozen
-link's `af_c_id`. Campaign names and `af_channel` never decide ownership.
+YouTube and X match the campaign ID against the frozen link's `af_c_id`
+within the platform and site. Facebook also checks the frozen Page and material.
+TikTok site 2250 matches the case-sensitive pair of campaign ID and full campaign
+name against the recorded link and a confirmed public post in either TikTok ledger.
 YouTube's known 32-character storage alias is accepted only when globally
 unique. Conflict resolution precedes tenant visibility and every user filter.
 Identical duplicated ledger identities do not multiply effects; conflicting
@@ -56,12 +58,28 @@ unavailable. Missing attribution ledgers also make publication counts null.
 
 Only the trusted system collector receives the complete global source
 reconciliation. A tenant admin can see conflicting amounts only if **all**
-candidate identities belong to that tenant. A campaign with no candidate
+candidate identities belong to that tenant. Outside the explicitly bound
+TikTok site described below, a campaign with no candidate
 cannot safely be assigned to a tenant and is therefore exposed only to the
 system collector. This prevents unmatched-data totals from leaking another
 tenant's amounts. System totals enforce, field by field:
 
 `source = attributed + unmatched + explicitly excluded`
+
+### TikTok history and daily reports
+
+The hourly warehouse records site 2250 under `social_analytics_tiktok_daily`.
+Historical clicks, visits, installs, conversions and refunds use the UTC
+site insights. Recharge and IAA amounts use exact daily source totals and
+deterministic cent allocation across campaign pairs. The first verified
+insight date is 2026-07-31. IAA coverage begins with received ad events.
+
+The reporting tenant is bound with `SOCIAL_ANALYTICS_TT_SITE_TENANT`.
+That tenant's administrators see site totals including the generic 0001
+entry and revenue awaiting attribution. Ordinary users see confirmed
+personal performance. Group by owner to inspect the unassigned portion.
+The 11:00 publisher report shows both portions. The 11:30 gap report
+compares confirmed drama identities and marks unresolved comparisons pending.
 
 ## Future channels
 
@@ -69,9 +87,8 @@ Add a verified channel/site entry to `adapters.PLATFORMS` and a read-only
 catalog reader in `read_catalogs`. A reader returns normalized immutable
 identity rows and confirmed publication facts. Source metrics and all
 aggregation, filtering, CSV and daily reporting then use the common path.
-Do not enable FB/TT until their site, campaign identifier storage and ledger
-contracts have been verified. Do not reuse YouTube's truncation rule for X
-or an unverified future channel.
+Verify a new channel's site, stored campaign identity and ledger contract
+before registering it. The truncation rule is specific to YouTube.
 
 ## Validation
 
