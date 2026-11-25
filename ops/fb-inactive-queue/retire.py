@@ -101,7 +101,10 @@ def converge(conn):
     fields = "SELECT j.id,j.status,j.stage,j.source_status,j.hold_reason,j.error_code,a.reason "
     if not conn.execute("SELECT 1 " + MATCH + " LIMIT 1").fetchone():
         return 0
-    conn.execute("BEGIN IMMEDIATE")
+    # BEGIN IMMEDIATE would request a write lock on the read-only FB attachment.
+    # Acquire the coordinator write lock before checking current claims.
+    conn.execute("BEGIN")
+    conn.execute("UPDATE main.pipeline_job SET status=status WHERE 0")
     jobs = conn.execute(fields + MATCH).fetchall()
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
     for row in jobs:
