@@ -36,9 +36,9 @@ def prepare(folder):
         shutil.copyfile(PLAN_UNIT, folder/'previous-plan.conf')
     shutil.copytree(old, candidate, symlinks=True, ignore=shutil.ignore_patterns('.git','__pycache__','*.pyc'))
     preserve_tree_owners(old, candidate)
-    patch = subprocess.check_output(['git','-C',str(SOURCE),'diff','--binary',baseline,commit,'--',*FILES,TEST])
-    subprocess.run(['git','apply','--check','-'],cwd=candidate,input=patch,check=True)
-    subprocess.run(['git','apply','-'],cwd=candidate,input=patch,check=True)
+    patch = subprocess.check_output(['git','-C',str(SOURCE),'diff','--binary','--unified=2',baseline,commit,'--',*FILES,TEST])
+    subprocess.run(['git','apply','--check','-C2','-'],cwd=candidate,input=patch,check=True)
+    subprocess.run(['git','apply','-C2','-'],cwd=candidate,input=patch,check=True)
     for path in (*FILES, TEST):
         compile((candidate/path).read_bytes(), path, 'exec')
     proof = subprocess.run([sys.executable,'-B','-m','unittest','discover','-s','tests','-p','test_fb_catalog_plan.py'],
