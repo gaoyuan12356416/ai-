@@ -195,34 +195,20 @@ def enqueue(c, task):
     return True
 
 
-def claim(c):
-    c.execute("BEGIN IMMEDIATE")
-    now = time.time()
-    gate = c.execute("SELECT until_at,probe_batch FROM provider_backoff WHERE id=1").fetchone()
-    if gate and (gate["until_at"] > now or c.execute(
-            "SELECT 1 FROM batches WHERE id=? AND finished IS NULL", (gate["probe_batch"],)
-    ).fetchone()):
-        c.commit()
-        return None, []
-    # Old deadlines from bulk runs must not outrank a video approaching upload.
-    # Keep one free worker responsive to imminent posts. While that batch is
-    # running, the other workers retain normal batching and throughput.
-    prefer_imminent = bool(gate) or not c.execute(
-        """SELECT 1 FROM cursors JOIN batches ON batches.id=cursors.value
-        WHERE cursors.name='generation:imminent-batch' AND batches.finished IS NULL"""
-    ).fetchone()
+def normal_claim_rows(c, now, prefer_imminent, reserved):
     priority = """CASE WHEN json_extract(payload,'$.publish_at')<=?
                   THEN coalesce(json_extract(payload,'$.publish_priority'),0) ELSE 0 END"""
     near = now + NEAR_PUBLISH_SECONDS
     row = c.execute(
-        f"""SELECT product,content,lang,max({priority}) * ? AS priority,
+        f"""SELECT product,content,lang,({priority}) * ? AS priority,
         min(coalesce(json_extract(payload,'$.publish_at'),created)) AS due
-        FROM jobs WHERE state='pending' GROUP BY product,content,lang
+        FROM jobs WHERE state='pending' AND key NOT IN (SELECT value FROM json_each(?))
+        GROUP BY product,content,lang,priority
         HAVING count(*)>=100 OR min(created)<=?
           OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
           OR min(json_extract(payload,'$.publish_at'))<=?
         ORDER BY priority DESC,due,min(created),product,content,lang LIMIT 1""",
-        (near, prefer_imminent, now - 60, near),
+        (near, prefer_imminent, reserved, now - 60, near),
     ).fetchone()
     # Carry failures into the next ready queue, even if its drama/language differs.
     # With no new work, retry after one normal collection window instead of waiting forever.
@@ -231,24 +217,66 @@ def claim(c):
         coalesce(json_extract(j.payload,'$.publish_at'),j.created) AS due
         FROM jobs j JOIN retries r ON r.key=j.key
         WHERE j.state='retry_wait' AND r.state='pending' AND (r.retry_after<=? OR ?)
+          AND j.key NOT IN (SELECT value FROM json_each(?))
         ORDER BY priority DESC,due,r.created,j.key LIMIT 100""",
-        (near, now, row is not None),
+        (near, now, row is not None, reserved),
     ).fetchall()
     if row:
         rows += c.execute(
             f"""SELECT key,payload,created,{priority} AS priority,
             coalesce(json_extract(payload,'$.publish_at'),created) AS due
             FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=?
+              AND key NOT IN (SELECT value FROM json_each(?))
               AND coalesce(json_extract(payload,'$.publish_at'),created)<=?
               AND ({priority})>=?
             ORDER BY priority DESC,due,created,key LIMIT 100""",
-            (near, row["product"], row["content"], row["lang"],
+            (near, row["product"], row["content"], row["lang"], reserved,
              max(now, row["due"]) + NEAR_PUBLISH_SECONDS, near, row["priority"]),
         ).fetchall()
-    # A full batch can occupy the sole post-cooldown probe for several minutes.
-    # One item tests the provider while leaving the queue free to reprioritize.
-    limit = 1 if gate else 100
-    rows = sorted(rows, key=lambda r: (-r["priority"], r["due"], r["created"], r["key"]))[:limit]
+    rows.sort(key=lambda r: (-r["priority"], r["due"], r["created"], r["key"]))
+    return rows, bool(row and row["priority"])
+
+
+def claim(c, *, lane="shared", publish_order=None):
+    c.execute("BEGIN IMMEDIATE")
+    now = time.time()
+    gate = c.execute("SELECT until_at,probe_batch FROM provider_backoff WHERE id=1").fetchone()
+    if gate and (gate["until_at"] > now or c.execute(
+            "SELECT 1 FROM batches WHERE id=? AND finished IS NULL", (gate["probe_batch"],)
+    ).fetchone()):
+        c.commit()
+        return None, []
+    order = dump(publish_order or [])
+    head = None
+    if publish_order:
+        head = c.execute("""
+            SELECT j.key,j.payload FROM json_each(?) q JOIN jobs j ON j.key=q.value
+            LEFT JOIN retries r ON r.key=j.key
+            WHERE j.endpoint='fb' AND j.final IS NULL AND
+              (j.state='pending' OR (j.state='retry_wait' AND r.state='pending' AND r.retry_after<=?))
+            ORDER BY q.key LIMIT 1
+        """, (order, now)).fetchone()
+    if head is not None and (lane != "bulk" or gate):
+        rows, imminent = [head], True
+    else:
+        if lane == "priority" and head is None and publish_order is not None and c.execute(
+            """SELECT 1 FROM jobs WHERE endpoint='fb' AND state IN ('pending','retry_wait')
+               AND json_extract(payload,'$.publish_at')<=? LIMIT 1""", (now + NEAR_PUBLISH_SECONDS,)
+        ).fetchone():
+            # Another worker prepares the backlog while this one stays available
+            # for the publisher's next ready video.
+            c.commit()
+            return None, []
+        prefer_imminent = bool(gate) or not c.execute(
+            """SELECT 1 FROM cursors JOIN batches ON batches.id=cursors.value
+            WHERE cursors.name='generation:imminent-batch' AND batches.finished IS NULL"""
+        ).fetchone()
+        reserved = order if head is not None else "[]"
+        rows, imminent = normal_claim_rows(c, now, prefer_imminent, reserved)
+        if not rows and head is not None:
+            rows, imminent = [head], True
+        # Recheck the dispatch queue after one draft on the responsive worker.
+        rows = rows[:1 if gate or lane == "priority" else 100]
     if not rows:
         c.commit()
         return None, []
@@ -257,7 +285,7 @@ def claim(c):
     ).lastrowid
     if gate:
         c.execute("UPDATE provider_backoff SET probe_batch=? WHERE id=1", (batch,))
-    if row and row["priority"]:
+    if imminent:
         c.execute("INSERT OR REPLACE INTO cursors(name,value) VALUES('generation:imminent-batch',?)", (batch,))
     c.executemany(
         "UPDATE jobs SET state='generating',batch=? WHERE key=?",

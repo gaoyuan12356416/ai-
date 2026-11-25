@@ -9,6 +9,46 @@ from . import store
 from .model import canonical_lang, product
 
 
+DISPATCH_DB = "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3"
+
+
+def fb_publish_order(now):
+    """Read the dispatcher's Facebook publish queue without taking a claim."""
+    def stamp(seconds):
+        return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="milliseconds")
+
+    with store.connection(DISPATCH_DB, readonly=True, timeout=0.2) as db:
+        config = db.execute("SELECT config_json FROM pipeline_config WHERE id=1").fetchone()
+        config = json.loads(config[0]) if config else {}
+        if "fb" not in config.get("enabled_channels", ()) or "fb" in config.get("preparation_only_channels", ()):
+            return None
+        rows = db.execute("""
+            SELECT j.source_key, row_number() OVER (
+                PARTITION BY j.batch_key,(j.scheduled_at>:now) ORDER BY j.scheduled_at,j.id
+            ) AS batch_position FROM pipeline_job j
+            LEFT JOIN pipeline_fairness f ON f.scope='publish:fb' AND f.item=j.batch_key
+            WHERE j.channel='fb' AND j.stage='publish' AND j.status IN ('queued','ready')
+              AND j.hold_reason='' AND j.scheduled_at<=:near
+              AND NOT EXISTS (SELECT 1 FROM pipeline_cooldown WHERE resource_key='job:'||j.id AND until_at>:now)
+              AND NOT EXISTS (SELECT 1 FROM pipeline_cooldown WHERE resource_key='channel:fb' AND until_at>:now)
+              AND NOT EXISTS (SELECT 1 FROM pipeline_media_gate WHERE source_key=j.source_key AND phase='pending')
+              AND json_array_length(j.resource_keys_json)>0
+              AND NOT EXISTS (SELECT 1 FROM json_each(j.resource_keys_json) r JOIN pipeline_cooldown cool
+                              ON cool.resource_key=r.value WHERE cool.until_at>:now)
+              AND NOT EXISTS (
+                SELECT 1 FROM json_each(CASE WHEN EXISTS (
+                    SELECT 1 FROM json_each(j.resource_keys_json) WHERE value LIKE 'fb:material:%')
+                    THEN j.resource_keys_json ELSE json_array('task:'||j.source_key) END) k
+                WHERE EXISTS (SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=k.value)
+                   OR EXISTS (SELECT 1 FROM pipeline_resource WHERE resource_key=k.value)
+                   OR EXISTS (SELECT 1 FROM pipeline_resource WHERE resource_key='prepare:'||k.value AND quarantined=1))
+            ORDER BY j.scheduled_at>:now,
+              CASE WHEN j.scheduled_at>:now THEN j.scheduled_at END,
+              batch_position,coalesce(f.last_seq,0),j.scheduled_at,j.id
+        """, {"now": stamp(now), "near": stamp(now + store.NEAR_PUBLISH_SECONDS)})
+        return [r[0] for r in rows]
+
+
 def obj(raw):
     if isinstance(raw, dict):
         return raw

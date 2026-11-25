@@ -337,6 +337,94 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"ready"})["publish_priority"], 3)
             self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"preparing"})["publish_priority"], 1)
 
+    def test_fb_dispatch_snapshot_uses_ready_stage_fairness_and_resource_locks(self):
+        path = self.root / "dispatch.sqlite3"
+        with store.connection(path) as q:
+            q.executescript("""
+                CREATE TABLE pipeline_config(id,config_json);
+                INSERT INTO pipeline_config VALUES(1,'{"enabled_channels":["fb"]}');
+                CREATE TABLE pipeline_job(id INTEGER PRIMARY KEY,source_key,channel,stage,status,
+                    hold_reason,scheduled_at,batch_key,resource_keys_json);
+                CREATE TABLE pipeline_fairness(scope,item,last_seq);
+                CREATE TABLE pipeline_resource(resource_key,quarantined);
+                CREATE TABLE pipeline_legacy_resource(resource_key);
+                CREATE TABLE pipeline_media_gate(source_key,phase);
+                CREATE TABLE pipeline_cooldown(resource_key,until_at);
+                INSERT INTO pipeline_fairness VALUES('publish:fb','old',30),('publish:fb','next',10);
+            """)
+            for i in range(1, 15):
+                q.execute("INSERT INTO pipeline_job VALUES(?,?,'fb','publish','queued','','2026-01-01T08:00:00.000+00:00','old',?)",
+                          (i, f"fb:auto:{i}", json.dumps([f"fb:material:{i}", f"fb:page:{i}"])))
+            q.executescript("""
+                UPDATE pipeline_job SET batch_key='next' WHERE id IN (2,14);
+                UPDATE pipeline_job SET stage='prepare' WHERE id=3;
+                UPDATE pipeline_job SET hold_reason='operator_hold' WHERE id=4;
+                UPDATE pipeline_job SET scheduled_at='2026-01-01T11:00:00.000+00:00' WHERE id=5;
+                UPDATE pipeline_job SET scheduled_at='2026-01-01T10:04:00.000+00:00',batch_key='fresh' WHERE id=6;
+                INSERT INTO pipeline_resource VALUES('fb:page:7',0),('prepare:fb:page:8',1);
+                INSERT INTO pipeline_legacy_resource VALUES('fb:material:9');
+                INSERT INTO pipeline_media_gate VALUES('fb:auto:10','pending');
+                INSERT INTO pipeline_cooldown VALUES('fb:page:11','2026-01-02'),('job:12','2026-01-02');
+                UPDATE pipeline_job SET resource_keys_json='["fb:page:7"]' WHERE id=13;
+            """)
+        now = sources.publish_time("2026-01-01T10:00:00Z")
+        with patch.object(sources, "DISPATCH_DB", str(path)):
+            self.assertEqual(sources.fb_publish_order(now), ["fb:auto:2","fb:auto:1","fb:auto:14","fb:auto:13","fb:auto:6"])
+            with store.connection(path) as q:
+                q.execute("INSERT INTO pipeline_cooldown VALUES('channel:fb','2026-01-02')")
+            self.assertEqual(sources.fb_publish_order(now), [])
+
+    def test_ready_worker_and_two_backlog_workers_take_disjoint_jobs(self):
+        now = time.time()
+        with store.connection() as c:
+            for i in range(1, 9):
+                task = dict(self.task(i, "fa"), key=f"fb:auto:{i}", content="group-" + str(i % 4),
+                            publish_at=now-3600*i, publish_priority=3)
+                store.enqueue(c, task)
+            c.commit()
+            order = ["fb:auto:2", "fb:auto:1"]
+            # Even if a bulk worker wins the transaction, it leaves ready rows
+            # for the priority worker when it has other work to do.
+            bulk = store.claim(c, lane="bulk", publish_order=order)[1]
+            self.assertTrue(bulk)
+            self.assertFalse(set(order).intersection(t["key"] for t in bulk))
+            self.assertEqual([t["key"] for t in store.claim(c,lane="priority",publish_order=order)[1]], [order[0]])
+            other = store.claim(c, lane="bulk", publish_order=order)[1]
+            self.assertTrue(other)
+            self.assertFalse(set(order).intersection(t["key"] for t in other))
+            self.assertEqual([t["key"] for t in store.claim(c,lane="priority",publish_order=order)[1]], [order[1]])
+            self.assertFalse(store.claim(c, lane="priority", publish_order=[])[1])
+            self.assertTrue(store.claim(c, lane="bulk", publish_order=[])[1])
+
+    def test_dispatch_probe_and_unavailable_queue_keep_retry_and_bulk_work(self):
+        now = time.time()
+        with store.connection() as c:
+            ready = dict(self.task(1, "fa"), key="fb:auto:1", publish_at=now)
+            old = dict(self.task(2, "fa"), key="fb:auto:2", publish_at=now-7200)
+            store.enqueue(c, ready)
+            c.commit()
+            batch = store.claim(c)[0]
+            store.fail(c, batch, ready["key"], "generation_timeout")
+            c.execute("UPDATE batches SET finished=? WHERE id=?", (now,batch))
+            store.enqueue(c, old)
+            c.execute("UPDATE retries SET retry_after=?", (now-1,))
+            c.execute("INSERT INTO provider_backoff VALUES(1,?,30,NULL)", (now+60,))
+            c.commit()
+            self.assertFalse(store.claim(c,lane="priority",publish_order=[ready["key"]])[1])
+            c.execute("UPDATE provider_backoff SET until_at=0")
+            c.commit()
+            # A recovered provider receives just the first ready job, even if a bulk worker probes.
+            probe, rows = store.claim(c,lane="bulk",publish_order=[ready["key"]])
+            self.assertEqual([t["key"] for t in rows], [ready["key"]])
+            self.assertEqual(c.execute("SELECT retry_batch FROM retries").fetchone()[0], probe)
+            self.assertFalse(store.claim(c,lane="priority",publish_order=[old["key"]])[1])
+            c.execute("DELETE FROM provider_backoff")
+            c.commit()
+        with patch.object(sources, "fb_publish_order", side_effect=sqlite3.OperationalError("locked")):
+            self.assertTrue(worker.generation_cycle(lambda rows, emit, usage: emit(self.item(rows[0])),lane="priority"))
+        with store.connection() as c:
+            self.assertEqual(c.execute("SELECT state FROM jobs WHERE key=?", (old["key"],)).fetchone()[0],"ready")
+
     def test_provider_cooldown_preserves_partial_drafts_and_retry(self):
         first, retry, fresh = (self.task(k) for k in (1, 2, 3))
         stamp = time.time()

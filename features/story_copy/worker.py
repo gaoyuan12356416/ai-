@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import sqlite3
 import threading
 import time
 
@@ -268,11 +269,17 @@ def restore(c, batch_id=None):
     c.commit()
 
 
-def generation_cycle(runner=generator.run):
+def generation_cycle(runner=generator.run, *, lane="shared"):
     with store.connection() as c:
-        batch, tasks = store.claim(c)
+        publish_order = None
+        if c.execute("SELECT 1 FROM jobs WHERE state IN ('pending','retry_wait') AND endpoint='fb' LIMIT 1").fetchone():
+            try:
+                publish_order = sources.fb_publish_order(time.time())
+            except (sqlite3.Error, OSError, ValueError) as exc:
+                LOG.warning("FB caption dispatch order unavailable: %s", type(exc).__name__)
+        batch, tasks = store.claim(c, lane=lane, publish_order=publish_order)
         if tasks:
-            LOG.info("caption batch %s starting %s tasks", batch, len(tasks))
+            LOG.info("caption batch %s starting %s tasks lane=%s", batch, len(tasks), lane)
             try:
                 generate_batch(c, batch, tasks, runner)
             except Exception:
@@ -283,10 +290,10 @@ def generation_cycle(runner=generator.run):
     return bool(tasks)
 
 
-def generation_loop():
+def generation_loop(lane):
     while True:
         try:
-            if not generation_cycle():
+            if not generation_cycle(lane=lane):
                 time.sleep(1)
         except Exception:
             LOG.exception("caption generation cycle")
@@ -322,10 +329,10 @@ def main():
     for fn, delay in ((sources.discover, 2), (sync_receipts, 3), (alerts.deliver, 6)):
         threading.Thread(target=background, args=(fn, delay), daemon=True).start()
     count = concurrency()
-    LOG.info("caption generation workers=%s priority=publish_time", count)
+    LOG.info("caption generation workers=%s priority=fb_publish_queue", count)
     for i in range(1, count):
-        threading.Thread(target=generation_loop, name="caption-" + str(i), daemon=True).start()
-    generation_loop()
+        threading.Thread(target=generation_loop, args=("bulk",), name="caption-" + str(i), daemon=True).start()
+    generation_loop("priority" if count > 1 else "shared")
 
 
 if __name__ == "__main__":
