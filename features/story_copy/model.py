@@ -79,6 +79,7 @@ CLICK_PREFIX = {
     "ro": "Urmărește acum versiunea completă",
     "uk": "Дивись повну версію зараз",
     "nl": "Bekijk nu de volledige versie",
+    "da": "Se hele serien nu",
     "sv": "Se hela nu",
     "hu": "Nézd meg most a teljes történetet",
     "bn": "এখনই সম্পূর্ণ দেখুন",
