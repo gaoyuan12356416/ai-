@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+from threading import BoundedSemaphore
 
 
 def main():
@@ -28,7 +29,7 @@ def main():
     from features.fb_auto_posts.core import FBAutoPostStore
     from features.fb_auto_posts.metric_mysql import metric_store_from_env
     from features.fb_auto_posts.repositories import PagePoolRepository,MaterialRepository
-    from features.fb_video_publish.runtime_source import BrokerReadOnlyMySQL
+    from features.fb_video_publish.runtime_source import GatedReadOnlyMySQL
     from features.fb_auto_posts.service import Runtime
     from features.fb_auto_posts import planning_catalog
     if os.environ.get('FB_AUTO_METRIC_STORAGE')!='mysql':
@@ -36,7 +37,15 @@ def main():
     dbfile=out/'shadow.sqlite3'
     shutil.copyfile(a.release.resolve()/'ledger-before.sqlite3',dbfile)
     store=FBAutoPostStore(dbfile)
-    mysql=BrokerReadOnlyMySQL()
+    # The general Page and limited-window repositories also use SQL hints
+    # outside the HTTP catalog broker dialect. Run these fixed queries through
+    # the host FIFO, bounding the benchmark to the same two bulk-read lanes.
+    class Source(GatedReadOnlyMySQL):
+        lanes=BoundedSemaphore(2)
+        def select(self,sql,params):
+            with self.lanes:
+                return super().select(sql,params)
+    mysql=Source()
     metrics=metric_store_from_env(os.environ)
     rt=Runtime(store,PagePoolRepository(mysql),MaterialRepository(mysql,metrics),
                SimpleNamespace(live_enabled=False),None,'',metric_store=metrics,prebuild_enabled=True)
