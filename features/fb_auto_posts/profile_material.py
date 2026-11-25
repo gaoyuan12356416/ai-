@@ -41,7 +41,12 @@ def choose_profile_material(candidates, excluded, *, decision, snapshot, candida
             # Stable ties use the configured drama/material order. Restrict to
             # one drama so material randomization and feedback cannot undo the
             # Page's audience/theme choice.
-            first = min(available, key=lambda item: decision.rank(metadata_for(item, classifications)))
+            # All materials of a drama in this Page pool share its language and
+            # portrait. Rank its first available item, preserving stable ties.
+            first_by_drama = {}
+            for item in available:
+                first_by_drama.setdefault((item.content_id, item.language), item)
+            first = min(first_by_drama.values(), key=lambda item: decision.rank(metadata_for(item, classifications)))
             drama = [item for item in available if item.content_id == first.content_id]
             material, evidence = choose_material(drama, (), **kwargs)
         else:

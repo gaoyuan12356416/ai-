@@ -68,6 +68,12 @@ def candidate_snapshots(config,pages,materials,snapshot):
     groups={}
     for page in pages:
         groups.setdefault(description_required(config,page.page_id,snapshot),[]).append(page)
+    from .catalog_plan import supports, snapshots
+    if groups and supports(config, materials):
+        scopes = {p.page_id: (page_language(p.language), required)
+                  for required, group in groups.items() for p in group if page_language(p.language)}
+        pools = snapshots(materials, config, set(scopes.values()))
+        return {page_id: pools[scope] for page_id, scope in scopes.items()}
     result={}
     for grouped in groups.values():
         by_language=candidate_snapshots_for_pages(source_config(config,grouped,snapshot),grouped,materials)
@@ -92,7 +98,7 @@ def choose(config,page_id,material,snapshot):
 
 
 def material_eligible(config,page_id,material,snapshot):
-    if not handles(config):return True
+    if str(getattr(material,'drama_description','') or '').strip() or not handles(config):return True
     selected,_=choose(config,page_id,material,snapshot)
     return '{{desc}}' not in selected['message_template'] or bool(str(getattr(material,'drama_description','') or '').strip())
 
