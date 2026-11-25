@@ -72,6 +72,25 @@ class PublishedSnapshotTest(unittest.TestCase):
         (root / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         return generated_at
 
+    def test_query_manifest_uses_published_partition_for_campaign_scope(self):
+        day = "2026-11-25"
+        revision = "a" * 32
+        rows = [{"campaign_id": "100", "adset_id": "10", "ad_id": "1000"}]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_snapshot(root, {day: rows})
+            manifest_path = root / "latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            info = manifest["data_files"]["ad"][day]
+            info.update(path="query/%s/ad/%s.json" % (revision, day), revision=revision)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            reader = mock.Mock(return_value=snapshot_payload(day, "ad", rows))
+            module = SimpleNamespace(load_query_ad_partition=reader)
+            with mock.patch.dict(sys.modules, {"tt_minis_content_id_roas_broadcast": module}):
+                contexts, _ = monitor.load_published_scope_contexts([day], report_root=root)
+            reader.assert_called_once_with(info, day)
+            self.assertEqual(contexts[day]["campaign_ids"], {"100"})
+
     def test_two_days_use_two_same_statement_queries_and_ignore_stale_snapshot_metrics(self):
         days = {
             "2026-08-09": [

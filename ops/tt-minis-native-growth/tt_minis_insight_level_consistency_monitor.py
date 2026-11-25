@@ -112,7 +112,11 @@ def load_published_scope_contexts(days, report_root=PUBLISHED_REPORT_ROOT, max_s
         file_meta = ad_files.get(day)
         if not file_meta or not file_meta.get("path"):
             raise RuntimeError("published ad-level snapshot is missing date %s" % day)
-        payload = load_json(resolve_snapshot_path(report_root, file_meta["path"]))
+        if file_meta["path"].startswith("query/"):
+            from tt_minis_content_id_roas_broadcast import load_query_ad_partition
+            payload = load_query_ad_partition(file_meta, day)
+        else:
+            payload = load_json(resolve_snapshot_path(report_root, file_meta["path"]))
         meta = payload.get("meta") or {}
         if meta.get("metric_level") != "ad" or meta.get("start_date") != day or meta.get("end_date") != day:
             raise RuntimeError("published ad-level snapshot metadata mismatch for %s" % day)
