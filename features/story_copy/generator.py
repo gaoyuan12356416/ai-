@@ -11,6 +11,7 @@ import threading
 import time
 
 from . import store
+from .publish_length import publish_limit
 from .model import body_length_target, click_prefix, group_key
 
 CAPACITY_FALLBACK_MODEL = "gpt-6-sol"
@@ -84,8 +85,8 @@ Return the local refs keys such as ["series"] or ["episode"]. f1/f2 are lookup p
 Use the target language of each id for all public words. No URLs, icons, hashtags or line breaks in prose fields.
 For episode jobs the renderer adds title and episode number. Never claim a click opens that episode.
 Write two concrete, short narrative beats for each task using its supplied facts. Generate each caption independently; wording may repeat across tasks. A question can be the turn when the supplied material supports no second event.
-Each task has its own body_chars. Write toward that exact target, with min and max as inclusive bounds. Count Unicode characters in opening and turn, including their internal spaces and punctuation; add the two lengths without a separator. Exclude the link, CTA, title, icon and tags. Silently check the count before returning each row. Choose as much supported detail as fits; never pad with invented facts.
-FB can establish more context. For X fit the link, supplied CTA prefix, story hook, tags and any title/episode within 280 weighted characters. Keep hooks and tags concise.
+Each task has its own body_chars. Use the target and range as writing guidance. A natural hook may fall outside this range. Count Unicode characters in opening and turn, including their internal spaces and punctuation; add the two lengths without a separator. Exclude the link, CTA, title, icon and tags. Silently check the count before returning each row. Choose as much supported detail as fits; never pad with invented facts.
+Hard rule: the entire published post MUST NOT exceed the number and unit in final_post_limit. Include the URL, CTA, title, episode, spaces, line breaks, icon and tags. For X fit the link, supplied CTA prefix, story hook, tags and any title/episode within 280 weighted characters. Keep hooks and tags concise.
 Use only supplied facts. A clip name, audience preference or internal profile label is not a plot fact. Never expose internal tags or scores.
 If only series facts were supplied, use a series premise and do not describe any scene as taking place this episode. No invented dialogue, pricing or promises.
 If evidence is insufficient return an object with the id and error "insufficient_evidence". Never use an earlier task's output as another task's reply."""
@@ -115,6 +116,7 @@ def prompt(tasks):
                 endpoint=t["endpoint"],
                 language=t["language"],
                 body_chars=body_length_target(t),
+                final_post_limit=dict(zip(("maximum", "unit"), publish_limit(t))),
                 refs=refs,
                 episode=t.get("episode"),
                 clip=t.get("clip", ""),

@@ -786,29 +786,30 @@ class CaptionTests(unittest.TestCase):
         self.assertLess(model.body_length_target(dict(episode, title="Q" * 105))["max"],
                         model.body_length_target(episode)["max"])
 
-    def test_generation_checks_inclusive_bounds_and_keeps_target_on_retry(self):
+    def test_writing_range_is_advisory(self):
         task = self.task(1)
-        limits = model.body_length_target(task)
-        def answer(count):
-            return dict(self.item(task), opening="A B", turn="C" * (count - 3))
-        for size in (limits["min"], limits["max"]):
-            self.assertEqual(model.validate(task, answer(size))["body_chars"], limits)
-        for size in (limits["min"] - 1, limits["max"] + 1):
-            with self.assertRaisesRegex(ValueError, "body_length_out_of_range"):
-                model.validate(task, answer(size))
-        with store.connection() as c:
-            store.enqueue(c, task)
-            c.commit()
-            first, rows = store.claim(c)
-            worker.generate_batch(c, first, rows, lambda tasks, emit, usage: emit(answer(limits["max"] + 1)))
-            c.execute("UPDATE retries SET retry_after=0")
-            c.commit()
-            retry, rows = store.claim(c)
-            self.assertEqual(json.loads(generator.prompt(rows))["tasks"][0]["body_chars"], limits)
-            worker.generate_batch(c, retry, rows, lambda tasks, emit, usage: emit(answer(limits["target"])))
-            draft = json.loads(c.execute("SELECT draft FROM jobs").fetchone()[0])
-            self.assertEqual(draft["body_chars"], limits)
-            self.assertLessEqual(model.weight(model.render(task, draft, "https://example.org/1")), 280)
+        for n in (16, 226, 5500):
+            item = dict(self.item(task), opening="A", turn="B" * (n - 1))
+            self.assertEqual(len(model.validate(task, item)["turn"]), n - 1)
+
+    def test_prepublication_limits_include_links_tags_and_unicode(self):
+        from features.story_copy.publish_length import fit_caption
+        from twitter_text import parse_tweet
+        url = "https://example.org/" + "a" * 60
+        for family, endpoint, measure, limit in (
+            ("fa", "fb", len, 5000), ("fv", "fb", lambda t: len(t.encode()), 5000),
+            ("ta", "x_tag_auto", lambda t: parse_tweet(t).weightedLength, 280),
+        ):
+            task = dict(family=family, endpoint=endpoint)
+            tail = "\n\n#story #drama"
+            head = url + "\n"
+            exact = head + "a" * (limit - measure(head + tail)) + tail
+            self.assertEqual(fit_caption(task, exact, url), exact)
+            for text in (exact + "x", head + "👩‍👧界" * 2000 + tail):
+                result = fit_caption(task, text, url)
+                self.assertTrue(result.startswith(head))
+                self.assertTrue(result.endswith(text.splitlines()[-1]))
+                self.assertLessEqual(measure(result), limit)
 
     def test_manual_repair_preserves_native_receipts_and_auto_retry_history(self):
         task = self.task(1)
@@ -1246,12 +1247,11 @@ class CaptionTests(unittest.TestCase):
         self.assertEqual(
             current.splitlines()[0], "https://ai.yingliangads.com/m/abcdefgh"
         )
-        with self.assertRaises(ValueError):
-            model.render(
-                t,
-                model.validate(t, dict(item, opening="中" * 200)),
-                "https://example.org/one",
-            )
+        text = model.render(t, model.validate(t, dict(item, opening="中" * 200)), "https://example.org/one")
+        from twitter_text import parse_tweet
+        self.assertLessEqual(parse_tweet(text).weightedLength, 280)
+        self.assertTrue(text.startswith("https://example.org/one\n"))
+
 
     def test_fb_added_link_failure_restores_legacy_before_graph(self):
         with store.connection(self.fb) as c:
