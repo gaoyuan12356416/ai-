@@ -234,7 +234,7 @@ class Catalog:
                         WHERE r.app IN ({placeholders(apps)}) AND r.content_id IN ({placeholders(details)})
                           AND r.app_id=%s{filter_type}""", (*apps, *details, self.config['app_id']), columns)
                 for row in resources:
-                    text = row.get('description')
+                    text = row.get('description') if self.required_description else None
                     if text:
                         key = (row['content_id'].strip(), str(row['language'] or '').strip().lower())
                         previous = descriptions.setdefault(key, text)

@@ -74,6 +74,12 @@ def candidate_snapshots(config,pages,materials,snapshot):
                   for required, group in groups.items() for p in group if page_language(p.language)}
         pools = snapshots(materials, config, set(scopes.values()))
         return {page_id: pools[scope] for page_id, scope in scopes.items()}
+    from features.drama_launch_window import is_range
+    from .repositories import MaterialRepository
+    if (isinstance(materials, MaterialRepository) and is_range(config.get('drama_launch_window_days',0))
+            and not config.get('hit_drama_publish') and handles(config)):
+        from .planning_catalog import WindowMetadata
+        config=dict(config,_window_metadata=WindowMetadata(int(materials.now_fn().timestamp())))
     result={}
     for grouped in groups.values():
         by_language=candidate_snapshots_for_pages(source_config(config,grouped,snapshot),grouped,materials)

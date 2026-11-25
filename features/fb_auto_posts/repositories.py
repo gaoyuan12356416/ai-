@@ -527,12 +527,14 @@ class MaterialRepository:
         language = str(config["language"])
         from features.hit_publish import POLICY
         hit = config.get('hit_drama_publish') or {}
-        selection_end_epoch = int(self.now_fn().timestamp())
+        window_lookup = config.get('_window_metadata')
+        window_epoch = window_lookup.epoch if window_lookup is not None else int(self.now_fn().timestamp())
+        selection_end_epoch = window_epoch
         if hit.get('timing_policy') == POLICY:
             selection_end_epoch = max([selection_end_epoch, *hit.get('release_times', {}).values()])
         from features.drama_launch_window import bounds, is_range
         window = config["drama_launch_window_days"]
-        lower, upper = bounds(window, int(self.now_fn().timestamp()))
+        lower, upper = bounds(window, window_epoch)
         explicit_range = is_range(window)
         if explicit_range:
             selection_end_epoch = upper
@@ -596,6 +598,8 @@ class MaterialRepository:
 
         deadline = self.monotonic_fn() + self.catalog_deadline_seconds
 
+        window_details = None
+
         def add_rows(rows: Sequence[Mapping[str, Any]], *, expected_content_ids: set[str] | None = None) -> None:
             nonlocal profile_error
             if expected_content_ids is not None:
@@ -620,8 +624,11 @@ class MaterialRepository:
                      ORDER BY d.content_id
                 """
                 end_epoch = selection_end_epoch
-                metadata_rows = self.mysql.select(metadata_sql, (app_id, deploy_after, end_epoch, *allowed_types, *content_ids))
-                metadata = {str(item.get("content_id") or "").strip(): item for item in metadata_rows}
+                if window_details is None:
+                    metadata_rows = self.mysql.select(metadata_sql, (app_id, deploy_after, end_epoch, *allowed_types, *content_ids))
+                    metadata = {str(item.get("content_id") or "").strip(): item for item in metadata_rows}
+                else:
+                    metadata = window_details
                 if fetch_description:
                     description_sql = f"""
                         SELECT r.content_id,MAX(TRIM(r.`desc`)) drama_description,
@@ -728,7 +735,9 @@ class MaterialRepository:
         target = config.get('hit_drama_publish')
         complete_content_scan = inherit_language or bool(target) or profile_mode
         scan_content_ids = target_content_ids(target, language) if target else priority_content_ids
-        if complete_content_scan and not target:
+        if complete_content_scan and not target and explicit_range and window_lookup is not None and selection_end_epoch-deploy_after <= 7*86400+1:
+            scan_content_ids, window_details = window_lookup.load(self.mysql,app_id,deploy_after,selection_end_epoch,allowed_types)
+        elif complete_content_scan and not target:
             eligible = self.mysql.select(f"""
                 SELECT /*+ MAX_EXECUTION_TIME(45000) */ DISTINCT TRIM(d.content_id) content_id
                   FROM `{self.mysql.schema}`.ads_drama_info d

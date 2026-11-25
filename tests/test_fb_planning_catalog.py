@@ -57,3 +57,19 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNone(open_for_plan(dict(self.config,_catalog_trigger=None),self.time(200),self.root))
         (self.root/'enabled').unlink()
         self.assertIsNone(open_for_plan(self.config,self.time(200),self.root))
+
+
+    def test_release_window_metadata_is_shared_and_picks_latest_per_raw_id(self):
+        from features.fb_auto_posts.planning_catalog import WindowMetadata
+        from unittest.mock import Mock
+        mysql=Mock(schema='kunlunads_dev')
+        mysql.select.side_effect=[[{'content_id':'a'}],[{'content_id':'a','drama_name':'latest'}]]
+        window=WindowMetadata(10)
+        with ThreadPoolExecutor(3) as pool:
+            results=list(pool.map(lambda _:window.load(mysql,1479,9,20,['2']),range(5)))
+        self.assertEqual(mysql.select.call_count,2)
+        self.assertEqual(results[0],(['a'],{'a':{'content_id':'a','drama_name':'latest'}}))
+        sql,args=mysql.select.call_args.args
+        self.assertIn('MAX(d0.id)',sql)
+        self.assertIn('GROUP BY d0.content_id',sql)
+        self.assertEqual(args,(1479,9,20,'2'))

@@ -87,3 +87,33 @@ class PlanningCatalog:
                     result[mid]=(dict(id=mid,cid=cid,lang=lang,product=product,video_duration=duration,
                                       name=name,tag_name=tag),url)
         return result
+
+
+class WindowMetadata:
+    """One exact release-window read for all languages of this planner call."""
+    def __init__(self,epoch):
+        self.epoch=epoch
+        self.lock=Lock()
+        self.results={}
+
+    def load(self,mysql,app_id,after,end,types):
+        key=(app_id,after,end,tuple(types))
+        with self.lock:
+            if key in self.results:
+                return self.results[key]
+            table=f'`{mysql.schema}`.ads_drama_info'
+            extra=' AND CAST(d0.resource_type_v2 AS CHAR) IN ('+','.join('%s' for _ in types)+')' if types else ''
+            where='d0.app_id=%s AND d0.release_status=1 AND d0.deploy_time>%s AND d0.deploy_time<=%s'+extra
+            args=(app_id,after,end,*types)
+            # Use the same DISTINCT normalized IDs as the existing source scan,
+            # including its MySQL collation and whitespace rules.
+            keys=mysql.select(f"SELECT DISTINCT TRIM(d0.content_id) content_id FROM {table} d0 WHERE {where} AND TRIM(COALESCE(d0.content_id,''))<>''",args)
+            rows=mysql.select(f"""SELECT TRIM(d.content_id) content_id,COALESCE(d.name,'') drama_name,
+               LOWER(TRIM(d.language)) language,CAST(d.resource_type_v2 AS CHAR) resource_type_v2,
+               COALESCE(d.series_code,'') series_code,d.deploy_time FROM {table} d
+               JOIN (SELECT d0.content_id,MAX(d0.id) id FROM {table} d0 FORCE INDEX(ranca)
+                     WHERE {where} GROUP BY d0.content_id) pick ON pick.id=d.id ORDER BY d.content_id""",args)
+            result=(sorted({str(r['content_id']) for r in keys},key=lambda v:v.encode('utf-8')),
+                    {str(r['content_id'] or '').strip():r for r in rows})
+            self.results[key]=result
+            return result

@@ -15,7 +15,7 @@ from scripts import deploy_fb_skipped_recheck as fb
 from scripts import deploy_hit_drama as release
 from scripts.deploy_fb_profile_priority import owner_active
 
-FILES=['features/fb_auto_posts/'+name+'.py' for name in ('core','catalog_plan','planning_catalog')]
+FILES=['features/fb_auto_posts/'+name+'.py' for name in ('core','catalog_plan','planning_catalog','page_caption','repositories')]
 BASE='33d0b25157d1381f16697bffcf6b47e08584ef4a'
 CACHE=Path('/mnt/data-disk/fb-planner-catalog')
 INSTALL=Path('/opt/fb-planner-catalog/current')
