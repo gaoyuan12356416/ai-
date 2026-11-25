@@ -2623,6 +2623,7 @@ def ensure_storage(db_path):
                 )
             }
             manual_run_additive_columns = {
+                "reuse_context_json": "TEXT NOT NULL DEFAULT '{}'",
                 "trigger_source": (
                     "TEXT NOT NULL DEFAULT 'manual' "
                     "CHECK(trigger_source IN ('manual','auto_template'))"
@@ -2650,6 +2651,9 @@ def ensure_storage(db_path):
                         % (name, definition)
                     )
 
+            conn.execute("CREATE TRIGGER IF NOT EXISTS trg_x_effect_parent_frozen BEFORE UPDATE OF reuse_context_json ON x_post_manual_run WHEN OLD.reuse_context_json<>NEW.reuse_context_json BEGIN SELECT RAISE(ABORT,'reuse policy immutable'); END")
+            from features.x_material_effects.window import install_queue_guard
+            install_queue_guard(conn)
             schedule_config_columns = {
                 row[1]
                 for row in conn.execute(
@@ -2943,7 +2947,8 @@ def ensure_storage(db_path):
                 "SELECT q.material_key,COUNT(*) AS total FROM x_post_queue q "
                 "WHERE q.material_key<>'' AND NOT EXISTS("
                 "SELECT 1 FROM x_post_manual_run mr "
-                "WHERE mr.id=q.manual_run_id AND mr.trigger_source='manual'"
+                "WHERE mr.id=q.manual_run_id AND (mr.trigger_source='manual' "
+                "OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))"
                 ") GROUP BY q.material_key HAVING COUNT(*)>1 LIMIT 1"
             ).fetchone()
             if duplicate_material:
@@ -3111,12 +3116,28 @@ def ensure_storage(db_path):
                 "ON x_post_manual_run("
                 "trigger_source,status,publish_mode,scheduled_at,created_at,id)"
             )
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "ux_x_post_manual_reservation_active_material "
-                "ON x_post_manual_material_reservation(material_key) "
-                "WHERE state='active'"
-            )
+            reservation_columns = {r[1] for r in conn.execute('PRAGMA table_info(x_post_manual_material_reservation)')}
+            if 'share_scope' not in reservation_columns:
+                conn.execute("ALTER TABLE x_post_manual_material_reservation ADD COLUMN share_scope TEXT NOT NULL DEFAULT ''")
+                conn.execute('DROP INDEX IF EXISTS ux_x_post_manual_reservation_active_material')
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_manual_reservation_active_material "
+                         "ON x_post_manual_material_reservation(material_key) WHERE state='active' AND share_scope=''")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_x_post_manual_reservation_active_run "
+                         "ON x_post_manual_material_reservation(material_key,manual_run_id) WHERE state='active'")
+            conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_x_pool_reservation_conflict
+                BEFORE INSERT ON x_post_manual_material_reservation
+                WHEN (NEW.share_scope<>'' AND NOT EXISTS(SELECT 1 FROM x_post_manual_run m WHERE m.id=NEW.manual_run_id
+                    AND m.trigger_source='auto_template' AND json_extract(m.reuse_context_json,'$.pool_scope')=NEW.share_scope))
+                OR EXISTS(SELECT 1 FROM x_post_manual_material_reservation r
+                    JOIN x_post_manual_run prior ON prior.id=r.manual_run_id
+                    JOIN x_post_manual_run current ON current.id=NEW.manual_run_id
+                    WHERE r.material_key=NEW.material_key AND r.state='active'
+                    AND (NEW.share_scope='' OR r.share_scope<>NEW.share_scope OR prior.account_ids_json=current.account_ids_json))
+                BEGIN SELECT RAISE(ABORT,'x_post_manual_material_reservation pool conflict'); END""")
+            conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_x_pool_reservation_scope_immutable
+                BEFORE UPDATE OF share_scope ON x_post_manual_material_reservation
+                WHEN OLD.share_scope<>NEW.share_scope
+                BEGIN SELECT RAISE(ABORT,'pool reservation scope immutable'); END""")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_x_post_manual_reservation_run "
                 "ON x_post_manual_material_reservation(manual_run_id,state,id)"
@@ -3369,7 +3390,7 @@ def ensure_storage(db_path):
                       NOT EXISTS(
                           SELECT 1 FROM x_post_manual_run
                            WHERE id=NEW.manual_run_id
-                             AND trigger_source='manual'
+                             AND (trigger_source='manual' OR (trigger_source='auto_template' AND reuse_context_json<>'{}'))
                       )
                       AND (
                           EXISTS(
@@ -4383,7 +4404,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_queue q
@@ -4403,7 +4424,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_queue q
@@ -4455,7 +4476,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_material_pool
@@ -4475,7 +4496,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_material_pool
@@ -4521,6 +4542,11 @@ def ensure_storage(db_path):
                            NEW.manual_run_id IS NULL
                            OR r.manual_run_id<>NEW.manual_run_id
                        )
+                       AND NOT (r.share_scope<>'' AND EXISTS(SELECT 1 FROM x_post_manual_run current
+                           JOIN x_post_manual_run prior ON prior.id=r.manual_run_id
+                           WHERE current.id=NEW.manual_run_id AND current.trigger_source='auto_template'
+                           AND json_extract(current.reuse_context_json,'$.pool_scope')=r.share_scope
+                           AND current.account_ids_json<>prior.account_ids_json))
                 )
                 BEGIN
                     SELECT RAISE(
@@ -4547,6 +4573,11 @@ def ensure_storage(db_path):
                            NEW.manual_run_id IS NULL
                            OR r.manual_run_id<>NEW.manual_run_id
                        )
+                       AND NOT (r.share_scope<>'' AND EXISTS(SELECT 1 FROM x_post_manual_run current
+                           JOIN x_post_manual_run prior ON prior.id=r.manual_run_id
+                           WHERE current.id=NEW.manual_run_id AND current.trigger_source='auto_template'
+                           AND json_extract(current.reuse_context_json,'$.pool_scope')=r.share_scope
+                           AND current.account_ids_json<>prior.account_ids_json))
                 )
                 BEGIN
                     SELECT RAISE(
@@ -9361,6 +9392,7 @@ class XPostStore:
                 404,
             )
         item = _row_dict(row)
+        item["reuse_context"] = json.loads(item.pop("reuse_context_json", "{}"))
         item["trigger_source"] = _manual_trigger_source(
             item.get("trigger_source")
         )
@@ -9644,7 +9676,13 @@ class XPostStore:
         actor=None,
         random_template_enabled=False,
         duration_policy_version=2,
+        reuse_context=None,
     ):
+        reuse_context = dict(reuse_context or {})
+        from features.x_material_effects.reuse import freeze_context
+        reuse_context, share_scope = freeze_context(reuse_context)
+        if share_scope:
+            reuse_context['pool_scope'] = share_scope
         duration_policy_version = duration_policy.version({"duration_policy_version": duration_policy_version})
         random_template_enabled = _random_template_enabled(random_template_enabled)
         material_ids = _manual_material_ids([material_id])
@@ -9717,6 +9755,7 @@ class XPostStore:
                     == body_template_sha256
                     and bool(existing["random_template_enabled"]) == random_template_enabled
                     and str(existing["actor_user_id"]) == actor_user_id
+                    and json.loads(existing["reuse_context_json"] or "{}") == reuse_context
                 )
                 if not same:
                     conn.rollback()
@@ -9762,6 +9801,13 @@ class XPostStore:
                 "WHERE material_key=? AND state='active' LIMIT 1",
                 (material_key,),
             ).fetchone()
+            if reuse_context:
+                from features.x_material_effects.reuse import local_conflict
+                in_pool = local_conflict(conn, material_key, account_ids[0], reuse_context=reuse_context)
+                already_used = False
+                if share_scope:
+                    from features.x_material_effects.reuse import reservation_conflict
+                    already_reserved = reservation_conflict(conn, material_key, account_ids[0], share_scope)
             if in_pool or already_used or already_reserved:
                 conn.rollback()
                 raise XPostError(
@@ -9776,8 +9822,8 @@ class XPostStore:
                     "template_ref,template_version,body_template_sha256,"
                     "run_date,source_date,account_ids_json,material_ids_json,"
                     "body_template,random_template_enabled,actor_user_id,actor_name,status,"
-                    "expected_count,created_at,updated_at,duration_policy_version"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?)",
+                    "expected_count,created_at,updated_at,duration_policy_version,reuse_context_json"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?,?)",
                     (
                         idempotency_key,
                         AUTO_TEMPLATE_TRIGGER_SOURCE,
@@ -9796,14 +9842,15 @@ class XPostStore:
                         timestamp,
                         timestamp,
                         duration_policy_version,
+                        json.dumps(reuse_context, sort_keys=True),
                     ),
                 )
                 run_id = int(cursor.lastrowid)
                 conn.execute(
                     "INSERT INTO x_post_manual_material_reservation("
                     "manual_run_id,material_key,state,release_reason,"
-                    "created_at,updated_at) VALUES(?,?,'active','',?,?)",
-                    (run_id, material_key, timestamp, timestamp),
+                    "created_at,updated_at,share_scope) VALUES(?,?,'active','',?,?,?)",
+                    (run_id, material_key, timestamp, timestamp, share_scope),
                 )
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
@@ -10237,6 +10284,11 @@ class XPostStore:
         if not isinstance(candidates, list):
             raise XPostError("invalid_request", "candidates必须是数组", 400)
         frozen = self.get_manual_run(run_id, trigger_source)
+        reuse_context = frozen.get('reuse_context') or {}
+        if reuse_context:
+            from features.x_material_effects.reuse import publisher_request
+            publisher_request('execution', **reuse_context, account_id=str(frozen['account_ids'][0]),
+                material_id=str(frozen['material_ids'][0]), external_task_key=frozen['external_task_key'])
         personal = None
         if int(frozen.get("copy_contract_version", 1)) == 2:
             from features.x_video_publish.core import personal_task, personal_batch_held
@@ -10455,7 +10507,11 @@ class XPostStore:
                     409,
                 )
 
-            if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE:
+            if reuse_context:
+                from features.x_material_effects.reuse import local_conflict
+                if local_conflict(conn, material_ids[0], account_ids[0], reuse_context=reuse_context):
+                    raise XPostError('x_post_auto_template_material_unavailable', '素材已被同账号使用或在途任务占用', 409)
+            if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE and not json.loads(run['reuse_context_json'] or '{}'):
                 material_placeholders = ",".join("?" for _item in material_ids)
                 if conn.execute(
                     "SELECT 1 FROM x_post_material_pool "
