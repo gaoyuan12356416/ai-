@@ -62,15 +62,22 @@ class Catalog:
         self.deadline = time.monotonic() + 3300
 
     def select(self, sql, args=()):
-        for attempt in range(3):
+        # Interactive Page reads use the same FIFO broker. Wait at this
+        # particular read instead of discarding a completed catalog traversal.
+        busy_until = time.monotonic() + 180
+        attempt = 0
+        while True:
             if time.monotonic() >= self.deadline:
                 raise RepositoryError('fb_auto_catalog_scan_timeout', '素材目录分批读取超时', 409)
             try:
                 return self.mysql.select(sql, args)
             except TemplateError as exc:
-                if exc.code not in {'source_busy', 'source_connection_failed'} or attempt == 2:
+                attempt += 1
+                busy = exc.code == 'source_busy' and time.monotonic() < busy_until
+                reconnect = exc.code == 'source_connection_failed' and attempt < 3
+                if not busy and not reconnect:
                     raise RepositoryError(exc.code, '素材目录只读查询暂不可用', 503) from exc
-                time.sleep(attempt + 1)
+                time.sleep(min(attempt, 5))
 
     def source_predicate(self):
         rule = self.config['material_rule']
@@ -198,11 +205,15 @@ class Catalog:
             return details, {k: _description(v) for k, v in descriptions.items() if v}, classifications, profile_error
 
         facts, descriptions, classes, error = {}, {}, {}, ''
+        processed = 0
         for detail, copy, labels, failed in self.read_batches(chunk, ids, 160):
             facts.update(detail)
             descriptions.update(copy)
             classes.update(labels)
             error = error or failed
+            processed += 1
+            if processed % 25 == 0:
+                print(f'fb_catalog_metadata batches={processed} eligible={len(facts)}', flush=True)
         return facts, descriptions, {} if error else classes, error
 
     def hydrate(self, ids):
