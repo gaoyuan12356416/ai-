@@ -191,6 +191,34 @@ def weight(text):
     )
 
 
+def episode_label(lang, title, number):
+    label = EPISODES.get(lang, "№ {n}").format(n=number)
+    return f"《{title}》{label}" if lang in ("zh", "ja") else f"{title} · {label}"
+
+
+def body_length_target(task):
+    """Pick one reproducible target per task. Only the two prose fields count."""
+    lang = canonical_lang(task["language"]).split("-")[0]
+    cjk = lang in {"zh", "ja", "ko"}
+    if task["endpoint"] == "fb":
+        low, high, margin = (55, 100, 10) if cjk else (120, 210, 20)
+    else:
+        low, high, margin = (38, 60, 8) if cjk else (80, 135, 10)
+        # Reserve space for a short link, hook, two tags, icon and separators.
+        # The native renderer checks the actual assembled post again.
+        fixed = 90 + weight(click_prefix(task["language"]))
+        if task["endpoint"] == "x_drama" and task.get("episode"):
+            fixed += weight(episode_label(lang, task["title"], task["episode"])) + 3
+        room = max(3, (280 - fixed) // (2 if cjk else 1))
+        margin = min(margin, (room - 1) // 2)
+        high = min(high, room - margin)
+        if high < low:
+            low = max(margin + 1, high - margin)
+    seed = int(signature("body-length-v1:" + task["key"])[:16], 16)
+    target = low + seed % (high - low + 1)
+    return {"target": target, "min": target - margin, "max": target + margin}
+
+
 def one_line(value, maximum, field="text"):
     def fail(reason, index=None):
         if index is not None:
@@ -266,6 +294,12 @@ def validate(task, item, options=None):
         ):
             raise ValueError("episode_evidence_missing")
     output.update(tags=clean, refs=refs, icon=ICONS.get(str(item.get("motif")), "✦"))
+    limits = body_length_target(task)
+    size = len(output["opening"]) + len(output["turn"])
+    if not limits["min"] <= size <= limits["max"]:
+        raise ValueError(f"body_length_out_of_range: got {size}, target {limits['target']} "
+                         f"({limits['min']}-{limits['max']})")
+    output["body_chars"] = limits
     return output
 
 
@@ -282,11 +316,7 @@ def render(task, draft, url):
     cta = draft["cta"]
     if task["endpoint"] == "x_drama":
         lang = canonical_lang(task["language"]).split("-")[0]
-        label = EPISODES.get(lang, "№ {n}").format(n=int(task["episode"]))
-        title = one_line(task["title"], 500, "title")
-        episode = (
-            f"《{title}》{label}" if lang in ("zh", "ja") else f"{title} · {label}"
-        )
+        episode = episode_label(lang, one_line(task["title"], 500, "title"), int(task["episode"]))
         sep = "｜" if lang in ("zh", "ja") else " · "
         cta = sep.join((cta, episode) if draft.get("click_hook") else (episode, cta))
     text = "\n".join(

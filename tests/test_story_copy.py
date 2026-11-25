@@ -75,6 +75,9 @@ class CaptionTests(unittest.TestCase):
                 for n in range(5)
             )
 
+        target = model.body_length_target(t)["target"]
+        opening = sentence()
+        turn = " ".join(sentence() for _ in range(10))[:target - len(opening)].rstrip()
         return dict(
             id=t["key"],
             language=t["language"],
@@ -86,8 +89,8 @@ class CaptionTests(unittest.TestCase):
                 "to find " + sentence().split()[0],
                 "to see " + sentence().split()[0],
             ],
-            opening=sentence(),
-            turn=sentence(),
+            opening=opening,
+            turn=turn,
             tags=["ShortDrama", "Mystery"],
         )
 
@@ -403,8 +406,8 @@ class CaptionTests(unittest.TestCase):
         for unit in ("50°C", "122°F", "50℃", "122℉", "5㎏", "60㎞/h", "20℥",
                      "5μg/m³", "90°", "2m²", "5ℓ", "±5%"):
             with self.subTest(unit=unit):
-                item = dict(self.item(task), opening=f"The reading is {unit}.",
-                            turn=f"Who changed the {unit} reading?", angle=f"{unit} reading",
+                item = dict(self.item(task), opening=f"The young doctor checked the reading twice. The thermometer still showed {unit}.",
+                            turn=f"She opened the sealed chart and found that someone had changed the original {unit} reading.", angle=f"{unit} reading",
                             hooks=[f"to investigate the {unit} reading"])
                 draft = model.validate(task, item)
                 self.assertEqual(draft["opening"], item["opening"])
@@ -669,6 +672,56 @@ class CaptionTests(unittest.TestCase):
             self.assertNotIn("focus", item)
             self.assertNotIn("suggested_angle", item)
 
+    def test_each_task_gets_a_stable_platform_and_language_target(self):
+        for family in ("fa", "fv", "xm", "xd", "ta"):
+            for lang in ("en", "ja", "ko", "zh-Hant"):
+                with self.subTest(family=family, lang=lang):
+                    rows = [dict(self.task(i, family), language=lang) for i in range(48)]
+                    requested = json.loads(generator.prompt(rows))["tasks"]
+                    targets = set()
+                    for task, row in zip(rows, requested):
+                        limits = model.body_length_target(task)
+                        self.assertEqual(row["body_chars"], limits)
+                        self.assertEqual(limits, model.body_length_target(dict(task, publish_at=99)))
+                        fb = task["endpoint"] == "fb"
+                        if lang == "en":
+                            low, high, margin = (120, 210, 20) if fb else (80, 135, 10)
+                        else:
+                            low, high, margin = (55, 100, 10) if fb else (38, 60, 8)
+                        self.assertLessEqual(low, limits["target"])
+                        self.assertLessEqual(limits["target"], high)
+                        self.assertEqual(limits["min"], limits["target"] - margin)
+                        self.assertEqual(limits["max"], limits["target"] + margin)
+                        targets.add(limits["target"])
+                    self.assertGreater(len(targets), 8)
+        episode = self.task(1, "xd")
+        self.assertLess(model.body_length_target(dict(episode, title="Q" * 105))["max"],
+                        model.body_length_target(episode)["max"])
+
+    def test_generation_checks_inclusive_bounds_and_keeps_target_on_retry(self):
+        task = self.task(1)
+        limits = model.body_length_target(task)
+        def answer(count):
+            return dict(self.item(task), opening="A B", turn="C" * (count - 3))
+        for size in (limits["min"], limits["max"]):
+            self.assertEqual(model.validate(task, answer(size))["body_chars"], limits)
+        for size in (limits["min"] - 1, limits["max"] + 1):
+            with self.assertRaisesRegex(ValueError, "body_length_out_of_range"):
+                model.validate(task, answer(size))
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            first, rows = store.claim(c)
+            worker.generate_batch(c, first, rows, lambda tasks, emit, usage: emit(answer(limits["max"] + 1)))
+            c.execute("UPDATE retries SET retry_after=0")
+            c.commit()
+            retry, rows = store.claim(c)
+            self.assertEqual(json.loads(generator.prompt(rows))["tasks"][0]["body_chars"], limits)
+            worker.generate_batch(c, retry, rows, lambda tasks, emit, usage: emit(answer(limits["target"])))
+            draft = json.loads(c.execute("SELECT draft FROM jobs").fetchone()[0])
+            self.assertEqual(draft["body_chars"], limits)
+            self.assertLessEqual(model.weight(model.render(task, draft, "https://example.org/1")), 280)
+
     def test_manual_repair_preserves_native_receipts_and_auto_retry_history(self):
         task = self.task(1)
         with store.connection() as c:
@@ -917,7 +970,8 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(len(sent), 1)
             self.assertIn("影响 2 条", sent[0])
 
-    def test_generation_ignores_unavailable_history_and_uses_repeated_copy(self):
+    @patch.object(model, "body_length_target", return_value={"target": 115, "min": 105, "max": 125})
+    def test_generation_ignores_unavailable_history_and_uses_repeated_copy(self, _target):
         with store.connection() as c:
             tasks = [self.task(i, f) for i, f in enumerate(("fa", "xm", "xd", "ta"), 1)]
             for task in tasks:
@@ -1008,7 +1062,8 @@ class CaptionTests(unittest.TestCase):
             self.assertFalse(store.eligible(c, "tm", 1000))
             self.assertTrue(store.eligible(c, "ta", 1000))
 
-    def test_identical_copy_across_channels_and_story_only_episode(self):
+    @patch.object(model, "body_length_target", return_value={"target": 115, "min": 105, "max": 125})
+    def test_identical_copy_across_channels_and_story_only_episode(self, _target):
         with store.connection() as c:
             ts = [self.task(i + 1, f) for i, f in enumerate(["fa", "xm", "xd", "ta"])]
             for t in ts:
@@ -1037,7 +1092,8 @@ class CaptionTests(unittest.TestCase):
             self.assertTrue(lines[1].startswith("👆 watch full now"))
             self.assertEqual(len(lines), 7)
 
-    def test_existing_unique_index_migrates_and_history_allows_reuse(self):
+    @patch.object(model, "body_length_target", return_value={"target": 115, "min": 105, "max": 125})
+    def test_existing_unique_index_migrates_and_history_allows_reuse(self, _target):
         with store.connection() as c:
             c.execute("DROP INDEX jobs_exact")
             c.execute("CREATE UNIQUE INDEX jobs_exact ON jobs(product,content,lang,hash) WHERE hash IS NOT NULL")
@@ -1203,7 +1259,10 @@ class CaptionTests(unittest.TestCase):
                 hooks=[hooks[i]],
                 tags=s["tags"].split(),
             )
-            draft = model.validate(t, item)
+            # These archived, reviewed drafts predate the randomized writing brief.
+            size = len(s["opening"]) + len(s["turn"])
+            with patch.object(model, "body_length_target", return_value={"target": size, "min": size, "max": size}):
+                draft = model.validate(t, item)
             text = model.render(t, draft, s["url"])
             self.assertEqual(text.splitlines()[0], s["url"])
             self.assertTrue(
