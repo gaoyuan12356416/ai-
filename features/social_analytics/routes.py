@@ -281,6 +281,9 @@ def dispatch(handler, parsed, app, *, legacy=False):
     actor = handler._social_analytics_actor()
     if actor is None:
         return
+    if not legacy and parsed.path == '/api/social-analytics/refresh':
+        from features.report_refresh import dispatch as refresh
+        return refresh(handler, parsed, 'social', reply)
     # Defense in depth: the global collector capability cannot enter via HTTP,
     # even if a future authentication adapter copies session fields.
     actor = {key: actor.get(key) for key in ("tenant_key", "user_id", "role")}

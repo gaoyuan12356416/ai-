@@ -13,6 +13,9 @@ def dispatch(handler, parsed, app):
     def reply(status, value):
         return app["json_response"](handler, status, value, no_store=True)
     prefix = "/api/socialkit-analytics/"
+    if parsed.path == prefix + "refresh":
+        from features.report_refresh import dispatch as refresh
+        return refresh(handler, parsed, 'socialkit', reply)
     if parsed.path not in tuple(prefix + name for name in ("options", "report", "export.csv")):
         return reply(404, {"error": "not_found"})
     if handler.command != "GET":

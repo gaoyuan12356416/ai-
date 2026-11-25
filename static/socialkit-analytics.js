@@ -19,6 +19,7 @@
   const state = {view:'overview',options:null,report:null,filters:{},groups:['platform'],applied:null,dirty:false,busy:false,allowed:false,auth:null,requestId:0,controller:null,exportController:null,exporting:false};
   function message(text,kind='') { const node=$('#page-message'); node.textContent=text; node.className='analytics-message'+(kind?' '+kind:''); node.hidden=!text; }
   function controls() {
+    refreshControls();
     const usable=state.allowed&&!state.busy;
     $('#filter-fields').disabled=!state.allowed;
     $('#apply-filters').disabled=!usable; $('#refreshPage').disabled=state.busy;
@@ -79,6 +80,7 @@
       const report=await request(API+'/report?'+params,{signal:controller.signal});
       if(id!==state.requestId)return;
       state.report=report;state.applied=new URLSearchParams(params);state.dirty=false;renderReport();message('');
+      return report.meta.version;
     }catch(error){if(error.name==='AbortError')return;if(error.status===401||error.status===403){denied(error);return;}if(id===state.requestId)message(error.message+(error.status===409?' 请点击“读取最新数据”。':''),'error');}
     finally{if(id===state.requestId){state.busy=false;controls();}}
   }
@@ -90,7 +92,7 @@
     if(!['today','yesterday'].includes(kind))start.setUTCDate(start.getUTCDate()-Number(kind)+1);
     $('#date-start').value=utc(start);$('#date-end').value=utc(end);dirty();
   }
-  async function latest({initial=false}={}) {
+  async function latest({initial=false,keepView=false}={}) {
     if(state.busy)return;state.busy=true;controls();message('正在读取最新快照…');
     try{
       const data=await request(API+'/options');
@@ -98,7 +100,10 @@
       $('#scope-label').textContent='数据范围：全部 SocialKit 团队（已授权用户可见）';
       if(initial||!$('#date-end').value){const end=new Date((data.range?.end||utc(new Date()))+'T00:00:00Z');const start=new Date(end);start.setUTCDate(start.getUTCDate()-13);$('#date-start').value=utc(start);$('#date-end').value=utc(end);}
       const allowed=new Set(allowedDimensions());for(const k of Object.keys(state.filters))if(!allowed.has(k))delete state.filters[k];
-      renderFilters();state.busy=false;controls();await fetchReport(collect());
+      renderFilters();state.busy=false;controls();
+      const params=keepView && !state.dirty && state.applied ? new URLSearchParams(state.applied) : collect();
+      params.set('version',data.version);
+      return (await fetchReport(params)) || false;
     }catch(error){state.busy=false;if(error.status===401||error.status===403)denied(error);else{message(error.message,'error');controls();}}
   }
   function empty(title){return `<div class="chart-empty"><strong>${esc(title)}</strong></div>`;}
@@ -175,5 +180,7 @@
       await latest({initial: true});
     } catch (error) { message(error.message, 'error'); }
   }
+  const refreshControls = window.bindReportRefresh({api:API, allowed:() => state.allowed, denied,
+    reload:async () => state.busy ? null : (await latest({keepView:true})) || false});
   void init();
 })();

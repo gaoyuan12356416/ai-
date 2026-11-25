@@ -17,10 +17,11 @@
   <main class="main analytics-main">
     <header class="topbar">
       <div><div class="analytics-eyebrow"><span class="social-dot" aria-hidden="true">▥</span> SOCIAL · ANALYTICS</div><h1>社媒效果分析</h1><p>统一查看各社媒渠道、人员与剧目的发布效果。</p></div>
-      <div class="toolbar"><div class="user-card" id="userCard"></div><button type="button" class="btn btn-secondary" id="authButton">登录</button><button type="button" class="btn btn-secondary" id="refreshPage">刷新数据</button></div>
+      <div class="toolbar"><div class="user-card" id="userCard"></div><button type="button" class="btn btn-secondary" id="authButton">登录</button><button type="button" class="btn btn-secondary" id="refreshPage">刷新数据</button><button type="button" class="btn btn-primary" id="fetch-report-data" disabled>手动抓取数据</button></div>
     </header>
 
     <div class="scope-strip"><span id="scope-label">正在核验数据权限</span><span>UTC 自然日 · 金额 USD</span></div>
+    <div id="fetch-report-status" class="analytics-message" role="status" aria-live="polite" hidden></div>
     <div id="page-message" class="analytics-message" role="status" aria-live="polite">正在加载报表…</div>
     <form id="report-filters" class="analytics-panel filter-panel" aria-label="报表筛选">
       <fieldset id="filter-fields" disabled>
@@ -80,6 +81,6 @@
 </div>
 <script src="/quick-nav.js?v=43969bd46e10"></script>
 <script src="/ui-topbar.js?v=20260903-1"></script>
-<script src="/social-analytics.js?v=20261124-date-channel"></script>
+<script src="/report-refresh.js?v=20261125-1"></script><script src="/social-analytics.js?v=20261125-manual1"></script>
 </body>
 </html>

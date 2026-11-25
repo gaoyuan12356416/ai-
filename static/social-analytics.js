@@ -31,6 +31,20 @@
   let reportController, exportController;
   let entryApplied = false;
   let platformMetadata = {}, metricApplicability = {};
+  const refreshControls = window.bindReportRefresh?.({api:API, allowed:() => allowed, denied, reload:async () => {
+    if (busy) return null;
+    const fresh = await request(API + '/options');
+    const selected = new Set([...document.querySelectorAll('#dimension-filters input:checked')].map(input => input.name + ':' + input.value));
+    options = fresh.options;
+    renderFilterOptions();
+    document.querySelectorAll('#dimension-filters .multi-filter').forEach(group => {
+      const inputs = [...group.querySelectorAll('input[type=checkbox]')];
+      for (const input of inputs) input.checked = selected.has(input.name + ':' + input.value);
+      const count = inputs.filter(input => input.checked).length;
+      group.querySelector('[data-count]').textContent = count ? '已选 ' + count : '全部';
+    });
+    return await loadReport(dirty || !applied ? readQuery() : new URLSearchParams(applied));
+  }}) || (() => {});
 
   function isPublicationMetric(key) { return ['published_count','post_count','repost_count','links'].includes(key); }
   function platformLabel(value) {
@@ -100,6 +114,7 @@
     } finally { clearTimeout(timeout); signal?.removeEventListener('abort',abort); }
   }
   function updateControls() {
+    refreshControls();
     const usable = allowed && !!report && !busy && !dirty;
     $('#export-report').disabled = !usable || exporting;
     $('#export-report').innerHTML = exporting ? '正在导出…' : '<span aria-hidden="true">↓</span> 导出全部分组 CSV';
@@ -195,11 +210,13 @@
       if (current !== serial || generation !== epoch) return;
       report = validateReport(result); busy = false; renderReport(); message('');
       history.replaceState(null,'',location.pathname + '?' + applied.toString() + location.hash);
+      return report.meta.warehouse_version || false;
     } catch (error) {
       if (current !== serial || generation !== epoch) return;
       busy = false;
       if (error.status === 401 || error.status === 403) denied(error);
       else { clearReport(); message(error.message || '数据读取失败，请重试。','error'); }
+      return false;
     } finally { if (current === serial && generation === epoch) { busy = false; updateControls(); } }
   }
   function renderQuality() {
