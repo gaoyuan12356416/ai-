@@ -168,10 +168,10 @@ async function main() {
       await target.locator("#report-content:not(.hidden)").waitFor();
       await target.waitForFunction(() => document.querySelector("#report-content").getAttribute("aria-busy") === "false");
     };
-    await page.goto(origin + "/social-analytics.html");
+    await page.goto(origin + "/social-analytics.html?group_by=owner,platform");
     await loaded();
     assert.equal(await page.locator("h1").textContent(), "社媒效果分析");
-    assert.deepEqual(await page.locator('input[name="group"]:checked').evaluateAll(items => items.map(item => item.value)), ["owner", "platform"]);
+    assert.deepEqual(await page.locator('input[name="group"]:checked').evaluateAll(items => items.map(item => item.value).sort()), ["owner", "platform"]);
     assert.equal(await page.locator('input[name="platform"]:checked').count(), 0);
     const yesterday = new Date(); yesterday.setUTCHours(0,0,0,0); yesterday.setUTCDate(yesterday.getUTCDate()-1);
     const firstDay = new Date(yesterday); firstDay.setUTCDate(firstDay.getUTCDate()-6);
@@ -190,7 +190,7 @@ async function main() {
     await page.screenshot({path: path.join(OUTPUT, "desktop.png"), fullPage: true});
     await page.locator("#ranking-metric").selectOption("post_count"); await loaded();
     assert.equal(await page.locator("#ranking-chart .ranking-row").count(), 1);
-    assert.match(await page.locator("#ranking-chart").textContent(), /测试人员乙 \/ X/);
+    assert.match(await page.locator("#ranking-chart").textContent(), /X \/ 测试人员乙/);
     await page.locator("#ranking-metric").selectOption("clicks"); await loaded();
     checks += 2;
 
@@ -216,7 +216,7 @@ async function main() {
     const download = await downloadEvent;
     assert.match(download.suggestedFilename(), /^social-analytics_/);
     const exportRequest = new URL(requests.filter(value => value.startsWith("/api/social-analytics/export.csv?")).at(-1), origin);
-    assert.equal(exportRequest.searchParams.get("group_by"), "owner,platform");
+    assert.equal(exportRequest.searchParams.get("group_by"), "date,platform");
     assert.equal(exportRequest.searchParams.get("start"), firstDay.toISOString().slice(0,10));
     const downloadStream = await download.createReadStream(), chunks = [];
     for await (const chunk of downloadStream) chunks.push(chunk);
@@ -249,7 +249,7 @@ async function main() {
     const xOwner = page.locator("#report-body tr").filter({hasText:"测试人员乙"});
     assert.equal(await xOwner.locator("td").filter({hasText:/^不适用$/}).count(), 0);
     checks += 2;
-    await page.goto(origin + "/social-analytics.html"); await loaded();
+    await page.goto(origin + "/social-analytics.html?group_by=owner,platform"); await loaded();
 
     // One unavailable Facebook site is visible independently of its healthy sibling.
     mode = "facebook-partial";

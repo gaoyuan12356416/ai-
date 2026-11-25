@@ -1,0 +1,18 @@
+[Unit]
+Description=Prepare common social report views from the verified local snapshot
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@RELEASE@
+ExecStart=@PYTHON@ -B -m features.social_analytics.prepared_views @WAREHOUSE@
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=75%
+MemoryMax=2G
+TimeoutStartSec=25min
+NoNewPrivileges=true
+PrivateNetwork=true
+ProtectSystem=strict
+ReadWritePaths=@WAREHOUSE@/prepared-web-views
+UMask=0027

@@ -28,7 +28,7 @@
   const stamp = value => { const date = new Date(value); return value && Number.isFinite(date.getTime()) ? date.toISOString().replace('T',' ').slice(0,19) + ' UTC' : '未提供'; };
   let auth, options = {}, report = null, applied = null, allowed = false, dirty = false, busy = false;
   let epoch = 0, serial = 0, exportSerial = 0, exporting = false;
-  let reportController, exportController;
+  let reportController, exportController, optionsRequest;
   let entryApplied = false, entryFiltersEdited = false;
   let platformMetadata = {}, metricApplicability = {};
   const refreshControls = window.bindReportRefresh?.({api:API, allowed:() => allowed, denied, reload:async () => {
@@ -136,7 +136,13 @@
   }
   function markDirty() {
     if (!allowed) {
-      if ($('#date-fields')?.disabled === false) entryFiltersEdited = true;
+      if ($('#date-fields')?.disabled === false) {
+        entryFiltersEdited = true;
+        if (busy) {
+          try { void loadReport(entryQuery(), true); }
+          catch (error) { ++serial; reportController?.abort(); busy = false; message(error.message,'error'); }
+        }
+      }
       return;
     }
     dirty = true;
@@ -153,9 +159,36 @@
   function renderFilterOptions() {
     $('#dimension-filters').innerHTML = filterKeys.map(key => `<details class="multi-filter" data-dimension="${key}"><summary><span>${dimensions[key]}</span><strong data-count>全部</strong></summary><div class="filter-popover"><input type="search" class="option-search" aria-label="搜索${dimensions[key]}选项" placeholder="搜索${dimensions[key]}"><div class="filter-option-list"></div><button type="button" class="filter-clear">清除选择</button></div></details>`).join('');
   }
+  async function loadOptions() {
+    if (filterKeys.every(key => Array.isArray(options[key]))) return true;
+    if (optionsRequest) return optionsRequest;
+    const generation = epoch;
+    optionsRequest = request(API + '/options').then(result => {
+      if (generation !== epoch) return false;
+      if (!result.options || filterKeys.some(key => !Array.isArray(result.options[key]))) throw new Error('筛选项加载失败，请重新展开重试。');
+      options = result.options; platformMetadata = result.platform_metadata || {}; metricApplicability = result.metric_applicability || {};
+      return true;
+    }).finally(() => { if (generation === epoch) optionsRequest = null; });
+    return optionsRequest;
+  }
+  async function openFilter(detail) {
+    const list = detail.querySelector('.filter-option-list'), generation = epoch;
+    try {
+      if (!options[detail.dataset.dimension]) list.textContent = '正在加载筛选项…';
+      if (await loadOptions() && detail.isConnected) {
+        fillFilterOptions(detail);
+        const search = detail.querySelector('.option-search');
+        if (search.value) search.dispatchEvent(new Event('input', {bubbles:true}));
+      }
+    } catch (error) {
+      if (generation !== epoch) return;
+      if (error.status === 401 || error.status === 403) denied(error);
+      else list.textContent = '筛选项加载失败，请重新展开重试。';
+    }
+  }
   function fillFilterOptions(detail) {
     const list = detail.querySelector('.filter-option-list');
-    if (list.childElementCount) return;
+    if (list.childElementCount || !options[detail.dataset.dimension]) return;
     const key = detail.dataset.dimension, items = options[key] || [];
     list.innerHTML = items.map(item => `<label class="filter-option"><input type="checkbox" name="${key}" value="${esc(item.value)}"><span>${esc(item.label || item.value)}</span></label>`).join('') +
       `<div class="filter-empty" ${items.length ? 'hidden' : ''}>暂无可选项</div>`;
@@ -220,8 +253,8 @@
     if (![value.pagination.page,value.pagination.pages,value.pagination.total,value.pagination.page_size].every(finite)) throw new Error('分页数据无效，请刷新后重试。');
     return value;
   }
-  async function loadReport(query) {
-    if (!allowed) return;
+  async function loadReport(query, initial = false) {
+    if (!allowed && !initial) return;
     if (busy && applied?.toString() === query.toString()) return false;
     const current = ++serial, generation = epoch;
     reportController?.abort(); exportController?.abort(); ++exportSerial; exporting = false;
@@ -232,7 +265,9 @@
     try {
       const result = await request(API + '/report?' + query,{signal:reportController.signal});
       if (current !== serial || generation !== epoch) return;
-      report = validateReport(result); busy = false; renderReport(); message('');
+      report = validateReport(result); busy = false;
+      allowed = true; $('#filter-fields').disabled = false;
+      renderReport(); message('');
       history.replaceState(null,'',location.pathname + '?' + applied.toString() + location.hash);
       return report.meta.warehouse_version || false;
     } catch (error) {
@@ -370,24 +405,26 @@
   async function initialize() {
     const generation = ++epoch; ++serial; ++exportSerial;
     reportController?.abort(); exportController?.abort(); allowed = false; busy = false; exporting = false; dirty = false; entryFiltersEdited = false;
-    clearReport(); options = {}; $('#dimension-filters').replaceChildren();
-    $('#date-fields')?.setAttribute('disabled',''); $('#filter-fields').disabled = true; message('正在核验权限并加载筛选项…');
+    clearReport(); options = {}; optionsRequest = null; $('#dimension-filters').replaceChildren();
+    $('#date-fields')?.setAttribute('disabled',''); $('#filter-fields').disabled = true; message('正在核验报表权限…');
     try {
       auth = await request('/api/ui/topbar'); if (generation !== epoch) return;
       UiTopbar.render({auth,userCard:'#userCard',authButton:'#authButton'});
-      await Promise.resolve(QuickNav.render({container:'#quickNav',auth,activeKey:'socialAnalytics'})).catch(() => {});
+      void Promise.resolve(QuickNav.render({container:'#quickNav',auth,activeKey:'socialAnalytics'})).catch(() => {});
       if (generation !== epoch) return;
       if (!auth.authenticated) { denied({status:401,message:'请先使用飞书登录后台，再查看数据报表。'}); return; }
       initialDateAndSearch();
       $('#date-fields')?.removeAttribute('disabled');
-      const result = await request(API + '/options'); if (generation !== epoch) return;
-      if (!result.options || filterKeys.some(key => !Array.isArray(result.options[key]))) throw new Error('筛选数据不完整，请点击「刷新数据」重试。');
-      options = result.options; platformMetadata = result.platform_metadata || {}; metricApplicability = result.metric_applicability || {};
-      allowed = true; renderFilterOptions(); renderGroupOptions(); updateGroupLimit(); scopeLabel(result.scope);
-      $('#filter-fields').disabled = false; $('#page-size').value = '50';
-      $('#ranking-metric').value = 'clicks';
-      if (!entryApplied) { applyEntryQuery(); entryApplied = true; await loadReport(entryQuery()); }
-      else await loadReport(readQuery());
+      renderFilterOptions(); renderGroupOptions(); updateGroupLimit();
+      $('#page-size').value = '50'; $('#ranking-metric').value = 'clicks';
+      const entry = new URLSearchParams(location.search);
+      if (!entryApplied && filterKeys.some(key => entry.has(key))) {
+        if (!await loadOptions() || generation !== epoch) return;
+      }
+      const restore = !entryApplied;
+      if (restore) applyEntryQuery();
+      entryApplied = true;
+      await loadReport(restore ? entryQuery() : readQuery(), true);
     } catch (error) { if (generation !== epoch) return; if (error.status === 401 || error.status === 403) denied(error); else message(error.message || '报表初始化失败，请点击「刷新数据」重试。','error'); }
   }
   const metricOptions = chartMetricKeys.map(key => `<option value="${key}">${metrics[key].label}</option>`).join('');
@@ -400,11 +437,12 @@
   });
   $('#report-search').addEventListener('input',markDirty);
   $('#dimension-filters').addEventListener('toggle',event => {
-    if (allowed && event.target.matches('details[open]')) fillFilterOptions(event.target);
+    if (allowed && event.target.matches('details[open]')) void openFilter(event.target);
   },true);
   $('#dimension-filters').addEventListener('input',event => {
     if (!event.target.classList.contains('option-search')) return;
     const query = event.target.value.trim().toLowerCase(),detail = event.target.closest('.multi-filter'); let visible = 0;
+    if (!options[detail.dataset.dimension]) return;
     fillFilterOptions(detail);
     detail.querySelectorAll('.filter-option').forEach(node => { const match = (node.textContent + ' ' + node.querySelector('input').value).toLowerCase().includes(query); node.hidden = !match; if (match) visible++; });
     const empty = detail.querySelector('.filter-empty'); empty.hidden = !!visible; empty.textContent = query ? '没有匹配选项' : '暂无可选项';

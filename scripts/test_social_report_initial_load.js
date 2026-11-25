@@ -12,7 +12,7 @@ async function check() {
   try {
     const page = await browser.newPage();
     const queries = [], errors = [];
-    let optionsGate, reportGate, denyOptions = false;
+    let optionsGate, reportGate, denyOptions = false, optionRequests = 0;
     const options = {...fixtureOptions, drama: Array.from({length: 6000},
       (_, i) => ({value: String(i), label: "示例剧目 " + i}))};
     page.on("pageerror", error => errors.push(error.message));
@@ -25,7 +25,7 @@ async function check() {
         case "/quick-nav.js": return route.fulfill({contentType: "text/javascript", body: "window.QuickNav={render(){}};"});
         case "/ui-topbar.js": return route.fulfill({contentType: "text/javascript", body: "window.UiTopbar={render(){},handleAuthAction(){}};"});
         case "/api/social-analytics/options":
-          if (optionsGate) await optionsGate;
+          optionRequests++; if (optionsGate) await optionsGate;
           return route.fulfill(denyOptions ? {status: 403, json: {message: "没有权限"}} : {json: {scope: "tenant", options}});
         case "/api/social-analytics/report":
           queries.push(address.searchParams);
@@ -41,22 +41,19 @@ async function check() {
     optionsGate = new Promise(resolve => { releaseOptions = resolve; });
     reportGate = new Promise(resolve => { releaseReport = resolve; });
     await page.goto(url + "?page=5");
+    await page.waitForFunction(() => document.querySelector('#report-content').getAttribute('aria-busy') === 'true');
+    const corrected = reportRequest();
     await page.locator("[data-range=yesterday]").click();
-    assert.equal(await page.locator("#apply-filters").isDisabled(), true);
-    assert.equal(queries.length, 0);
-    const first = reportRequest();
-    releaseOptions();
-    await first;
+    await corrected;
     const yesterday = await page.locator("#date-end").inputValue();
     assert.equal(await page.locator("#date-start").inputValue(), yesterday);
-    assert.equal(await page.locator("#dimension-filters input[type=checkbox]").count(), 0);
-    await page.locator("#apply-filters").dblclick();
     releaseReport();
     await loaded();
-    assert.equal(queries.length, 1);
-    assert.equal(queries[0].get("start"), yesterday);
-    assert.equal(queries[0].get("end"), yesterday);
-    assert.equal(queries[0].get("page"), "1");
+    assert.equal(optionRequests, 0);
+    assert.equal(await page.locator("#dimension-filters input[type=checkbox]").count(), 0);
+    assert.equal(queries.at(-1).get("start"), yesterday);
+    assert.equal(queries.at(-1).get("page"), "1");
+    releaseOptions();
     const group = page.locator('[data-dimension="platform"]');
     await group.locator("summary").click();
     await group.locator('[value="x"]').check();
@@ -81,14 +78,14 @@ async function check() {
     assert.equal((Date.parse(queries.at(-1).get("end")) - Date.parse(queries.at(-1).get("start")))/86400000, 6);
     const beforeDenial = queries.length;
     denyOptions = true;
-    await page.goto(url);
+    await page.goto(url + "?platform=x");
     await page.locator("#page-message.error").waitFor();
     assert.equal(await page.locator("[data-range=yesterday]").isDisabled(), true);
     assert.equal(await page.locator("#apply-filters").isDisabled(), true);
     assert.equal(await page.locator("#dimension-filters input").count(), 0);
     assert.equal(queries.length, beforeDenial);
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({passed:true,initialQueries:1,closedDramaCheckboxes:0,fixtureDramas:6000}));
+    console.log(JSON.stringify({passed:true,defaultOptionsRequests:0,closedDramaCheckboxes:0,fixtureDramas:6000}));
   } finally {
     await browser.close();
   }

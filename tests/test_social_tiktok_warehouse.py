@@ -53,6 +53,37 @@ class TikTokWarehouseTests(unittest.TestCase):
         query = dict(start=[day], end=[day], platform=['tiktok'], group_by=['owner,platform'], **filters)
         return warehouse_reader.build_report({'SOCIAL_ANALYTICS_WAREHOUSE_ROOT': str(self.root)}, actor, query)
 
+    def test_prepared_views_use_same_scope_ranking_and_snapshot(self):
+        from features.social_analytics import prepared_views as views
+        from features.social_analytics.report import parameters
+        from features.social_analytics.routes import build_options
+
+        settings = {'SOCIAL_ANALYTICS_WAREHOUSE_ROOT': str(self.root)}
+        from datetime import date
+        day = date.fromisoformat(DAY)
+        with patch.object(views, 'ranges', return_value=[(day, day)]):
+            views.prepare(self.root)
+        manifest, _ = warehouse_reader.current(self.root)
+        for actor in [ADMIN, dict(ADMIN, role='user', user_id='alice')]:
+            for groups in ('date,platform', 'date,platform,drama'):
+                query = dict(start=[DAY], end=[DAY], group_by=[groups], sort=['clicks'],
+                             direction=['asc'], ranking_metric=['iap'], page=['9'], page_size=['20'])
+                expected = warehouse_reader.build_report(dict(settings, SOCIAL_ANALYTICS_BUILDING_VIEWS=True),
+                                                         actor, query, include_titles=True)
+                actual = views.read_prepared(self.root, manifest, actor, parameters(query), True)
+                self.assertIsNotNone(actual)
+                actual['meta'].pop('snapshot_age_seconds')
+                expected['meta'].pop('snapshot_age_seconds')
+                self.assertEqual(actual, expected)
+            self.assertEqual(views.read_options(self.root, manifest, actor), build_options(settings, actor))
+        for actor in [dict(ADMIN, tenant_key='other'), dict(ADMIN, user_id=''),
+                      dict(ADMIN, role='user', user_id='no-data')]:
+            self.assertIsNone(views.read_prepared(self.root, manifest, actor, parameters(query), True))
+        self.assertIsNone(views.read_prepared(self.root, dict(manifest, version='new'),
+                                              ADMIN, parameters(query), True))
+        self.assertIsNone(views.read_prepared(self.root, manifest, ADMIN,
+                                              parameters(dict(query, search=['something'])), True))
+
     def test_immutable_snapshot_reconciles_owners_group_and_csv(self):
         report = self.report()
         self.assertEqual([report['totals'][k] for k in ('revenue_cents', 'iap_cents', 'iaa_cents')], [7453, 6906, 547])

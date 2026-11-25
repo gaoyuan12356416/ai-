@@ -235,6 +235,25 @@ def campaign_ownership(catalog):
     return by_id, {key: resolve(candidates) for key, candidates in by_id.items()}
 
 
+def table_view(output_rows, params):
+    def sort_key(row, field):
+        value = row.get(field + "_label", row.get(field))
+        return value if value is not None else -math.inf
+
+    output_rows.sort(key=lambda row: tuple(str(row.get(key, "")) for key in params["groups"]))
+    output_rows.sort(key=lambda row: sort_key(row, params["sort"]), reverse=params["direction"] == "desc")
+    ranking = sorted((row for row in output_rows if row.get(params["ranking_metric"]) is not None),
+                     key=lambda row: sort_key(row, params["ranking_metric"]), reverse=True)[:10]
+    ranking = [dict(row, label=" / ".join(str(row.get(key + "_label", row[key])) for key in params["groups"]))
+               for row in ranking]
+    total_rows = len(output_rows)
+    pages = max(1, math.ceil(total_rows / params["page_size"]))
+    page = min(params["page"], pages)
+    offset = (page - 1) * params["page_size"]
+    return dict(all_rows=output_rows, rows=output_rows[offset:offset + params["page_size"]], ranking=ranking,
+                pagination=dict(page=page, page_size=params["page_size"], total=total_rows, pages=pages))
+
+
 def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_errors=None,
               source_metadata=None, metric_coverage=None, iaa_coverage=None, *, ownership=None):
     """Resolve globally before filtering; never join names or af_channel.
@@ -435,16 +454,6 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     output_rows = [formatted(row, [row["platform"]] if "platform" in row else platforms,
                              row.get("date"), group_sources[key]) for key, row in groups.items()]
 
-    def sort_key(row, field):
-        value = row.get(field + "_label", row.get(field))
-        return value if value is not None else -math.inf
-
-    output_rows.sort(key=lambda row: tuple(str(row.get(key, "")) for key in params["groups"]))
-    output_rows.sort(key=lambda row: sort_key(row, params["sort"]), reverse=params["direction"] == "desc")
-    ranking = sorted((row for row in output_rows if row.get(params["ranking_metric"]) is not None),
-                     key=lambda row: sort_key(row, params["ranking_metric"]), reverse=True)[:10]
-    ranking = [dict(row, label=" / ".join(str(row.get(key + "_label", row[key])) for key in params["groups"]))
-               for row in ranking]
     source_quality, unmatched_total, excluded_total = {}, empty(), empty()
     for key, quality in channel_quality.items():
         spec = specs[key]
@@ -537,17 +546,11 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         warnings.append("%s 个已确认发布对象的归属存在冲突或缺失，未计入个人发布量，发布数待核实。" % publication_conflicts)
     if params["end"] == datetime.now(timezone.utc).date().isoformat():
         warnings.append("今天的数据尚未完整，后续回传会更新。")
-    total_rows = len(output_rows)
-    pages = max(1, math.ceil(total_rows / params["page_size"]))
-    page = min(params["page"], pages)
-    offset = (page - 1) * params["page_size"]
     return dict(
-        totals=formatted(totals, platforms), rows=output_rows[offset:offset + params["page_size"]],
-        all_rows=output_rows, group_by=params["groups"], ranking=ranking,
+        totals=formatted(totals, platforms), group_by=params["groups"], **table_view(output_rows, params),
         platform_totals={p: dict(formatted(v, [p]), platform=p, platform_label=PLATFORMS[p]["label"])
                          for p, v in platform_values.items()},
         trend=[dict(formatted(trend[day], platforms, day), date=day) for day in days],
-        pagination=dict(page=page, page_size=params["page_size"], total=total_rows, pages=pages),
         quality=dict(platforms=platform_quality, complete=complete, missing_dates=missing_dates,
                      unverified_dates=unverified_dates,
                      unmatched_campaigns=sum(q["unmatched_campaigns"] for q in platform_quality.values()),

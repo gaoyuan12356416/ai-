@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import threading
+from collections import OrderedDict
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,8 @@ _lock = threading.Lock()
 _catalog_cache = {}
 _ownership_lock = threading.Lock()
 _ownership_cache = {}
+_recent_lock = threading.Lock()
+_recent = OrderedDict()
 
 
 def configured_root(app):
@@ -77,7 +80,27 @@ def scoped_ownership(path, version, platforms, catalog, end):
 
 def build_report(app, actor, query, *, include_titles=False, export=False):
     params = parameters(query)
-    catalog, errors, manifest, path = catalogs(configured_root(app), params['platforms'], app.get('SOCIAL_ANALYTICS_FROZEN_SNAPSHOT'))
+    root = configured_root(app)
+    snapshot = app.get('SOCIAL_ANALYTICS_FROZEN_SNAPSHOT') or current(root)
+    from .prepared_views import pack_report, present, read_prepared
+    view_key = None
+    if not app.get('SOCIAL_ANALYTICS_BUILDING_VIEWS') and not actor.get('_system_report'):
+        prepared = read_prepared(root, snapshot[0], actor, params, include_titles)
+        if prepared is not None:
+            return prepared
+        now = datetime.now(timezone.utc)
+        view_key = (snapshot[1], snapshot[0]['version'], now.date(), actor.get('tenant_key'), actor.get('role'),
+                    actor.get('user_id'), params['start'], params['end'], tuple(params['groups']), params['search'],
+                    tuple((k, tuple(sorted(v))) for k, v in params['filters'].items()), include_titles)
+        with _recent_lock:
+            payload = _recent.get(view_key)
+            if payload is not None:
+                _recent.move_to_end(view_key)
+        if payload is not None:
+            cached = present(json.loads(payload), snapshot[0], params, include_titles, now)
+            if cached is not None:
+                return cached
+    catalog, errors, manifest, path = catalogs(root, params['platforms'], snapshot)
     # Retain global collision resolution before applying the actor's scope.
     catalog, ownership = scoped_ownership(path, manifest['version'], params['platforms'], catalog, params['end'])
     placeholders = ','.join('?' for _ in params['platforms'])
@@ -133,4 +156,12 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
     if attach_titles:
         for row in report['all_rows']:
             row.update(title_values.get(row['drama'], {'drama_english_name': '', 'drama_english_status': 'missing'}))
+    if view_key is not None and len(report['all_rows']) <= 1500:
+        payload = pack_report(report)
+        if len(payload) <= 2 * 1024 * 1024:
+            with _recent_lock:
+                _recent[view_key] = payload
+                _recent.move_to_end(view_key)
+                while len(_recent) > 12:
+                    _recent.popitem(last=False)
     return report

@@ -281,6 +281,37 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
     return report
 
 
+def build_options(app, actor, legacy=False):
+    from .warehouse_reader import configured_root, read_catalogs as warehouse_catalogs
+    catalog_reader = warehouse_catalogs if configured_root(app) else read_catalogs
+    catalogs, errors = catalog_reader(app, ["youtube"] if legacy else list(PLATFORMS))
+    result = options(catalogs, actor)
+    result["quality"] = {"platforms": {}}
+    metadata = getattr(errors, "source_metadata", {})
+    for platform in (["youtube"] if legacy else PLATFORMS):
+        sources = {}
+        for spec in PLATFORMS[platform]["sources"]:
+            key = source_key(platform, spec["site_id"])
+            failure = errors.get(key) or errors.get(platform, "")
+            collector = metadata.get(key, {})
+            state = "unavailable" if failure else collector.get("state", "available")
+            if collector.get("freshness") == "stale" and state in {"complete", "available", "ok"}:
+                state = "partial"
+            sources[spec["site_id"]] = dict(spec, source_key=key, state=state, error=failure,
+                                            collector=public_collector_metadata(collector))
+        states = [item["state"] for item in sources.values()]
+        state = ("available" if all(value in {"complete", "available", "ok"} for value in states)
+                 else "unavailable" if all(value == "unavailable" for value in states) else "partial")
+        result["quality"]["platforms"][platform] = dict(
+            label=PLATFORMS[platform]["label"], state=state, sources=sources,
+            error="；".join(dict.fromkeys(item["error"] for item in sources.values() if item["error"])))
+    if legacy:
+        result["options"]["platform"] = [{"value": "youtube", "label": "YouTube"}]
+        for row in result["options"]["channel"]:
+            row["value"] = row["value"].removeprefix("youtube:")
+    return result
+
+
 def dispatch(handler, parsed, app, *, legacy=False):
     def reply(status, value):
         try:
@@ -308,33 +339,17 @@ def dispatch(handler, parsed, app, *, legacy=False):
         if parsed.path.endswith("/options"):
             if query:
                 raise ReportError("筛选选项接口不接受参数")
-            from .warehouse_reader import configured_root, read_catalogs as warehouse_catalogs
-            catalog_reader = warehouse_catalogs if configured_root(app) else read_catalogs
-            catalogs, errors = catalog_reader(app, ["youtube"] if legacy else list(PLATFORMS))
-            result = options(catalogs, actor)
-            result["quality"] = {"platforms": {}}
-            metadata = getattr(errors, "source_metadata", {})
-            for platform in (["youtube"] if legacy else PLATFORMS):
-                sources = {}
-                for spec in PLATFORMS[platform]["sources"]:
-                    key = source_key(platform, spec["site_id"])
-                    failure = errors.get(key) or errors.get(platform, "")
-                    collector = metadata.get(key, {})
-                    state = "unavailable" if failure else collector.get("state", "available")
-                    if collector.get("freshness") == "stale" and state in {"complete", "available", "ok"}:
-                        state = "partial"
-                    sources[spec["site_id"]] = dict(spec, source_key=key, state=state, error=failure,
-                                                    collector=public_collector_metadata(collector))
-                states = [item["state"] for item in sources.values()]
-                state = ("available" if all(value in {"complete", "available", "ok"} for value in states)
-                         else "unavailable" if all(value == "unavailable" for value in states) else "partial")
-                result["quality"]["platforms"][platform] = dict(
-                    label=PLATFORMS[platform]["label"], state=state, sources=sources,
-                    error="；".join(dict.fromkeys(item["error"] for item in sources.values() if item["error"])))
-            if legacy:
-                result["options"]["platform"] = [{"value": "youtube", "label": "YouTube"}]
-                for row in result["options"]["channel"]:
-                    row["value"] = row["value"].removeprefix("youtube:")
+            if not legacy:
+                from .warehouse_reader import configured_root, current
+                from .prepared_views import read_options
+                root = configured_root(app)
+                if root:
+                    snapshot = app.get('SOCIAL_ANALYTICS_FROZEN_SNAPSHOT') or current(root)
+                    result = read_options(root, snapshot[0], actor)
+                    if result is not None:
+                        return reply(200, result)
+                    app = dict(app, SOCIAL_ANALYTICS_FROZEN_SNAPSHOT=snapshot)
+            result = build_options(app, actor, legacy)
             return reply(200, result)
         if legacy:
             if query.get("platform") and set(query["platform"]) != {"youtube"}:
