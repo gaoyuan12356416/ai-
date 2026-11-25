@@ -240,10 +240,15 @@ class CaptionTests(unittest.TestCase):
             store.enqueue(c, ready)
             store.enqueue(c, sibling)
             c.commit()
-            self.assertEqual([t["key"] for t in store.claim(c)[1]], [ready["key"]])
+            urgent_batch, rows = store.claim(c)
+            self.assertEqual([t["key"] for t in rows], [ready["key"]])
+            # The next worker can claim ordinary background work while an
+            # imminent task is already generating.
+            self.assertEqual(store.claim(c)[1][0]["key"], old["key"])
+            worker.generate_batch(c, urgent_batch, rows, lambda tasks, emit, usage: emit(self.item(ready)))
             row = store.claim(c)[1][0]
             self.assertEqual((row["key"],row["facts"]), (pool["key"],pool["facts"]))
-            self.assertEqual(store.claim(c)[1][0]["key"], old["key"])
+            self.assertEqual(store.claim(c)[1][0]["key"], sibling["key"])
             self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"ready"})["publish_priority"], 3)
             self.assertEqual(sources.fb_task("fa", {"id":6,"content_id":"q","status":"preparing"})["publish_priority"], 1)
 

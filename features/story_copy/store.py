@@ -205,18 +205,24 @@ def claim(c):
         c.commit()
         return None, []
     # Old deadlines from bulk runs must not outrank a video approaching upload.
+    # Keep one free worker responsive to imminent posts. While that batch is
+    # running, the other workers retain normal batching and throughput.
+    prefer_imminent = bool(gate) or not c.execute(
+        """SELECT 1 FROM cursors JOIN batches ON batches.id=cursors.value
+        WHERE cursors.name='generation:imminent-batch' AND batches.finished IS NULL"""
+    ).fetchone()
     priority = """CASE WHEN json_extract(payload,'$.publish_at')<=?
                   THEN coalesce(json_extract(payload,'$.publish_priority'),0) ELSE 0 END"""
     near = now + NEAR_PUBLISH_SECONDS
     row = c.execute(
-        f"""SELECT product,content,lang,max({priority}) AS priority,
+        f"""SELECT product,content,lang,max({priority}) * ? AS priority,
         min(coalesce(json_extract(payload,'$.publish_at'),created)) AS due
         FROM jobs WHERE state='pending' GROUP BY product,content,lang
         HAVING count(*)>=100 OR min(created)<=?
           OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
           OR min(json_extract(payload,'$.publish_at'))<=?
         ORDER BY priority DESC,due,min(created),product,content,lang LIMIT 1""",
-        (near, now - 60, near),
+        (near, prefer_imminent, now - 60, near),
     ).fetchone()
     # Carry failures into the next ready queue, even if its drama/language differs.
     # With no new work, retry after one normal collection window instead of waiting forever.
@@ -251,6 +257,8 @@ def claim(c):
     ).lastrowid
     if gate:
         c.execute("UPDATE provider_backoff SET probe_batch=? WHERE id=1", (batch,))
+    if row and row["priority"]:
+        c.execute("INSERT OR REPLACE INTO cursors(name,value) VALUES('generation:imminent-batch',?)", (batch,))
     c.executemany(
         "UPDATE jobs SET state='generating',batch=? WHERE key=?",
         [(batch, r["key"]) for r in rows],

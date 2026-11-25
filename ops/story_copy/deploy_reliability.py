@@ -72,7 +72,7 @@ if __name__ == "__main__":
     elif args.action == "prepare-central-update":
         previous = d.CENTRAL.resolve(strict=True).parent
         previous_record = json.loads((previous / "record.json").read_text())
-        if previous_record["commit"] != "8d67503190a943ddc83664f1d58375a00e2f3018":
+        if previous_record["commit"] != d.read("git", "-C", SOURCE, "rev-parse", "HEAD^"):
             raise RuntimeError("inspect the newer central release before applying this update")
         central.FILES = ("features/story_copy/sources.py", "features/story_copy/store.py")
         central.prepare(folder, base=previous_record["commit"])
@@ -83,9 +83,12 @@ if __name__ == "__main__":
     elif args.action == "apply-fb":
         switch_fb(folder / "fb", False)
     else:
-        record = json.loads((folder / "record.json").read_text())
-        previous = Path(record.get("previous_reliability_release", folder))
-        if previous != folder and d.CENTRAL.resolve() == Path(record["candidate"]):
-            central.switch(folder, True)
-        switch_fb(previous / "fb", True)
-        central.switch(previous, True)
+        current = folder
+        record = json.loads((current / "record.json").read_text())
+        while "previous_reliability_release" in record:
+            if d.CENTRAL.resolve() == Path(record["candidate"]):
+                central.switch(current, True)
+            current = Path(record["previous_reliability_release"])
+            record = json.loads((current / "record.json").read_text())
+        switch_fb(current / "fb", True)
+        central.switch(current, True)
