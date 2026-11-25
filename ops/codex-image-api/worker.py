@@ -12,6 +12,7 @@ import subprocess
 import time
 
 from common import Config, CosUploader, atomic_json, checked_image, download_image, sha256
+from runner import PRIMARY_RETRIES
 from store import ApiError, Store
 
 
@@ -67,7 +68,7 @@ class Worker:
                 if source.is_file():
                     shutil.copyfile(source, home / filename)
         atomic_json(directory / "auth-base.json", {"sha256": hashlib.sha256(auth).hexdigest()})
-        atomic_json(run / "input.json", {"prompt": row["prompt"], "model": self.config.model, "reasoning": self.config.reasoning, "timeout": self.config.timeout, "codex_bin": self.config.codex_bin})
+        atomic_json(run / "input.json", {"prompt": row["prompt"], "model": self.config.model, "fallback_model": self.config.fallback_model, "reasoning": self.config.reasoning, "timeout": self.config.timeout, "codex_bin": self.config.codex_bin})
         for path in [run] + list(run.rglob("*")):
             os.chown(path, user.pw_uid, user.pw_gid)
             os.chmod(path, 0o700 if path.is_dir() else 0o600)
@@ -86,7 +87,7 @@ class Worker:
                # The pre-created task is 0700; runner.py sets 0077 before any writes.
                "--property=WorkingDirectory=" + str(run), "--property=UMask=0022",
                "--property=MemoryMax=3G", "--property=TasksMax=128",
-               "--property=RuntimeMaxSec=" + str(self.config.timeout + 90),
+               "--property=RuntimeMaxSec=" + str(self.config.timeout * (PRIMARY_RETRIES + 2) + 90),
                "--property=StandardOutput=null", "--property=StandardError=journal",
                "/usr/bin/python3", runner, str(run)]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
@@ -130,9 +131,10 @@ class Worker:
         except (ValueError, OSError):
             raise ApiError("invalid_output", "生图回执无法解析，未自动重新生成")
         if not receipt.get("ok"):
-            allowed = {"generation_failed", "generation_timeout", "generation_no_image"}
+            allowed = {"generation_failed", "generation_timeout", "generation_no_image", "generation_rate_limited"}
             code = receipt.get("code") if receipt.get("code") in allowed else "generation_failed"
-            messages = {"generation_failed": "Codex 生图失败", "generation_timeout": "Codex 生图超时", "generation_no_image": "Codex 未返回真实生图产物"}
+            messages = {"generation_rate_limited": "生图模型限流（HTTP 429），本张图片尝试已结束",
+                        "generation_failed": "Codex 生图失败", "generation_timeout": "Codex 生图超时", "generation_no_image": "Codex 未返回真实生图产物"}
             raise ApiError(code, messages[code])
         generated_root = (run / ".codex" / "generated_images").resolve()
         if not isinstance(receipt.get("generated_path"), str):

@@ -58,6 +58,12 @@ A generation attempt is committed before its unit is launched. On restart, the
 worker inspects that unit rather than spawning again. Each child runs outside the
 worker service cgroup and survives a worker restart. A dead process without a
 receipt is a visible failure; completed local images resume only the upload step.
+Ordinary generation failures get up to three more attempts on the primary model
+after 2, 4 and 8 seconds. A model HTTP 429 switches that image straight to
+`IMAGE_API_FALLBACK_MODEL` (default `gpt-6-sol`) for one final attempt. Each
+invocation uses the same checked reference, and a verified generated file ends
+retries immediately. Per-invocation logs and the final model/outcome sequence
+are kept in the original image unit's work directory.
 COS keys are deterministic. HEAD checksum/size verification reconciles an unknown
 PUT result before considering another upload. Successful outputs are never remade.
 

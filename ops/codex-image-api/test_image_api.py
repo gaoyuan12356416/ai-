@@ -313,6 +313,66 @@ class UploadTests(unittest.TestCase):
         self.assertTrue(result.endswith("ig_test/0000-0000.png"))
 
 
+class GenerationRetryTests(unittest.TestCase):
+    def run_sequence(self, outcomes):
+        from runner import generate
+        from PIL import Image
+        models = []
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp).resolve()
+            output = work / ".codex" / "generated_images" / "image.png"
+            output.parent.mkdir(parents=True)
+            spec = {"model": "primary", "fallback_model": "backup", "timeout": 5,
+                    "codex_bin": "codex", "reasoning": "low", "prompt": "429 Too Many Requests"}
+
+            def start(cmd, **kw):
+                models.append(cmd[cmd.index("-m") + 1])
+                case = outcomes[len(models) - 1]
+                if case in ("limited", "success_after_error"):
+                    event = {"type": "turn.failed", "error": {"message": "exceeded retry limit, last status: 429 Too Many Requests"}}
+                else:
+                    # The user's own text must never trigger failover.
+                    event = {"type": "item.completed", "item": {"text": spec["prompt"]}}
+                kw["stdout"].write((json.dumps(event) + "\n").encode())
+                if case in ("success", "success_after_error"):
+                    Image.new("RGB", (32, 32)).save(output)
+                elif case == "invalid_output":
+                    output.write_bytes(b"partial")
+                return types.SimpleNamespace(communicate=lambda *a, **k: None, returncode=int(case != "no_image"))
+
+            with patch("runner.time.sleep") as sleep, patch("runner.subprocess.Popen", side_effect=start):
+                result = generate(work, spec)
+            self.assertEqual([a["model"] for a in result["attempts"]], models)
+            self.assertEqual(len(list(work.rglob("events.jsonl"))), len(models))
+            return models, result, [args[0] for args, _ in sleep.call_args_list]
+
+    def test_ordinary_failure_retries_three_times_then_stops(self):
+        models, result, delays = self.run_sequence(["failed", "no_image", "invalid_output", "failed"])
+        self.assertEqual(models, ["primary"] * 4)
+        self.assertEqual(result["code"], "generation_failed")
+        self.assertEqual(delays, [2, 4, 8])
+
+    def test_429_switches_immediately_and_backup_is_terminal(self):
+        for last in ("failed", "limited", "success"):
+            models, result, delays = self.run_sequence(["limited", last])
+            self.assertEqual(models, ["primary", "backup"])
+            self.assertEqual(result["ok"], last == "success")
+            self.assertEqual(delays, [])
+            if last == "limited":
+                self.assertEqual(result["code"], "generation_rate_limited")
+
+    def test_last_primary_attempt_can_still_switch(self):
+        models, result, _ = self.run_sequence(["failed"] * 3 + ["limited", "success"])
+        self.assertEqual(models, ["primary"] * 4 + ["backup"])
+        self.assertTrue(result["ok"])
+
+    def test_valid_output_stops_even_on_provider_error(self):
+        models, result, _ = self.run_sequence(["invalid_output", "success_after_error"])
+        self.assertEqual(models, ["primary"] * 2)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["generated_path"].endswith("image.png"))
+
+
 @unittest.skipUnless(os.name == "posix", "systemd worker requires Linux")
 class RecoveryTests(unittest.TestCase):
     def test_alive_unit_is_never_relaunched(self):

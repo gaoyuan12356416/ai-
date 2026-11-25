@@ -33,6 +33,7 @@ class Config:
         self.port = int(os.environ.get("IMAGE_API_PORT", "18853"))
         self.codex_bin = os.environ.get("IMAGE_API_CODEX_BIN", "/usr/bin/codex")
         self.model = os.environ.get("IMAGE_API_MODEL", "gpt-6.1-sol")
+        self.fallback_model = os.environ.get("IMAGE_API_FALLBACK_MODEL") or "gpt-6-sol"
         self.reasoning = os.environ.get("IMAGE_API_REASONING", "low")
         self.timeout = int(os.environ.get("IMAGE_API_GENERATION_TIMEOUT", "900"))
         self.source_home = Path(os.environ.get("IMAGE_API_CODEX_SOURCE_HOME", "/root/.codex"))
