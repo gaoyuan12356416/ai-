@@ -304,6 +304,42 @@ class CaptionTests(unittest.TestCase):
             self.assertIn(task["key"], logged.output[0])
             self.assertIn("database is locked", logged.output[0])
 
+    def test_deployment_verifies_terminal_prepare_before_handoff(self):
+        from ops.story_copy.deploy_reliability import settled_before_handoff
+        with sqlite3.connect(":memory:") as c:
+            c.executescript("""
+                ATTACH ':memory:' AS dispatch;
+                CREATE TABLE fb_auto_task(id INTEGER PRIMARY KEY,status,lease_owner,unknown_outcome,graph_post_id,prepared_at_utc);
+                CREATE TABLE pipeline_fb_claim(source_key);
+                CREATE TABLE fb_auto_publish_attempt(task_id);
+                CREATE TABLE dispatch.pipeline_job(id,source_id,source_key,channel,family,stage,status,error_code,
+                    finished_at,updated_at,lease_expires_at,external_intent,canonical_receipt,node_id,generation);
+                CREATE TABLE dispatch.pipeline_event(job_id,event_type,details_json);
+                CREATE TABLE dispatch.pipeline_operation(job_id);
+                CREATE TABLE dispatch.pipeline_receipt(job_id);
+                INSERT INTO fb_auto_task VALUES(18,'preparing','pipeline:node:1',0,'','');
+                INSERT INTO dispatch.pipeline_job VALUES(73,18,'fb:auto:18','fb','auto','prepare','failed',
+                    'fb_auto_internal_error','2000-01-01','2000-01-01','2000-01-02',0,'','node',1);
+                INSERT INTO dispatch.pipeline_event VALUES(73,'failed','{"code":"fb_auto_internal_error","unknown":false}');
+            """)
+            self.assertTrue(settled_before_handoff(c,73))
+            for sql in ("INSERT INTO pipeline_fb_claim VALUES('fb:auto:18')",
+                        "INSERT INTO fb_auto_publish_attempt VALUES(18)",
+                        "INSERT INTO dispatch.pipeline_operation VALUES(73)",
+                        "INSERT INTO dispatch.pipeline_receipt VALUES(73)",
+                        "UPDATE dispatch.pipeline_job SET external_intent=1",
+                        "UPDATE dispatch.pipeline_job SET stage='publish'",
+                        "UPDATE dispatch.pipeline_event SET details_json='{}'",
+                        "UPDATE fb_auto_task SET status='running'",
+                        "UPDATE fb_auto_task SET unknown_outcome=1",
+                        "UPDATE fb_auto_task SET lease_owner='pipeline:node:2'"):
+                with self.subTest(sql=sql):
+                    c.execute("SAVEPOINT example")
+                    c.execute(sql)
+                    self.assertFalse(settled_before_handoff(c,73))
+                    c.execute("ROLLBACK TO example")
+                    c.execute("RELEASE example")
+
     def test_due_pool_and_ready_video_outrank_old_bulk(self):
         now = time.time()
         old = dict(self.task(1, "fa"), publish_at=now - 18000)

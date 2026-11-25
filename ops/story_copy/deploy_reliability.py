@@ -42,13 +42,42 @@ def prepare_fb(folder):
     d.atomic(folder / "manifest.json", json.dumps(info, indent=2).encode())
 
 
-def switch_fb(folder, reverse):
+def settled_before_handoff(c, job_id):
+    # The native reservation can precede a dispatch failure. The GPU only
+    # receives a descriptor after pipeline_fb_claim commits. All predicates
+    # must still hold when the FB controller rechecks after draining handlers.
+    return c.execute("""
+        SELECT 1 FROM dispatch.pipeline_job j JOIN fb_auto_task t ON t.id=j.source_id
+        WHERE j.id=? AND j.source_key='fb:auto:'||t.id AND j.channel='fb' AND j.family='auto'
+        AND j.stage='prepare' AND j.status='failed' AND j.error_code='fb_auto_internal_error'
+        AND j.finished_at=j.updated_at AND julianday(j.lease_expires_at)<julianday('now')
+        AND j.external_intent=0 AND coalesce(j.canonical_receipt,'')=''
+        AND t.status='preparing' AND t.lease_owner='pipeline:'||j.node_id||':'||j.generation
+        AND t.unknown_outcome=0 AND coalesce(t.graph_post_id,'')='' AND coalesce(t.prepared_at_utc,'')=''
+        AND EXISTS(SELECT 1 FROM dispatch.pipeline_event e WHERE e.job_id=j.id AND e.event_type='failed'
+                   AND json_extract(e.details_json,'$.unknown')=0 AND json_extract(e.details_json,'$.code')=j.error_code)
+        AND NOT EXISTS(SELECT 1 FROM dispatch.pipeline_job other WHERE other.source_key=j.source_key AND other.id<>j.id)
+        AND NOT EXISTS(SELECT 1 FROM pipeline_fb_claim n WHERE n.source_key=j.source_key)
+        AND NOT EXISTS(SELECT 1 FROM fb_auto_publish_attempt a WHERE a.task_id=t.id)
+        AND NOT EXISTS(SELECT 1 FROM dispatch.pipeline_operation o WHERE o.job_id=j.id)
+        AND NOT EXISTS(SELECT 1 FROM dispatch.pipeline_receipt r WHERE r.job_id=j.id)
+    """, (job_id,)).fetchone() is not None
+
+
+def switch_fb(folder, reverse, settled_prepare=None):
     info = json.loads((folder / "manifest.json").read_text())
     # Use the controller for the running FB base, including its native lease checks.
     sys.path.insert(0, info["source"])
     from scripts import deploy_hit_drama as release, deploy_fb_skipped_recheck as fb
     from scripts.deploy_fb_profile_priority import owner_active
-    fb.native_active = owner_active
+    def active():
+        count = owner_active()
+        if count != 1 or settled_prepare is None:
+            return count
+        with closing(sqlite3.connect(fb.FB_DB.as_uri() + "?mode=ro", uri=True)) as c:
+            c.execute("ATTACH DATABASE ? AS dispatch", (fb.DISPATCH_DB.as_uri() + "?mode=ro",))
+            return count - int(settled_before_handoff(c, settled_prepare))
+    fb.native_active = active
     if Path("/opt/fb-auto-post/current").resolve() != Path(info["previous" if reverse else "candidate"]):
         release.activate("fb", folder, reverse, defer_plan_read=False)
 
@@ -58,6 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=("prepare", "prepare-central-update", "apply-central", "apply-fb", "rollback"))
     parser.add_argument("folder", type=Path)
     parser.add_argument("--fb-release", type=Path, help="FB reader release when a separate central deployment followed it")
+    parser.add_argument("--settled-prepare", type=int, help="Verify one terminal dispatch before GPU handoff during FB activation")
     args = parser.parse_args()
     folder = args.folder.resolve()
     if (folder.parent != Path("/mnt/data-disk/story-copy-deploy") or not os.path.ismount("/mnt/data-disk")
@@ -85,7 +115,7 @@ if __name__ == "__main__":
     elif args.action == "apply-central":
         central.switch(folder, False)
     elif args.action == "apply-fb":
-        switch_fb(folder / "fb", False)
+        switch_fb(folder / "fb", False, args.settled_prepare)
     else:
         current = folder
         record = json.loads((current / "record.json").read_text())
