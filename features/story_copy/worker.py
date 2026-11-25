@@ -48,10 +48,6 @@ def generate_batch(c, batch, tasks, runner=generator.run):
     deferred = set()
     for chunk in generator.splits(ready) if ready else ():
         by_key = {t["key"]: t for t in chunk}
-        gate = c.execute("SELECT until_at,probe_batch FROM provider_backoff WHERE id=1").fetchone()
-        if gate and (gate["until_at"] > time.time() or gate["probe_batch"] != batch):
-            deferred.update(by_key)
-            continue
         submitted = set()
 
         def emit(item):
@@ -66,32 +62,63 @@ def generate_batch(c, batch, tasks, runner=generator.run):
             except (ValueError, TypeError) as exc:
                 errors[identity] = str(exc)[:120] or "invalid_output"
 
-        usage = {}
-        calls += 1
-        try:
-            runner(chunk, emit, usage)
-            if gate:
-                c.execute("DELETE FROM provider_backoff WHERE id=1 AND probe_batch=?", (batch,))
-                c.commit()
-            missed = "missing_model_row"
-        except Exception as exc:
-            detail = exc.details if isinstance(exc, generator.ProviderError) else {"exception": type(exc).__name__}
-            provider_errors.append(dict(keys=list(by_key), reason=str(exc) if isinstance(exc, generator.ProviderError) else "codex_generation_failed", details=detail))
-            LOG.warning("caption batch %s provider %s details=%s", batch, type(exc).__name__, store.dump(detail))
-            if isinstance(exc, generator.ProviderError) and exc.rate_limited:
-                until = store.record_rate_limit(c, batch, exc.retry_after)
-                LOG.warning("caption provider cooldown until=%.0f batch=%s", until, batch)
+        missed = "missing_model_row"
+        for model in (None, generator.CAPACITY_FALLBACK_MODEL):
+            gate = c.execute("SELECT until_at,probe_batch FROM provider_backoff WHERE id=1").fetchone()
+            if gate and (gate["until_at"] > time.time() or gate["probe_batch"] != batch):
                 deferred.update(by_key.keys() - submitted)
-            missed = (
-                str(exc)
-                if str(exc) in alerts.SERVICE_REASONS
-                else "codex_generation_failed"
-            )
+                break
+            request = chunk
+            if model:
+                # Receipts or streamed drafts can settle rows while the primary is running.
+                active = {r[0] for r in c.execute(
+                    """SELECT key FROM jobs WHERE key IN (SELECT value FROM json_each(?))
+                    AND batch=? AND state='generating' AND final IS NULL""",
+                    (store.dump(list(by_key)), batch),
+                )}
+                request = [t for t in chunk if t["key"] in active and t["key"] not in submitted]
+                if not request:
+                    break
+                fallback = dict(model=model, keys=[t["key"] for t in request], outcome="attempted")
+                primary_error["fallback"] = fallback
+                LOG.info("caption batch %s capacity fallback model=%s tasks=%s", batch, model, len(request))
+            usage = {}
+            calls += 1
+            try:
+                if model:
+                    runner(request, emit, usage, model=model)
+                    fallback.update(outcome="completed", observed_model=usage.get("model"))
+                else:
+                    runner(request, emit, usage)
+                if gate:
+                    c.execute("DELETE FROM provider_backoff WHERE id=1 AND probe_batch=?", (batch,))
+                    c.commit()
+                break
+            except Exception as exc:
+                is_provider = isinstance(exc, generator.ProviderError)
+                detail = exc.details if is_provider else {"exception": type(exc).__name__}
+                reason = str(exc) if is_provider else "codex_generation_failed"
+                error = dict(keys=[t["key"] for t in request], reason=reason, details=detail,
+                             model=usage.get("model") or model or "default")
+                provider_errors.append(error)
+                LOG.warning("caption batch %s provider model=%s details=%s", batch, error["model"], store.dump(detail))
+                if not model and is_provider and exc.at_capacity and usage.get("model") != generator.CAPACITY_FALLBACK_MODEL:
+                    primary_error = error
+                    continue
+                if model:
+                    fallback.update(outcome="failed", observed_model=usage.get("model"))
+                if is_provider and exc.rate_limited:
+                    until = store.record_rate_limit(c, batch, exc.retry_after)
+                    LOG.warning("caption provider cooldown until=%.0f batch=%s", until, batch)
+                    deferred.update(by_key.keys() - submitted)
+                missed = str(exc) if str(exc) in alerts.SERVICE_REASONS else "codex_generation_failed"
+                break
+            finally:
+                for i, k in enumerate(("inputTokens", "outputTokens")):
+                    if k in usage:
+                        tokens[i] = (tokens[i] or 0) + usage[k]
         for k in by_key.keys() - submitted:
             errors[k] = missed
-        for i, k in enumerate(("inputTokens", "outputTokens")):
-            if k in usage:
-                tokens[i] = (tokens[i] or 0) + usage[k]
     store.defer_provider_jobs(c, batch, deferred)
     failed = []
     for t in tasks:

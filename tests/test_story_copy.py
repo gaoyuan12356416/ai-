@@ -190,6 +190,88 @@ class CaptionTests(unittest.TestCase):
                 self.assertNotIn(secret, reason)
             self.assertEqual(c.execute("SELECT reason FROM jobs").fetchone()[0], "codex_generation_failed")
 
+    def test_capacity_fallback_only_sends_outstanding_unfrozen_rows(self):
+        tasks = [self.task(i) for i in (1, 2, 3)]
+        calls = []
+        with store.connection() as c:
+            for t in tasks:
+                store.enqueue(c, t)
+            c.commit()
+            batch, rows = store.claim(c)
+
+            def runner(request, emit, usage, *, model=None):
+                calls.append((model, [t["key"] for t in request]))
+                usage.update(model=model or "gpt-6.1-sol", inputTokens=10, outputTokens=5)
+                if model:
+                    emit(self.item(request[0]))
+                    return
+                emit(self.item(tasks[0]))
+                c.execute("UPDATE jobs SET state='legacy',final='frozen' WHERE key=?", (tasks[1]["key"],))
+                c.commit()
+                raise generator.ProviderError("codex_generation_failed", {"codexErrorInfo": "serverOverloaded"})
+
+            worker.generate_batch(c, batch, rows, runner)
+            self.assertEqual(calls, [(None, [t["key"] for t in rows]),
+                                     ("gpt-6-sol", [tasks[2]["key"]])])
+            result = c.execute("SELECT * FROM batches WHERE id=?", (batch,)).fetchone()
+            self.assertEqual((result["calls"], result["accepted"], result["input_tokens"], result["output_tokens"]),
+                             (2, 2, 20, 10))
+            fallback = json.loads(result["reason"])[0]["fallback"]
+            self.assertEqual((fallback["outcome"], fallback["observed_model"]), ("completed", "gpt-6-sol"))
+            self.assertEqual(c.execute("SELECT final FROM jobs WHERE key=?", (tasks[1]["key"],)).fetchone()[0], "frozen")
+
+    def test_secondary_capacity_failure_uses_normal_retry_and_does_not_recurse(self):
+        task = self.task(1)
+        models = []
+        def unavailable(request, emit, usage, *, model=None):
+            models.append(model)
+            raise generator.ProviderError("codex_generation_failed", {"message": "Selected model is at capacity."})
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, unavailable)
+            self.assertEqual(models, [None, "gpt-6-sol"])
+            self.assertEqual(c.execute("SELECT state FROM jobs").fetchone()[0], "retry_wait")
+            errors = json.loads(c.execute("SELECT reason FROM batches").fetchone()[0])
+            self.assertEqual(errors[0]["fallback"]["outcome"], "failed")
+            self.assertEqual(errors[1]["model"], "gpt-6-sol")
+
+    def test_fallback_429_enters_shared_backoff_without_consuming_retry(self):
+        task = self.task(1)
+        def limited(request, emit, usage, *, model=None):
+            error = {"message": "Selected model is at capacity."} if not model else {"httpStatusCode": 429}
+            raise generator.ProviderError("codex_generation_failed", error)
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, limited)
+            self.assertEqual(c.execute("SELECT calls FROM batches").fetchone()[0], 2)
+            self.assertEqual(c.execute("SELECT state FROM jobs").fetchone()[0], "pending")
+            self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 0)
+            self.assertTrue(c.execute("SELECT 1 FROM provider_backoff").fetchone())
+
+    def test_capacity_classifier_excludes_rate_limits_auth_and_generic_failures(self):
+        for raw in ({"code": 429, "codexErrorInfo": "serverOverloaded"},
+                    {"message": "exceeded retry limit, last status: 429 Too Many Requests"},
+                    {"message": "model not found"}, {"code": 401}, {"code": 503}):
+            self.assertFalse(generator.ProviderError("codex_generation_failed", raw).at_capacity)
+        for raw in ({"codexErrorInfo": {"serverOverloaded": {}}}, {"code": "server_overloaded"},
+                    {"message": "The selected model is currently at capacity."}):
+            self.assertTrue(generator.ProviderError("codex_generation_failed", raw).at_capacity)
+
+    def test_primary_already_on_backup_does_not_repeat_same_request(self):
+        def busy(request, emit, usage):
+            usage["model"] = "gpt-6-sol"
+            raise generator.ProviderError("codex_generation_failed", {"codexErrorInfo": "serverOverloaded"})
+        with store.connection() as c:
+            store.enqueue(c, self.task(1))
+            c.commit()
+            batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, busy)
+            self.assertEqual(c.execute("SELECT calls FROM batches").fetchone()[0], 1)
+
     def test_short_read_lock_and_persistent_lock(self):
         task = self.task(3, "fv")
         with store.connection() as c:

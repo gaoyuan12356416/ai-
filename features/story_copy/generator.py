@@ -13,6 +13,8 @@ import time
 from . import store
 from .model import click_prefix, group_key
 
+CAPACITY_FALLBACK_MODEL = "gpt-6-sol"
+
 
 def error_details(error, *, method="", status=""):
     """Keep useful provider diagnostics without credentials or arbitrary response fields."""
@@ -41,6 +43,13 @@ class ProviderError(RuntimeError):
             r'(?i)too many requests|(?:httpStatusCode["\s:]+|(?:http(?: status)?|status(?: code)?)[:=\s]+)429\b',
             summary,
         ))
+        info = structured.get("codexErrorInfo")
+        capacity_codes = list(info) if isinstance(info, dict) else [info]
+        capacity_codes.append(code)
+        self.at_capacity = not self.rate_limited and (
+            any(str(v).replace("_", "").lower() == "serveroverloaded" for v in capacity_codes)
+            or bool(re.search(r"\bmodel is (?:currently )?at capacity\b", self.details.get("message", ""), re.I))
+        )
         self.retry_after = 0
         if self.rate_limited:
             headers = structured.get("headers") or {}
@@ -171,11 +180,11 @@ class Lines:
         self.buffer = ""
 
 
-def run(rows, emit, usage):
-    run_request(INSTRUCTIONS, prompt(rows), emit, usage)
+def run(rows, emit, usage, *, model=None):
+    run_request(INSTRUCTIONS, prompt(rows), emit, usage, model=model)
 
 
-def run_request(instructions, request, emit, usage):
+def run_request(instructions, request, emit, usage, *, model=None):
     work = store.ROOT / "work"
     work.mkdir(exist_ok=True)
     cmd = [
@@ -264,6 +273,7 @@ def run_request(instructions, request, emit, usage):
             2,
             "thread/start",
             dict(
+                **({"model": model} if model else {}),
                 cwd=str(work),
                 approvalPolicy="never",
                 sandbox="read-only",
@@ -280,6 +290,9 @@ def run_request(instructions, request, emit, usage):
                 },
             ),
         )
+        usage["model"] = result.get("model")
+        if model and usage["model"] != model:
+            raise RuntimeError("caption_model_not_confirmed")
         thread = result["thread"]["id"]
         rpc(
             3,
