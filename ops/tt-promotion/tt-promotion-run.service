@@ -16,5 +16,7 @@ ExecStart=/usr/bin/python3 -B -m features.tt_promotion.publishing tick
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/mnt/data-disk/tt-promotion /mnt/data-disk/tt-auto-post-public
+# The conflict check needs the same SQLite WAL coordination as the channel list.
+ReadWritePaths=/mnt/data-disk/tt-promotion /mnt/data-disk/tt-auto-post-public /mnt/data-disk/tt-auto-post-publisher
+ReadOnlyPaths=/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3
 UMask=0027
