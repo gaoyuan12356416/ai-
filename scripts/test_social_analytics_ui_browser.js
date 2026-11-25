@@ -341,4 +341,5 @@ async function main() {
     await new Promise(resolve => server.close(resolve));
   }
 }
-main().catch(error => { console.error(error.stack); process.exitCode = 1; });
+module.exports = { fixtureOptions, report };
+if (require.main === module) main().catch(error => { console.error(error.stack); process.exitCode = 1; });
