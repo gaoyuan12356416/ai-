@@ -304,8 +304,7 @@ def snapshots(repo, config, scopes):
     metrics = repo.metric_store.load_metric_window(product=config['metric_product'],
                                                    platform=config['metric_platform'], dates=dates)
     from .planning_catalog import open_for_plan
-    with ExitStack() as stack:
-        pool = stack.enter_context(ThreadPoolExecutor(max_workers=2))
+    with ExitStack() as stack, ThreadPoolExecutor(max_workers=2) as pool:
         cat = Catalog(repo, config, scopes, now, pool)
         cat.local = open_for_plan(config, now)
         if cat.local:

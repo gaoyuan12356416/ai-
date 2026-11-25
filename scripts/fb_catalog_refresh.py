@@ -196,7 +196,8 @@ def main():
                     ON t.id=d.template_id JOIN fb_auto_template_version v ON v.template_id=t.id AND v.version=d.template_version
                     WHERE d.status IN ('pending','preparing') AND t.status='enabled'
                     AND json_extract(v.config_json,'$.drama_launch_window_days')=0
-                    AND json_extract(v.config_json,'$.app_id')='1479'""").fetchone()[0]
+                    AND CAST(json_extract(v.config_json,'$.app_id') AS TEXT)='1479'
+                    AND json_extract(v.config_json,'$.material_data_source')=6""").fetchone()[0]
             evening=time.localtime(now).tm_hour==23 and time.localtime(now).tm_min>=5 and now-previous>7200
             if not evening and (not due or (int(datetime.fromisoformat(due).timestamp())<=previous and now-previous<7200)):
                 return
