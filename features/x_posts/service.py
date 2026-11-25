@@ -16515,6 +16515,13 @@ class XPostStore:
                     post_text=x_final(conn,row,post_text,short_url,self.db_path,story_product_url)
                 except Exception as story_error:
                     __import__('logging').getLogger(__name__).warning('story_copy.fallback %s',type(story_error).__name__)
+                if (self.db_path.resolve() == Path("/mnt/data-disk/x-tag-publisher/posts.sqlite3")
+                        and not (row["long_url"] and row["short_url"])):
+                    from features.x_tag_publish.caption_gate import caption_ready, enabled_for
+                    if not caption_ready(conn, row["queue_id"], post_text, enabled_for):
+                        # Roll back the speculative fallback receipt before the worker can observe it.
+                        conn.rollback()
+                        raise XPostError("x_post_schedule_not_due", "等待 AI 文案就绪，保留原任务稍后发布", 409)
                 conn.execute(
                     "UPDATE x_post_publish_log SET long_url=?,short_url=?,post_text=?,updated_at=? WHERE id=?",
                     (long_url, short_url, post_text, timestamp, log_id),
