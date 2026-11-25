@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 from features.youtube_analytics.titles import enrich
+from .report import effect_sites
 from .adapters import PLATFORMS, read_catalogs, source_key, source_site
 from .report import (ReportError, csv_export, options, parameters, summarize, validate_metrics,
                      public_collector_metadata)
@@ -66,13 +67,9 @@ def query_rows(app, statement, max_rows=1001):
     timeout = min(statement_seconds + 17, app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")) - time.monotonic())
     if timeout < 1:
         raise ReportError("日报采集时间预算已用完", 503)
-    started = time.monotonic()
     try:
-        command = ["/usr/bin/mysql"]
-        if app.get("SOCIAL_ANALYTICS_MYSQL_COMPRESS"):
-            command.append("--compress")
-        result = subprocess.run(command + [
-            "-h", "101.32.56.53", "-P", "63350",
+        result = subprocess.run([
+            "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
             "-u", str(app["ADMIN_MAPPING_MYSQL_USER"]), "--connect-timeout=3",
             "--default-character-set=utf8mb4", "--skip-reconnect", "-N", "-B", "-r"],
             input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=timeout)
@@ -82,12 +79,8 @@ def query_rows(app, statement, max_rows=1001):
                 logger.warning("social_effect_query_timeout query=%s mysql_code=3024", query_digest)
                 raise ReportError("效果查询超时（MySQL 3024）；本次不按零统计", 503)
             mysql_error = re.search(r"ERROR (\d+)", result.stderr)
-            gate_error = re.search(r"SQL_GATE_(EXECUTION_TIMEOUT|DAEMON_LOST|CHILD_CLEANUP_FAILED)", result.stderr)
-            logger.warning("social_effect_query_failed query=%s returncode=%s mysql_code=%s gate=%s elapsed=%.3f",
-                           query_digest, result.returncode, mysql_error.group(1) if mysql_error else "none",
-                           gate_error.group(1) if gate_error else "none", time.monotonic() - started)
-            if gate_error and gate_error.group(1) == "EXECUTION_TIMEOUT":
-                raise ReportError("效果查询执行超时（SQL Gate）；本次不按零统计", 503)
+            logger.warning("social_effect_query_failed query=%s returncode=%s mysql_code=%s",
+                           query_digest, result.returncode, mysql_error.group(1) if mysql_error else "none")
             if re.search(r"wait_timeout|queue_full|queue_timeout", result.stderr, re.I):
                 raise ReportError("效果查询排队超时，请稍后重试；本次不按零统计", 503)
             raise ValueError("readonly_query_failed")
@@ -158,7 +151,7 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
     from .backend_scope import eligible, facebook_source
     allowed = None if catalog is None else sorted({
         (str(row["key"][0]), row["effect_source"]["adset_id"], row["effect_source"]["ad_id"])
-        for row in catalog if row["platform"] == "facebook" and row["site_id"] == site
+        for row in catalog if row["platform"] == "facebook" and site in effect_sites(row)
         and row.get("effect_source") and eligible(row, end) and not row.get("excluded")})
     fingerprint = hashlib.sha256(json.dumps(allowed, separators=(",", ":")).encode()).hexdigest()
     key = (start, end, "facebook_source_ids_v2", source_site("facebook", site), fingerprint)
@@ -179,6 +172,9 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
 def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
                  catalog_snapshot=None):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
+    from .warehouse_reader import configured_root, build_report as warehouse_report
+    if ai_backend_only and actor.get('_system_report') is not True and configured_root(app):
+        return warehouse_report(app, actor, query, include_titles=include_titles, export=export)
     params = parameters(query)
     # Content provenance is independent of permission scope. HTTP keeps the
     # authenticated tenant/owner actor; only scheduled collection is global.
@@ -297,7 +293,9 @@ def dispatch(handler, parsed, app, *, legacy=False):
         if parsed.path.endswith("/options"):
             if query:
                 raise ReportError("筛选选项接口不接受参数")
-            catalogs, errors = read_catalogs(app, ["youtube"] if legacy else list(PLATFORMS))
+            from .warehouse_reader import configured_root, read_catalogs as warehouse_catalogs
+            catalog_reader = warehouse_catalogs if configured_root(app) else read_catalogs
+            catalogs, errors = catalog_reader(app, ["youtube"] if legacy else list(PLATFORMS))
             result = options(catalogs, actor)
             result["quality"] = {"platforms": {}}
             metadata = getattr(errors, "source_metadata", {})
