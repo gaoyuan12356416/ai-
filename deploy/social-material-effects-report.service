@@ -1,0 +1,17 @@
+[Unit]
+Description=X and Facebook material performance report
+RequiresMountsFor=/mnt/data-disk
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/social-material-effects/current
+ExecStart=/usr/bin/python3 -B -m features.social_material_effects.api
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

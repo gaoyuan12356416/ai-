@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>X 素材效果 · 数据报表</title>
+  <title>社媒素材效果 · 数据报表</title>
   <link rel="stylesheet" href="/youtube-publish.css?v=20260917-player-badges-v1">
   <link rel="stylesheet" href="/ui-topbar.css?v=20260903-1">
   <link rel="stylesheet" href="/social-analytics.css?v=20261020-facebook-v2">
@@ -17,7 +17,7 @@
     </aside>
     <main class="main analytics-main">
       <header class="topbar">
-        <div><h1>X 素材效果</h1><p>按素材汇总 X 全部账号的累计表现，点击素材查看帖子明细。</p></div>
+        <div><h1>社媒素材效果</h1><p>按渠道查看 X 和 Facebook 的素材表现，点击素材查看帖子明细。</p></div>
         <div class="toolbar">
           <div class="user-card" id="userCard"></div>
           <button type="button" class="btn btn-secondary" id="authButton">登录</button>
@@ -26,6 +26,7 @@
       </header>
 
       <form id="filters" class="analytics-panel filter-panel effects-filters">
+        <label>发布渠道<select name="channel"><option value="all">全部渠道</option><option value="x">X</option><option value="facebook">Facebook</option></select></label>
         <label>素材／剧目<input name="q" type="search" placeholder="ID 或名称"></label>
         <label>产品<input name="product" placeholder="全部产品" size="14"></label>
         <label>语言<input name="language" placeholder="全部语言" size="10"></label>
@@ -35,7 +36,7 @@
         <button class="btn btn-primary" type="submit">查询</button>
         <button class="btn btn-secondary" type="reset">重置</button>
       </form>
-      <p class="scope-strip">按北京时间筛选帖子发布日期。指标为所选帖子的最新累计值。浏览量为曝光次数，分享量为转发与引用之和，收入截止日期采用 UTC。</p>
+      <p class="scope-strip">按北京时间筛选帖子发布日期。指标为所选帖子的最新累计值。X 浏览为曝光，分享为转发加引用。Facebook 浏览为媒体浏览，分享取自帖子。收入按完整 UTC 日期的可归因金额统计。</p>
       <div id="notice" class="analytics-message warning hidden" role="status" aria-live="polite"></div>
       <div class="kpi-grid effects-summary" id="summary"></div>
       <section class="analytics-panel" aria-label="素材效果明细">
@@ -43,6 +44,7 @@
         <div class="analytics-table-scroll" tabindex="0" aria-label="素材效果表格">
           <table class="analytics-table">
             <thead><tr>
+              <th scope="col" class="plain-heading">渠道</th>
               <th scope="col" class="plain-heading">素材／剧目</th>
               <th scope="col"><button type="button" data-sort="post_count">发布数</button></th>
               <th scope="col"><button type="button" data-sort="account_count">账号数</button></th>
@@ -68,8 +70,8 @@
       </dialog>
     </main>
   </div>
-  <script src="/quick-nav.js?v=43969bd46e10"></script>
+  <script src="/quick-nav.js?v=20261126-material-channels"></script>
   <script src="/ui-topbar.js?v=db2d3427364e"></script>
-  <script src="/x-material-effects.js?v=95c878f62d83"></script>
+  <script src="/x-material-effects.js?v=20261126-channels1"></script>
 </body>
 </html>

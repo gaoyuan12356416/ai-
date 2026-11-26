@@ -162,6 +162,7 @@ def selector_rules(
             "material_window_days": config.get("material_window_days"),
             "platform": config.get("platform", 0),
             "drama": {
+                "effect_channel": drama.get("effect_channel", "x"),
                 "x_effect": {m: {"min": drama.get("x_"+m+"_min"), "max": drama.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
                 "spend": {
                     "min": drama.get("spend_min"),
@@ -182,6 +183,7 @@ def selector_rules(
                 "cooldown_days": config.get("cooldown_days", 0),
             },
             "material": {
+                "effect_channel": material.get("effect_channel", "x"),
                 "x_effect": {m: {"min": material.get("x_"+m+"_min"), "max": material.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
                 "spend": {
                     "min": material.get("spend_min"),

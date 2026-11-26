@@ -16,13 +16,15 @@
   };
 
   function range(prefix) {
+    const level = prefix === "d" ? "drama" : "material";
     return {
+      ...window.XEffectFields.read(level),
       spend_min: ui.byId(prefix + "SpendMin").value || null,
       spend_max: ui.byId(prefix + "SpendMax").value || null,
       roas_min: ui.byId(prefix + "RoasMin").value || null,
       roas_max: ui.byId(prefix + "RoasMax").value || null,
-      sort_by: ui.byId("sortBy").value,
-      sort_direction: ui.byId("sortDirection").value,
+      sort_by: ui.byId(level+"SortBy").value,
+      sort_direction: ui.byId(level+"SortDirection").value,
     };
   }
 
@@ -152,8 +154,12 @@
     const materialRule = config.material_rule || {};
     ui.byId("durationMin").value = Number(materialRule.duration_min_seconds ?? 1);
     ui.byId("durationMax").value = Number(materialRule.duration_max_seconds ?? 600);
-    ui.byId("sortBy").value = materialRule.sort_by || "roas";
-    ui.byId("sortDirection").value = materialRule.sort_direction || "desc";
+    for (const level of ["drama", "material"]) {
+      const rule = config[level+"_rule"] || {};
+      ui.byId(level+"SortBy").value = rule.sort_by || "roas";
+      ui.byId(level+"SortDirection").value = rule.sort_direction || "desc";
+      window.XEffectFields.fill(level,rule);
+    }
     const schedule = config.schedule || {};
     ui.byId("scheduleMode").value = schedule.mode || "fixed";
     ui.byId("fixedTimes").value = (schedule.times || []).join(",") || "10:30";

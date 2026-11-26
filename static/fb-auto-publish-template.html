@@ -146,12 +146,21 @@
               <div class="range-grid"><input id="durationMin" type="number" min="0" value="1" /><input id="durationMax" type="number" min="1" value="600" /></div>
             </div>
             <div class="field">
-              <label>素材排序</label>
+              <label>短剧排序</label>
               <div class="range-grid">
-                <select id="sortBy"><option value="roas">ROAS</option><option value="spend">消耗</option></select>
-                <select id="sortDirection"><option value="desc">降序</option><option value="asc">升序</option></select>
+                <select id="dramaSortBy"><option value="roas">ROAS</option><option value="spend">消耗</option></select>
+                <select id="dramaSortDirection"><option value="desc">降序</option><option value="asc">升序</option></select>
               </div>
             </div>
+            <div class="field">
+              <label>素材排序</label>
+              <div class="range-grid">
+                <select id="materialSortBy"><option value="roas">ROAS</option><option value="spend">消耗</option></select>
+                <select id="materialSortDirection"><option value="desc">降序</option><option value="asc">升序</option></select>
+              </div>
+            </div>
+            <div class="field wide" id="dramaSocialFields"></div>
+            <div class="field wide" id="materialSocialFields"></div>
             <div class="field">
               <label for="scheduleMode">发布时间模式</label>
               <select id="scheduleMode"><option value="fixed">固定时间</option><option value="random">每日随机</option></select>
@@ -197,10 +206,11 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=43969bd46e10"></script>
+  <script src="/quick-nav.js?v=20261126-material-channels"></script>
   <script src="/fb-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/fb-auto-publish-template.js?v=20261123-edit1"></script>
+  <script src="/x-effect-fields.js?v=20261126-channels1"></script>
+  <script src="/fb-auto-publish-template.js?v=20261126-channels1"></script>
 </body>
 </html>

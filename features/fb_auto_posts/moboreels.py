@@ -156,6 +156,8 @@ def candidate_snapshot(repo, config):
     page_size,cursor,page_count=1000,0,0
     limit=max(1,min(int(config.get("_candidate_limit",getattr(repo,"candidate_limit",5000))),getattr(repo,"candidate_limit",5000)))
     deadline=repo.monotonic_fn()+repo.catalog_deadline_seconds
+    from features.social_material_effects.selection import facebook_rules
+    social = facebook_rules(config,language,'moboreels')
     candidates=[]
     while True:
         if repo.monotonic_fn()>=deadline or page_count>=repo.catalog_max_pages:
@@ -183,7 +185,10 @@ def candidate_snapshot(repo, config):
             duration=Decimal(str(row.get("video_duration") or 0))
             if not url or not duration.is_finite() or not Decimal(str(rule["duration_min_seconds"]))<=duration<=Decimal(str(rule["duration_max_seconds"])):
                 continue
-            values=dict(material_id=mid,content_id=str(row["content_id"]),media_url=url,
+            cid = str(row['content_id'])
+            if not social.matches('drama',cid) or not social.matches('material',cid,mid):
+                continue
+            values=dict(social_effect=social.audit(cid,mid),material_id=mid,content_id=str(row["content_id"]),media_url=url,
                 material_name=str(row.get("material_name") or ""),drama_name=str(row.get("drama_name") or ""),
                 language=language,duration_seconds=duration,material_spend=None,material_roas=None,
                 drama_spend=None,drama_roas=None,resource_type_v2="moboreels",
@@ -193,4 +198,7 @@ def candidate_snapshot(repo, config):
             candidates.append(MaterialCandidate(**{key:value for key,value in values.items() if key in MaterialCandidate.__dataclass_fields__}))
         if len(rows)<page_size:
             break
+    for level in ('material','drama'):
+        if social.sorts(level):
+            candidates.sort(key=lambda item:social.rank(level,item.content_id,item.material_id))
     return CandidateSnapshot(tuple(candidates[:limit]),(),())

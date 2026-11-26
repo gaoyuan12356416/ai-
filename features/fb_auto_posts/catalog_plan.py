@@ -326,7 +326,10 @@ def snapshots(repo, config, scopes):
         del raw
         limit = min(repo.candidate_limit, config.get('_candidate_limit', repo.candidate_limit))
         per_drama = min(limit, 20) if config.get('drama_cooldown_hours') else limit
-        scores = {None: rank(zero, rule)}
+        from features.social_material_effects.selection import facebook_rules
+        social_by_lang = {lang:facebook_rules(config,lang) for lang in cat.languages}
+        social_material_sort = rule['sort_by'].startswith('x_')
+        scores = {None:(True,0) if social_material_sort else rank(zero,rule)}
         eligible_zero = matches(zero, rule)
         # Material metrics are keyed by both drama and material. Numeric IDs of
         # the fetched index are globally unique, including when an old metric
@@ -334,21 +337,30 @@ def snapshots(repo, config, scopes):
         history = metrics.by_material
         scope_groups = defaultdict(list)
         for (lang, cid), mids in by_group.items():
+            social = social_by_lang[lang]
+            if not social.matches('drama',cid):
+                continue
             eligible = []
             for mid in mids:
+                if social.rules and not social.matches('material',cid,mid):
+                    continue
                 totals = history.get((cid, str(mid)))
                 if totals is None:
                     if eligible_zero:
                         eligible.append(mid)
                 elif matches(totals, rule):
-                    scores[mid] = rank(totals, rule)
+                    if not social_material_sort:
+                        scores[mid] = rank(totals,rule)
                     eligible.append(mid)
             if not eligible:
                 continue
+            if social_material_sort:
+                scores.update((mid,social.rank('material',cid,mid)) for mid in eligible)
             eligible.sort(key=lambda mid: (scores.get(mid, scores[None]), mid))
             classification = classes.get((cid, profile_language(lang)), {})
             bucket = (classification.get('audience', 'unmarked'), tuple(sorted(classification.get('themes') or [])))
-            group = (cid, bucket, rank(metrics.by_drama.get(cid, zero), drama_rule), eligible)
+            drama_rank = social.rank('drama',cid) if social.sorts('drama') else rank(metrics.by_drama.get(cid,zero),drama_rule)
+            group = (cid,bucket,drama_rank,eligible)
             if (lang, False) in scopes:
                 scope_groups[lang, False].append(group)
             if (lang, True) in scopes and descriptions.get((cid, lang)):
@@ -375,7 +387,7 @@ def snapshots(repo, config, scopes):
                         loaded[mid] = MaterialCandidate(str(mid), cid, url, str(row['name'] or '')[:500],
                             str(fact['name'] or '')[:500], lang, _decimal(row['video_duration']), mat.spend, mat.roas,
                             drama.spend, drama.roas, str(fact['resource_type_v2'] or ''), descriptions.get((cid, lang), ''),
-                            str(row['tag_name'] or '').strip()[:255], int(fact['deploy_time']))
+                            str(row['tag_name'] or '').strip()[:255], int(fact['deploy_time']),social_by_lang[lang].audit(cid,mid))
                         continue
                 blocked.add(mid)
             if all(mid in loaded for mid in needed):

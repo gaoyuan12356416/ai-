@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh channel material performance after the hourly source reports
+
+[Timer]
+OnCalendar=*-*-* *:28:00
+Persistent=true
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

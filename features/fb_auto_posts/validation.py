@@ -79,17 +79,27 @@ def _rule(raw: Any, *, material: bool) -> Dict[str, Any]:
     value = _mapping(raw, "素材筛选" if material else "短剧筛选")
     required = {"spend_min", "spend_max", "roas_min", "roas_max", "sort_by", "sort_direction"}
     optional = {"resource_type_v2"} if not material else {"duration_min_seconds", "duration_max_seconds"}
-    _keys(value, required, optional, "筛选规则")
+    from features.social_material_effects.data import FILTERS
+    effect_fields = {"x_"+metric+"_"+bound for metric in FILTERS for bound in ("min","max")}
+    _keys(value, required, optional | effect_fields | {"effect_channel"}, "筛选规则")
     result: Dict[str, Any] = {}
     for key, label in (("spend_min", "消耗下限"), ("spend_max", "消耗上限"), ("roas_min", "ROAS下限"), ("roas_max", "ROAS上限")):
         result[key] = _decimal(value.get(key), label)
-    for prefix in ("spend", "roas"):
-        low, high = result[f"{prefix}_min"], result[f"{prefix}_max"]
+    if "effect_channel" in value:
+        if value["effect_channel"] not in ("facebook","x","all"):
+            raise ValidationError("invalid_request","社媒效果来源渠道无效")
+        result["effect_channel"] = value["effect_channel"]
+    for key in effect_fields.intersection(value):
+        result[key] = _decimal(value[key], "社媒效果范围")
+        if result[key] is not None and "revenue" not in key and Decimal(result[key]) % 1:
+            raise ValidationError("invalid_request","社媒互动指标必须为整数")
+    for prefix in ("spend", "roas", *("x_"+m for m in FILTERS)):
+        low, high = result.get(f"{prefix}_min"), result.get(f"{prefix}_max")
         if low is not None and high is not None and Decimal(low) > Decimal(high):
             raise ValidationError("invalid_request", "筛选下限不能大于上限")
     result["sort_by"] = str(value.get("sort_by") or "").lower()
     result["sort_direction"] = str(value.get("sort_direction") or "").lower()
-    if result["sort_by"] not in {"spend", "roas"} or result["sort_direction"] not in {"asc", "desc"}:
+    if result["sort_by"] not in {"spend", "roas", *("x_"+m for m in FILTERS)} or result["sort_direction"] not in {"asc", "desc"}:
         raise ValidationError("invalid_request", "排序规则无效")
     if material:
         result["duration_min_seconds"] = _int(value.get("duration_min_seconds", 1), "素材最小时长", 1, 14400)

@@ -22,6 +22,9 @@ def user(cookie):
     return actor
 
 def query(params,actor,root=None):
+    if root is None or any((Path(root)/(c+'.sqlite3')).exists() for c in ('x','facebook')):
+        from features.social_material_effects.report import query as channel_report
+        return channel_report(params,actor,root)
     get=lambda k,default='':params.get(k,[default])[0]
     page=max(1,int(get('page','1')));size=min(100,max(1,int(get('page_size','50'))))
     sort=get('sort','views');direction=get('direction','desc')
@@ -68,8 +71,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.path=='/healthz':return self.send_json(200,dict(ok=True))
         if path.path!='/api/x-material-effects':return self.send_json(404,dict(message='未找到接口'))
         try:
-            actor=user(self.headers.get('Cookie',''));return self.send_json(200,query(parse_qs(path.query),actor))
-        except PermissionError as exc:return self.send_json(int(exc.args[0]),dict(message='请登录或联系管理员开通 X 素材效果权限'))
+            actor=user(self.headers.get('Cookie',''))
+            return self.send_json(200,query(parse_qs(path.query),actor))
+        except PermissionError as exc:return self.send_json(int(exc.args[0]),dict(message='请登录或联系管理员开通社媒素材效果权限'))
         except (ValueError,TypeError):return self.send_json(400,dict(message='查询参数无效'))
         except Exception:return self.send_json(503,dict(message='素材效果数据暂不可用，请稍后重试'))
 

@@ -862,6 +862,8 @@ class FBAutoPostStore:
                     continue
                 if upcoming_claim:
                     conn.execute('DELETE FROM fb_auto_mobo_wait WHERE run_id=? AND page_id=?',(run_id,page.page_id))
+                if material is not None and getattr(material, 'social_effect', None):
+                    selection['social_effect'] = material.social_effect
                 status = "planned"
                 if reason:
                     status = "skipped"

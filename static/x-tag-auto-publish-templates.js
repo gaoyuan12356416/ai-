@@ -83,9 +83,10 @@
 
   function sortLabel(rule) {
     const item = ui.objectValue(rule);
-    const metric = item.sort_by === "spend" ? "消耗" : "D0 ROAS";
+    const metric = {spend:"消耗", roas:"D0 ROAS", x_views:"浏览", x_likes:"点赞", x_comments:"评论", x_shares:"分享", x_revenue:"收入"}[item.sort_by] || "D0 ROAS";
+    const source = {facebook:"Facebook", all:"X + Facebook", x:"X"}[item.effect_channel || "x"];
     const direction = item.sort_direction === "asc" ? "正序" : "倒序";
-    return `${metric} ${direction}`;
+    return `${item.sort_by?.startsWith("x_") ? source+" " : ""}${metric} ${direction}`;
   }
 
   function accountCount(item) {

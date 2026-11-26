@@ -79,6 +79,7 @@ class MaterialCandidate:
     drama_description: str = ""
     material_tag: str = ""
     deploy_time: int = 0
+    social_effect: Mapping = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)
@@ -531,6 +532,8 @@ class MaterialRepository:
             product=str(config["metric_product"]), platform=int(config["metric_platform"]), dates=dates
         )
         language = str(config["language"])
+        from features.social_material_effects.selection import facebook_rules
+        social = facebook_rules(config,language)
         from features.hit_publish import POLICY
         hit = config.get('hit_drama_publish') or {}
         window_lookup = config.get('_window_metadata')
@@ -593,6 +596,13 @@ class MaterialRepository:
 
         def compare(left: MaterialCandidate, right: MaterialCandidate) -> int:
             for key, direction in ((drama_key, drama_rule["sort_direction"]), (material_key, material_rule["sort_direction"])):
+                level = "drama" if key == drama_key else "material"
+                if social.sorts(level):
+                    a = social.rank(level,left.content_id,left.material_id)
+                    b = social.rank(level,right.content_id,right.material_id)
+                    if a != b:
+                        return -1 if a < b else 1
+                    continue
                 left_value, right_value = getattr(left, key), getattr(right, key)
                 if left_value is None or right_value is None:
                     if left_value is right_value: continue
@@ -687,8 +697,10 @@ class MaterialRepository:
                     continue
                 if not self._in_range(d_spend, drama_rule["spend_min"], drama_rule["spend_max"]) or not self._in_range(d_roas, drama_rule["roas_min"], drama_rule["roas_max"]):
                     continue
+                if social.rules and not (social.matches("drama",content_id) and social.matches("material",content_id,raw_id)):
+                    continue
                 seen_material_ids.add(raw_id)
-                candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255], deploy_time))
+                candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255], deploy_time,social.audit(content_id,raw_id)))
             candidates.sort(key=cmp_to_key(compare))
             if profile_mode and not profile_error:
                 # Rank-equivalent buckets retain the same bounded old-metric
@@ -741,7 +753,7 @@ class MaterialRepository:
         # repeating a full source-table scan for each Page language.
         from features.hit_drama_target import content_ids as target_content_ids
         target = config.get('hit_drama_publish')
-        complete_content_scan = inherit_language or bool(target) or profile_mode
+        complete_content_scan = inherit_language or bool(target) or profile_mode or bool(social.rules)
         scan_content_ids = target_content_ids(target, language) if target else priority_content_ids
         if (target or {}).get("candidate_pool"):
             from features.publish_candidate_pool import allowed_content

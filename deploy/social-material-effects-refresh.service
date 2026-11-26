@@ -1,0 +1,13 @@
+[Unit]
+Description=Update X and Facebook material performance projections
+RequiresMountsFor=/mnt/data-disk
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/social-material-effects/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 -B -m features.social_material_effects.refresh
+TimeoutStartSec=30min
+Nice=8
+UMask=0022

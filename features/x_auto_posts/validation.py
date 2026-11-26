@@ -178,19 +178,23 @@ def _range_rule(
     _keys(
         value,
         required=base | set(extra_required),
-        optional=set(extra_optional) | {"x_"+metric+"_"+bound for metric in ("views","likes","comments","shares","revenue") for bound in ("min","max")},
+        optional=set(extra_optional) | {"effect_channel"} | {"x_"+metric+"_"+bound for metric in ("views","likes","comments","shares","revenue") for bound in ("min","max")},
         label=label,
     )
     result: Dict[str, Any] = {
         key: _decimal_text(value.get(key), f"{label}{key}")
         for key in ("spend_min", "spend_max", "roas_min", "roas_max")
     }
+    if "effect_channel" in value:
+        if value["effect_channel"] not in ("x", "facebook", "all"):
+            raise ValidationError("invalid_request", "社媒效果来源渠道无效")
+        result["effect_channel"] = value["effect_channel"]
     for metric in ("views", "likes", "comments", "shares", "revenue"):
         for bound in ("min", "max"):
             key = "x_" + metric + "_" + bound
             result[key] = _decimal_text(value.get(key), label + key)
             if metric != "revenue" and result[key] is not None and Decimal(result[key]) != Decimal(result[key]).to_integral_value():
-                raise ValidationError("invalid_request", "X 互动指标必须为整数")
+                raise ValidationError("invalid_request", "社媒互动指标必须为整数")
     for prefix in ("spend", "roas", "x_views", "x_likes", "x_comments", "x_shares", "x_revenue"):
         minimum = result[f"{prefix}_min"]
         maximum = result[f"{prefix}_max"]

@@ -241,6 +241,7 @@ class DramaFilterRule:
     resource_types: Tuple[str, ...] = ()
     launch_window_days: Any = 0
     cooldown_days: int = 0
+    effect_channel: str = "x"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -266,6 +267,7 @@ class DramaFilterRule:
             "sort",
             "resource_types",
             "x_effect",
+            "effect_channel",
             "launch_window_days",
             "cooldown_days",
         }
@@ -278,6 +280,7 @@ class DramaFilterRule:
             spend=DecimalRange.from_mapping(raw.get("spend"), "drama spend"),
             d0_roas=DecimalRange.from_mapping(raw.get("d0_roas"), "drama D0 ROAS"),
             sort=SortRule.from_mapping(raw.get("sort")),
+            effect_channel=raw.get("effect_channel","x"),
             x_effect={key: DecimalRange.from_mapping(value, "X " + key) for key, value in (raw.get("x_effect") or {}).items()},
             resource_types=tuple(str(value).strip() for value in resource_types),
             launch_window_days=launch_window(raw.get("launch_window_days", 0)),
@@ -296,13 +299,14 @@ class MaterialFilterRule:
     duration_seconds: DecimalRange = field(default_factory=DecimalRange)
     sort: SortRule = field(default_factory=SortRule)
     x_effect: Mapping[str, DecimalRange] = field(default_factory=dict)
+    effect_channel: str = "x"
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "MaterialFilterRule":
         raw = {} if raw in (None, "") else raw
         if not isinstance(raw, Mapping):
             raise ValueError("material rule must be an object")
-        allowed = {"spend", "d0_roas", "duration_seconds", "sort", "x_effect"}
+        allowed = {"spend", "d0_roas", "duration_seconds", "sort", "x_effect", "effect_channel"}
         if set(raw).difference(allowed):
             raise ValueError("material rule has unknown fields")
         return cls(
@@ -313,6 +317,7 @@ class MaterialFilterRule:
                 "material duration",
             ),
             sort=SortRule.from_mapping(raw.get("sort")),
+            effect_channel=raw.get("effect_channel","x"),
             x_effect={key: DecimalRange.from_mapping(value, "X " + key) for key, value in (raw.get("x_effect") or {}).items()},
         )
 
@@ -376,6 +381,7 @@ class SelectionRules:
             "material_products": list(self.material_products),
             "platform": int(self.platform),
             "drama": {
+                "effect_channel": self.drama.effect_channel,
                 "x_effect": {k: v.as_dict() for k, v in self.drama.x_effect.items()},
                 "spend": self.drama.spend.as_dict(),
                 "d0_roas": self.drama.d0_roas.as_dict(),
@@ -388,6 +394,7 @@ class SelectionRules:
                 "cooldown_days": int(self.drama.cooldown_days),
             },
             "material": {
+                "effect_channel": self.material.effect_channel,
                 "x_effect": {k: v.as_dict() for k, v in self.material.x_effect.items()},
                 "spend": self.material.spend.as_dict(),
                 "d0_roas": self.material.d0_roas.as_dict(),
