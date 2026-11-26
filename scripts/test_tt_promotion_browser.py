@@ -224,10 +224,16 @@ def run(screens=None):
                     mutations.append((endpoint, post))
                     templates[0].update(name=post["name"], version=2, config=post)
                     data = templates[0]
-                elif endpoint == "/templates/7/enable":
+                elif endpoint == "/templates/7" and req.method == "GET":
+                    data = templates[0]
+                elif endpoint in ("/templates/7/enable", "/templates/7/disable"):
                     assert post["expected_version"] == 1
                     mutations.append((endpoint, post))
-                    templates[0]["enabled"] = True
+                    templates[0]["enabled"] = endpoint.endswith("/enable")
+                    if endpoint.endswith("/disable"):
+                        # Simulate a lost response after the server accepted the new state.
+                        route.fulfill(status=502, json={"message": "回执中断"})
+                        return
                     data = templates[0]
                 elif endpoint == "/stats/templates":
                     data = {"items": []}
@@ -447,8 +453,22 @@ def run(screens=None):
         assert not templates[0]["enabled"] and templates[0]["config"]["ai_copy"]
         assert templates[0]["config"]["drama_rule"]["resource_type_v2"] == ["5"]
         assert templates[0]["config"]["material_rule"]["duration_min_seconds"] == 30
-        page.get_by_role("button", name="启用", exact=True).click()
-        page.get_by_role("button", name="返回", exact=True).click()
+        switch = page.get_by_role("switch", name="收入选材草稿 自动发布")
+        expect(switch).to_have_attribute("aria-checked", "false")
+        switch.focus()
+        switch.press("Space")
+        expect(switch).to_have_attribute("aria-checked", "true")
+        expect(page.locator("#template-enabled")).to_have_text("1")
+        page.get_by_label("模板状态", exact=True).select_option("disabled")
+        expect(switch).to_have_count(0)
+        page.locator("#template-filters").get_by_role("button", name="重置").click()
+        switch.click()
+        expect(switch).to_have_attribute("aria-checked", "false")
+        expect(page.locator("#template-disabled")).to_have_text("1")
+        expect(page.locator("#notice")).to_contain_text("已核对")
+        assert [ep for ep, _ in mutations if ep.endswith(("/enable", "/disable"))] == [
+            "/templates/7/enable", "/templates/7/disable"]
+        assert not any(ep.endswith("/run") for ep, _ in mutations)
         assert not templates[0]["enabled"]
         page.get_by_role("button", name="预演与执行").click()
         form = page.locator("#execution")

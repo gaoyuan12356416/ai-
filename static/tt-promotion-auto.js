@@ -56,26 +56,73 @@
     return `<div class="counts-line">${Object.entries(bucketNames).filter(([k])=>obj[k]!=null).map(([k,label])=>template && ["failed","skipped","review"].includes(k) && obj[k]>0?`<button class="row-link" data-to-history="${h(k)}" data-template="${h(template)}">${label} ${h(obj[k])}</button>`:`<span>${label} ${h(obj[k])}</span>`).join("")}</div>`;
   }
   function anomaly(s,k){if(!k)return true;if(!s?.latest)return false;return k==="anomaly"?["failed","skipped","review"].some(i=>s.latest[i]>0):s.latest[k]>0;}
+  const switching=new Set(), unverified=new Set();
+  let templatePage=1, statsRequest=0, toggleRevision=0;
+  function listSort(rule={}){
+    const key=rule.sort_by||"roas";
+    const source=effectMetrics[key]?(effectSources[rule.effect_channel||"x"]||"X")+" · ":"";
+    return source+(sortNames[key]||key)+(rule.sort_direction==="asc"?"升序":"降序");
+  }
+  function templateRow(t,expanded){
+    const c=cfg(t),tid=String(t.id),stat=stats.get(tid),busy=switching.has(tid),uncertain=unverified.has(tid);
+    const enabled=t.enabled,blocked=!canConfigure();
+    const disabled=busy||blocked?" disabled":"";
+    const label=uncertain?"状态待核对":enabled?"已启用":"已停用";
+    const title=uncertain?"刷新列表以核对状态":enabled?"点击关闭自动发布":"点击开启自动发布";
+    const button=(act,text,primary=false,needsConfig=true)=>`<button type="button" class="button${primary?" primary":""}" data-act="${act}" data-id="${h(tid)}"${busy||(needsConfig&&blocked)?" disabled":""}>${text}</button>`;
+    return `<tr data-template-id="${h(tid)}">
+      <td><strong>${h(tName(t))}</strong><small class="secondary">#${h(tid)} · v${h(t.version)}</small></td>
+      <td><div class="template-status-control">${badge(label,uncertain||!enabled?"warning":"positive")}
+        <button type="button" class="template-status-switch" role="switch" data-act="toggle" data-id="${h(tid)}"
+          aria-checked="${!!enabled}" aria-busy="${busy}" aria-label="${h(tName(t))} 自动发布" title="${title}"${uncertain?" disabled":disabled}></button></div></td>
+      <td><strong>${h(c.account_ids?.length??0)} 个频道</strong><small class="secondary">${c.model==="rules"?"模板规则":"收入画像"} · ${c.ai_copy?"AI 文案":"模板文案"}</small></td>
+      <td>${h(scheduleText(c.schedule))}</td>
+      <td>剧：${h(listSort(c.drama_rule))}<small class="secondary">素材：${h(listSort(c.material_rule))}</small></td>
+      <td>${h(time(enabled?stat?.next_at:null))}</td>
+      <td>${stat?.latest?`${statusBadge(stat.latest.status)} ${countsHtml(stat.latest,t.id)}<button class="row-link" data-open-run="${h(stat.latest.id)}">#${h(stat.latest.id)}</button>${stat.latest.created_at?`<small class="secondary">${h(time(stat.latest.created_at))}</small>`:""}`:stat?"暂无批次":"—"}</td>
+      <td>${h(stat?.operator_name||"—")}</td>
+      <td><div class="template-row-actions">${button("edit","编辑")}${button("records","记录",false,false)}${button("run","预演与执行",true)}
+        <details ${expanded?"open":""}><summary class="button" aria-label="${h(tName(t))} 更多操作">更多操作</summary>
+          <div class="template-extra-actions">${button("drama","指定爆款剧")}${button("material","指定素材")}${button("inventory","素材池库存",false,false)}</div>
+        </details></div></td></tr>`;
+  }
   function templateRows(){
+    const ready=sourceReady.templates;
+    const enabled=templates.filter(t=>t.enabled).length;
     id("new-template").disabled=!canConfigure();
-    if(!sourceReady.templates){
+    id("template-total").textContent=ready?templates.length:"—";
+    id("template-enabled").textContent=ready&&!unverified.size?enabled:"—";
+    id("template-disabled").textContent=ready&&!unverified.size?templates.length-enabled:"—";
+    id("template-running").textContent=ready&&templates.every(t=>typeof stats.get(String(t.id))?.running==="boolean")
+      ?templates.filter(t=>stats.get(String(t.id)).running).length:"—";
+    if(!ready){
       id("templates-meta").textContent="模板清单暂未取得";
-      id("templates").innerHTML=empty(6,"模板清单暂未取得，可重试或查看运行记录。");return;
+      id("template-pages").replaceChildren();
+      id("templates").innerHTML=empty(9,"模板清单暂未取得，可重试或查看运行记录。");return;
     }
     const term=id("template-search").value.trim().toLowerCase(),state=id("template-state").value;
-    const rows=templates.filter(t=>(!term||[t.id,t.name].some(v=>String(v).toLowerCase().includes(term)))&&anomaly(stats.get(String(t.id)),state));
-    id("templates-meta").textContent=`${rows.length} / ${templates.length} 个模板 · ${templates.filter(t=>t.enabled).length} 个已启用`;
-    id("templates").innerHTML=rows.map(t=>{
-      const c=cfg(t),stat=stats.get(String(t.id)),tid=h(t.id);
-      const btn=(act,label)=>`<button class="row-link" data-act="${act}" data-id="${tid}" ${!canConfigure()&&["edit","run","toggle"].includes(act)?'disabled title="请重试频道与模板数据"':""}>${label}</button>`;
-      return `<tr><td><strong>${h(tName(t))}</strong><small class="secondary">#${tid} · v${h(t.version)}</small></td><td>${statusBadge(t.enabled?"enabled":"draft")}<small class="secondary">${c.model==="rules"?"模板规则":"收入画像"}</small></td><td>${h(c.account_ids?.length??0)} 个频道<small class="secondary">${c.ai_copy?"AI 文案":"模板文案"}</small></td><td>${h(scheduleText(c.schedule))}<small class="secondary">下次 ${h(time(stat?.next_at))}</small></td><td>${stat?countsHtml(stat.latest,t.id):"—"}${stat?.latest?.id?`<button class="row-link" data-open-run="${h(stat.latest.id)}">#${h(stat.latest.id)}</button>`:""}</td><td><div class="inline">${btn("edit","编辑")}${btn("run","预演与执行")}${btn("inventory","素材池库存")}${btn("records","记录")}${btn("toggle",t.enabled?"停用":"启用")}</div></td></tr>`;
-    }).join("")||empty(6,templates.length?"没有符合条件的模板":"暂无新版模板，可创建草稿后预演。");
+    const desired=id("template-enabled-filter").value;
+    const rows=templates.filter(t=>(!term||[t.id,t.name].some(v=>String(v).toLowerCase().includes(term)))
+      &&(!desired||(!unverified.has(String(t.id))&&t.enabled===(desired==="enabled")))&&anomaly(stats.get(String(t.id)),state));
+    const size=20;
+    templatePage=Math.min(templatePage,Math.max(1,Math.ceil(rows.length/size)));
+    const body=id("templates"),focused=body.contains(document.activeElement)?document.activeElement:null;
+    const expanded=new Set(Array.from(body.querySelectorAll("details[open]"),d=>d.closest("tr").dataset.templateId));
+    body.innerHTML=rows.slice((templatePage-1)*size,templatePage*size).map(t=>templateRow(t,expanded.has(String(t.id)))).join("")
+      ||empty(9,templates.length?"没有符合条件的模板":"暂无新版模板，可创建草稿后预演。");
+    if(focused?.dataset.act){
+      const target=body.querySelector(`[data-id="${CSS.escape(focused.dataset.id)}"][data-act="${CSS.escape(focused.dataset.act)}"]`);
+      target?.focus({preventScroll:true});
+    }
+    id("templates-meta").textContent=`当前 ${rows.length} / ${templates.length} 个模板`;
+    id("template-pages").innerHTML=rows.length>size?pageBar(templatePage,size,rows.length,"data-template-page"):"";
   }
   function options(select,items,label){const old=select.value;select.innerHTML=`<option value="">${label}</option>`+items.map(([key,n])=>`<option value="${h(key)}">${h(n)}</option>`).join("");select.value=old;}
   async function getStats(){
-    const node=id("stats-error");
-    try{const data=await get("/stats/templates");stats=new Map(data.items.map(s=>[String(s.template_id),s]));node.replaceChildren();templateRows();}
-    catch(e){errorBox(node,e,getStats);}
+    const node=id("stats-error"),request=++statsRequest;
+    try{const data=await get("/stats/templates");if(request!==statsRequest)return;
+      stats=new Map(data.items.map(s=>[String(s.template_id),s]));node.replaceChildren();templateRows();}
+    catch(e){if(request===statsRequest){stats.clear();templateRows();errorBox(node,e,getStats);}}
   }
   async function updateTemplates(){
     await loadSource("templates");void getStats();
@@ -411,10 +458,38 @@
     });
   }
   async function toggle(t){
-    const verb=t.enabled?"停用":"启用";
-    if(!await confirmAction(`${verb}模板`,`${tName(t)} · 版本 ${t.version}\n${scheduleText(cfg(t).schedule)}，共 ${cfg(t).account_ids.length} 个频道。${t.enabled?"已进入发布执行的任务将继续处理。":"启用后将依照该排期创建真实发布任务。"}`,verb))return;
-    await post(path(t,t.enabled?"/disable":"/enable"),{expected_version:t.version});
-    await updateTemplates();notify(`模板已${verb}。`);
+    const tid=String(t.id);
+    if(switching.has(tid)||unverified.has(tid)||!canConfigure())return;
+    const verb=t.enabled?"disable":"enable";
+    const focused=document.activeElement?.matches('[role="switch"]')&&document.activeElement.dataset.id===tid;
+    switching.add(tid);templateRows();
+    function accept(item){
+      if(!item||String(item.id)!==tid||typeof item.enabled!=="boolean")throw new Error("模板状态回执不完整");
+      templates=templates.map(row=>String(row.id)===tid?item:row);
+      unverified.delete(tid);
+    }
+    try{
+      accept(await post(path(t,"/"+verb),{expected_version:t.version}));
+      notify(verb==="enable"?"自动发布已开启。":"自动发布已关闭。");
+    }catch(err){
+      if(accessDenied)return;
+      try{
+        const item=await get(path(t));accept(item);
+        notify(`${err.message}。已核对：自动发布${item.enabled?"开启":"关闭"}。`,false,"error");
+      }catch(readError){
+        if(!accessDenied){
+          unverified.add(tid);
+          notify("启停结果暂未确认，请刷新列表核对。",false,"error");
+        }
+      }
+    }finally{
+      toggleRevision++;switching.delete(tid);templateRows();
+      if(focused&&document.activeElement===document.body){
+        const control=id("templates").querySelector(`[role="switch"][data-id="${CSS.escape(tid)}"]`);
+        (control&&!control.disabled?control:id("template-enabled-filter")).focus({preventScroll:true});
+      }
+      if(!accessDenied)void getStats();
+    }
   }
   const labels={female:"女性",male:"男性",lgbtq:"LGBTQ+",general:"通用",__unknown__:"未标注",ceo_wealth:"豪门总裁",sweet_romance:"甜宠恋爱",marital:"婚恋纠葛",family:"萌宝家庭",revenge:"逆袭复仇",period_intrigue:"古装权谋",fantasy:"奇幻穿越",suspense:"悬疑冒险",growth:"生活成长"};
   const reasons={preferred_match:"命中首选受众和题材",preferred_theme_unavailable:"首选题材缺少可用素材，已在同一受众内放宽",preferred_audience_unavailable:"首选受众缺少可用素材，已改选其他受众",no_valid_audience_profile:"暂无可用受众画像，按模板排序",no_valid_theme_profile:"暂无可用题材画像，按受众偏好排序",no_eligible_material:"没有符合规则的素材",no_positive_revenue:"尚无正收入画像，按模板排序",unavailable:"画像暂不可用，按模板排序"};
@@ -470,12 +545,12 @@
     const versions=Object.entries(effect.versions||{}).filter(([,v])=>v!=null&&v!=="").map(([k,v])=>(effectSources[k]||k)+" "+v);
     return `<details class="social-evidence"><summary>${h(channel)} 社媒证据${effect.posts!=null?` · ${h(effect.posts)} 条发布`:""}</summary><ul>${facts.join("")}</ul>${versions.length?`<small class="secondary">数据版本 ${h(versions.join(" · "))}</small>`:""}${effect.as_of?`<small class="secondary">数据截至 ${h(effect.as_of)}</small>`:""}</details>`;
   }
-  function execution(t){
+  function execution(t,initialMode="template"){
     const c=cfg(t),scope=(c.account_ids||[]).map(String),today=new Date(Date.now()+8*3600000).toISOString().slice(0,10);
     let preview=null,seq=0,page=1,filter="",allRows=null,previewKey="",dirty=false,busy=false,draftSeq=0,submitting=false;
     const adopted=new Map(),drafts=new Map(),draftKey=(a,m)=>`${a}/${m}`,size=8;
     modal(`${tName(t)} · 预演与执行`,`<form id="execution"><fieldset class="group"><legend>本次任务</legend><div class="form-grid">
-      <label>推广方式<select name="mode">${Object.entries(modeNames).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}</select></label>
+      <label>推广方式<select name="mode">${Object.entries(modeNames).map(([k,v])=>`<option value="${k}" ${k===initialMode?"selected":""}>${v}</option>`).join("")}</select></label>
       <label>时间方式<select name="when"><option value="plan">模板日排期（仅预演）</option><option value="now">立即执行</option><option value="at">一次性预约</option></select></label>
       <label data-day>计划日期（北京）<input name="plan_date" type="date" value="${today}"></label><label data-when hidden>预约时间（北京）<input name="scheduled_at" type="datetime-local"></label>
       <label data-mode="drama" hidden>单语言剧目 ID（可多条）<textarea name="content_ids" rows="2" placeholder="每行一个 Drama ID"></textarea></label>
@@ -798,7 +873,16 @@
     action(node,"click",async ev=>{const step=ev.target.closest("[data-istep]"),job=ev.target.closest("[data-inventory-job]");if(step){page+=Number(step.dataset.istep);await refresh();}if(job)await showRun(job.dataset.inventoryJob);});
     void refresh();
   }
-  id("template-search").addEventListener("input",templateRows);id("template-state").onchange=templateRows;
+  function filterTemplates(){templatePage=1;templateRows();}
+  id("template-search").addEventListener("input",filterTemplates);
+  id("template-state").onchange=filterTemplates;id("template-enabled-filter").onchange=filterTemplates;
+  id("template-filters").onsubmit=ev=>{ev.preventDefault();filterTemplates();};
+  id("template-filters").onreset=()=>setTimeout(filterTemplates,0);
+  action(id("refresh-templates"),"click",updateTemplates);
+  action(id("template-pages"),"click",ev=>{
+    const button=ev.target.closest("[data-template-page]");
+    if(button&&!button.disabled){templatePage+=Number(button.dataset.templatePage);templateRows();}
+  });
   id("new-template").onclick=()=>location.assign(location.pathname+"?editor=new");
   action(id("templates"),"click",async ev=>{
     const link=ev.target.closest("[data-to-history]");if(link){await toHistory(link.dataset.template,link.dataset.toHistory);return;}
@@ -807,6 +891,7 @@
     if(b.dataset.act==="records")await toHistory(t.id);
     if(b.dataset.act==="edit")location.assign(location.pathname+"?editor="+encodeURIComponent(t.id));
     if(b.dataset.act==="run")execution(t);
+    if(["drama","material"].includes(b.dataset.act))execution(t,b.dataset.act);
     if(b.dataset.act==="toggle")await toggle(t);
     if(b.dataset.act==="inventory")inventory(t);
   });
@@ -832,17 +917,18 @@
   }
   async function loadSource(key){
     const accountSource=key==="channels",node=id(accountSource?"channel-source-error":"template-source-error");
-    const version=++sourceVersion[key];
+    const version=++sourceVersion[key],revision=toggleRevision;
     sourceReady[key]=false;templateRows();
     try{
       const {items}=await get(accountSource?"/channels":templatesPath);
       if(version!==sourceVersion[key]||accessDenied)return;
+      if(!accountSource&&revision!==toggleRevision)return loadSource(key);
       if(!Array.isArray(items))throw new Error("服务响应缺少清单");
       if(accountSource){
         channels=items;
         options(id("history-channel"),channels.map(c=>[byId(c),`${name(c)} · #${byId(c)}`]),"全部频道");
       }else{
-        templates=items;
+        templates=items;unverified.clear();
         options(id("run-filter"),templates.map(t=>[t.id,tName(t)]),"全部模板");
       }
       sourceReady[key]=true;node.replaceChildren();

@@ -269,6 +269,7 @@ def run(screens=None):
         close()
         loc("[data-view=templates]").click()
 
+        loc(".template-row-actions summary").click()
         loc("[data-act=inventory]").click()
         expect(loc("#inventory-table")).to_contain_text("未占用 / 待预检")
         loc("#inventory-import textarea").fill("880,881,881")

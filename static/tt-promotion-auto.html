@@ -6,12 +6,12 @@
   <title>自动发布（新版） · TT 平台推广</title>
   <link rel="stylesheet" href="/ui-topbar.css">
   <link rel="stylesheet" href="/tt-promotion.css?v=20261126a">
-  <link rel="stylesheet" href="/tt-promotion-auto-tools.css?v=20261126editor">
+  <link rel="stylesheet" href="/tt-promotion-auto-tools.css?v=20261126list">
   <script defer src="/ui-topbar.js"></script>
   <script defer src="/quick-nav.js"></script>
   <script defer src="/tt-promotion-common.js"></script>
   <script defer src="/tt-promotion-first-use.js?v=20261126a"></script>
-  <script defer src="/tt-promotion-auto.js?v=20261126editor"></script>
+  <script defer src="/tt-promotion-auto.js?v=20261126list"></script>
 </head>
 <body>
 <div class="app">
@@ -23,10 +23,25 @@
     <div role="alert" id="notice" hidden></div>
     <div role="status" id="loading">正在加载…</div>
     <section id="workspace" hidden><div id="channel-source-error" aria-live="polite"></div><div id="template-source-error" aria-live="polite"></div><section id="editor-view" hidden></section><div id="list-view"><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
-    <section id="templates-view" class="panel">
-      <div class="section-head"><h2>发布模板</h2><div class="actions"><span id="templates-meta" class="muted"></span><button class="button primary" id="new-template">创建模板</button></div></div>
-      <div class="tool-filters"><label>查找模板<input type="search" id="template-search" placeholder="名称或模板 ID"></label><label>最近批次<select id="template-state"><option value="">全部结果</option><option value="anomaly">有异常</option><option value="failed">有失败</option><option value="skipped">有跳过</option><option value="review">待核对</option></select></label><span id="stats-error" aria-live="polite"></span></div>
-      <div class="table-wrap"><table><thead><tr><th>模板 / 版本</th><th>状态 / 选材</th><th>频道 / 文案</th><th>排期 / 下次执行</th><th>最近批次</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
+    <section id="templates-view">
+      <div class="template-totals" aria-label="模板统计">
+        <div><span>模板总数</span><strong id="template-total">—</strong></div>
+        <div><span>已启用</span><strong id="template-enabled">—</strong></div>
+        <div><span>已停用</span><strong id="template-disabled">—</strong></div>
+        <div><span>运行中</span><strong id="template-running">—</strong></div>
+      </div>
+      <section class="panel">
+        <div class="section-head"><h2>模板列表</h2><div class="actions"><button class="button" type="button" id="refresh-templates">刷新列表</button><button class="button primary" id="new-template">创建模板</button></div></div>
+        <form class="tool-filters template-filters" id="template-filters">
+          <label>模板名称<input type="search" id="template-search" placeholder="名称或模板 ID"></label>
+          <label>模板状态<select id="template-enabled-filter" aria-label="模板状态"><option value="">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select></label>
+          <label>最近批次<select id="template-state"><option value="">全部结果</option><option value="anomaly">有异常</option><option value="failed">有失败</option><option value="skipped">有跳过</option><option value="review">待核对</option></select></label>
+          <button class="button" type="reset">重置</button>
+        </form>
+        <div id="stats-error" aria-live="polite"></div>
+        <div class="table-wrap template-table"><table><thead><tr><th>模板</th><th>状态</th><th>频道</th><th>发布时间</th><th>两层排序</th><th>下次执行</th><th>最近运行</th><th title="最近编辑或启停模板的人员">操作人</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
+        <div class="template-footer"><span id="templates-meta" class="muted"></span><div id="template-pages" class="tool-pages"></div></div>
+      </section>
     </section>
     <section id="runs-view" class="panel" hidden><div class="section-head"><h2>运行记录</h2><span id="history-total" class="muted"></span></div>
       <form id="history-filters" class="tool-filters">

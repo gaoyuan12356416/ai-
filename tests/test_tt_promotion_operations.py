@@ -80,6 +80,8 @@ class PromotionOperationsTest(unittest.TestCase):
         stamp = "2026-11-25T05:00:00+00:00"  # after noon in Beijing
         with connection(self.path, write=True) as db:
             db.execute("UPDATE tt_auto_template SET enabled=1 WHERE id=?", (self.t.id,))
+            db.execute("UPDATE tt_auto_template SET updated_by_name='Last operator' WHERE id=?", (self.t.id,))
+            self.job(db, "older running", stamp, state="reserved")
             self.job(db, "last", stamp, state="skipped")
             db.execute(
                 "INSERT INTO ttp_day VALUES(?,?,1,?)",
@@ -87,6 +89,9 @@ class PromotionOperationsTest(unittest.TestCase):
             )
         with patch.object(operations, "now", return_value=datetime.fromisoformat(stamp)):
             res = operations.read("/stats/templates", {}, self.actor, self.scope, self.path)["items"][0]
+        self.assertEqual(res["operator_name"], "Last operator")
+        self.assertTrue(res["running"])
+        self.assertEqual(res["latest"]["created_at"], stamp)
         self.assertEqual(res["latest"]["skipped"], 1)
         self.assertEqual(res["next_at"], "2026-11-25T06:00:00+00:00")
 

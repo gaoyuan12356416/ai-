@@ -146,13 +146,14 @@ def next_time(db, template, current):
 
 
 def templates(db, actor, scope):
-    rows = db.execute("""SELECT t.id,t.enabled,v.version,v.config_json
+    rows = db.execute("""SELECT t.id,t.enabled,t.updated_by_name,v.version,v.config_json
         FROM tt_auto_template t JOIN tt_auto_template_version v
         ON v.template_id=t.id AND v.version=t.current_version""")
     for row in rows:
         template = SimpleNamespace(
             id=row["id"],
             enabled=bool(row["enabled"]),
+            operator_name=row["updated_by_name"],
             version=row["version"],
             config=load(row["config_json"]),
         )
@@ -163,19 +164,26 @@ def templates(db, actor, scope):
 def template_stats(db, actor, scope):
     sql, params = runs_query(actor, scope, {})
     latest = {}
+    running = {}
     for row in db.execute(
         sql
-        + """SELECT g.* FROM grouped g JOIN
-            (SELECT template_id,MAX(id) last_id FROM grouped GROUP BY template_id) r ON r.last_id=g.id""",
+        + """SELECT g.*, r.running FROM grouped g JOIN
+            (SELECT template_id, MAX(id) last_id,
+                    MAX(review=0 AND pending>0 AND unstarted<expected) running
+             FROM grouped GROUP BY template_id) r ON r.last_id=g.id""",
         params,
     ):
         result = summary_row(row)
-        latest[row["template_id"]] = dict(id=row["id"], **result["counts"], status=result["status"])
+        latest[row["template_id"]] = dict(id=row["id"], **result["counts"], status=result["status"],
+                                          created_at=row["created_at"])
+        running[row["template_id"]] = bool(row["running"])
     current = now()
     return {
         "items": [
             dict(
                 template_id=t.id,
+                operator_name=t.operator_name,
+                running=running.get(t.id, False),
                 next_at=next_time(db, t, current) if t.enabled else None,
                 latest=latest.get(t.id),
             )
