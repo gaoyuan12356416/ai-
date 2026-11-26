@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from features.post_daily_report.delivery import DefiniteFailure, DeliveryStore, DeliveryUnknown
 
@@ -33,6 +33,28 @@ class SocialDeliveryStore(DeliveryStore):
                 updated_at TEXT NOT NULL, PRIMARY KEY(report_date, chat_id, part_number));
         """)
         self.db.commit()
+
+    def due_days(self, now_beijing, chat_id):
+        """Enroll each day at 10:00, retaining unfinished dates across midnight and downtime."""
+        latest = now_beijing.date() - timedelta(days=1 if now_beijing.hour >= 10 else 2)
+        with self.db:
+            self.db.execute("""CREATE TABLE IF NOT EXISTS social_report_due (
+                chat_id TEXT NOT NULL, report_date TEXT NOT NULL, PRIMARY KEY(chat_id,report_date))""")
+            last = self.db.execute("SELECT MAX(report_date) FROM social_report_due WHERE chat_id=?",
+                                   (chat_id,)).fetchone()[0]
+            if last is None and now_beijing.hour < 10:
+                return []
+            day = date.fromisoformat(last) + timedelta(days=1) if last else latest
+            while day <= latest:
+                self.db.execute("INSERT OR IGNORE INTO social_report_due VALUES(?,?)", (chat_id, day.isoformat()))
+                day += timedelta(days=1)
+        # A delivery claim includes confirmed, failed and uncertain external writes.
+        # Only a day still waiting for data can be automatically submitted.
+        return [row[0] for row in self.db.execute("""
+            SELECT q.report_date FROM social_report_due q
+            LEFT JOIN delivery d ON d.chat_id=q.chat_id AND d.report_date=q.report_date
+            WHERE q.chat_id=? AND q.report_date<=? AND d.report_date IS NULL
+            ORDER BY q.report_date DESC""", (chat_id, latest.isoformat()))]
 
     def batch(self, day, chat_id):
         row = self.db.execute(

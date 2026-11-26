@@ -19,7 +19,7 @@ class DailyRetryTests(unittest.TestCase):
         return caught.exception.code
 
     def test_incomplete_data_can_retry_before_delivery(self):
-        for reason in ('daily_report_sources_incomplete', 'daily_report_metrics_incomplete'):
+        for reason in ('daily_report_counts_pending', 'daily_report_sources_incomplete', 'daily_report_metrics_incomplete'):
             with self.subTest(reason=reason):
                 self.assertEqual(self.exit_code(ValueError(reason)), 75)
 

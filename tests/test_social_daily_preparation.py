@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import runpy
+import sqlite3
 import sys
 import unittest
 from datetime import datetime, timedelta
@@ -33,6 +34,9 @@ class PreparationTests(unittest.TestCase):
         self.clock = patch.object(cli, 'datetime', FixedClock)
         self.clock.start()
         FixedClock.value = datetime(2026, 11, 16, 11, 0, 0, tzinfo=BEIJING)
+        counts = patch.object(cli, 'check_counts', return_value=({'2284': {'rows': 10}}, []))
+        self.counts = counts.start()
+        self.addCleanup(counts.stop)
         self.output = contextlib.redirect_stdout(io.StringIO())
         self.output.__enter__()
 
@@ -55,7 +59,7 @@ class PreparationTests(unittest.TestCase):
         self.assertFalse((self.root / 'delivery.sqlite3').exists())
         self.assertTrue(prepared.load(self.root, self.day, cli.CHAT_ID))
 
-    def test_only_preparation_uses_the_longer_collection_budget(self):
+    def test_preparation_and_send_use_the_full_collection_budget(self):
         with patch.object(cli, 'collect', return_value=self.report) as collect:
             self.assertEqual(self.run_cli('--prepare'), 0)
             self.assertEqual(collect.call_args.kwargs, {'query_budget_seconds': 480})
@@ -64,7 +68,7 @@ class PreparationTests(unittest.TestCase):
         with patch.object(cli, 'collect', return_value=self.report) as collect, \
                 patch.object(cli, 'send_card', return_value={'message_id': 'fallback'}):
             self.assertEqual(self.run_cli('--send'), 0)
-            self.assertEqual(collect.call_args.kwargs, {})
+            self.assertEqual(collect.call_args.kwargs, {'query_budget_seconds': 480})
 
     def test_eleven_sender_uses_complete_preparation_without_database_reads(self):
         self.prepare()
@@ -163,13 +167,89 @@ class PreparationTests(unittest.TestCase):
                 self.run_cli('--send')
             send.assert_not_called()
 
-    def test_sender_remains_closed_before_eleven(self):
+    def test_sender_remains_closed_before_ten(self):
         self.prepare()
-        FixedClock.value -= timedelta(seconds=1)
+        FixedClock.value = FixedClock.value.replace(hour=10) - timedelta(seconds=1)
         with patch.object(cli, 'send_card') as send:
             with self.assertRaisesRegex(RuntimeError, 'cutoff_not_reached'):
                 self.run_cli('--send')
             send.assert_not_called()
+
+    def poll(self):
+        return cli.main(['--state-dir', str(self.root), '--poll'])
+
+    def test_from_ten_poll_until_counts_are_ready_then_only_send_once(self):
+        FixedClock.value = FixedClock.value.replace(hour=9, minute=55)
+        with patch.object(cli, 'collect', return_value=self.report) as collect, \
+                patch.object(cli, 'send_card', return_value={'message_id': 'confirmed'}) as send:
+            self.poll()
+            self.counts.assert_not_called()
+            FixedClock.value = FixedClock.value.replace(hour=10, minute=0)
+            self.counts.return_value = ({}, ['2250'])
+            for tick in range(9):
+                self.poll()
+                FixedClock.value += timedelta(minutes=5)
+            collect.assert_not_called()
+            send.assert_not_called()
+            self.counts.return_value = ({'2250': {'clicks': 0}}, [])
+            self.poll()
+            self.poll()
+            collect.assert_called_once()
+            send.assert_called_once()
+            self.assertEqual(self.counts.call_count, 10)
+
+    def test_updated_counts_invalidate_prepared_snapshot(self):
+        self.prepare()
+        self.counts.return_value = ({'2284': {'rows': 11}}, [])
+        with patch.object(cli, 'collect', return_value=self.report) as collect, \
+                patch.object(cli, 'send_card', return_value={'message_id': 'fresh'}):
+            self.poll()
+            collect.assert_called_once()
+
+    def test_midnight_carries_pending_day_and_unknown_never_resends(self):
+        self.counts.return_value = ({}, ['2250'])
+        self.poll()
+        FixedClock.value += timedelta(hours=15)
+        self.counts.return_value = ({'2250': {'rows': 1}}, [])
+        with patch.object(cli, 'collect', return_value=self.report) as collect, \
+                patch.object(cli, 'send_card', side_effect=cli.DeliveryUnknown('missing receipt')) as send:
+            self.assertEqual(self.poll(), 1)
+            self.assertEqual(collect.call_args.args[0], self.day)
+            self.poll()
+            send.assert_called_once()
+            with contextlib.closing(SocialDeliveryStore(self.root / 'delivery.sqlite3')) as store:
+                self.assertEqual(store.get(self.day, cli.CHAT_ID)['status'], 'unknown')
+                self.assertEqual(store.due_days(FixedClock.value.replace(hour=10), cli.CHAT_ID), ['2026-11-16'])
+
+
+class CountSourceTests(unittest.TestCase):
+    def test_zero_partial_stale_and_missing_site_rows(self):
+        from features.social_daily_report import readiness
+        with contextlib.closing(sqlite3.connect(':memory:')) as db:
+            db.execute("ATTACH ':memory:' AS kunlunads_dev")
+            db.execute("""CREATE TABLE kunlunads_dev.ads_facebook_page_insight
+                (dt TEXT, site_id TEXT, updated_at TEXT, clicks INTEGER, views INTEGER, installs INTEGER)""")
+            db.execute("CREATE INDEX kunlunads_dev.sd ON ads_facebook_page_insight(site_id,dt)")
+            day = '2026-11-25'
+            fresh = '2026-11-26 00:15:00'
+            stale = '2026-11-25 23:59:59'
+            rows = [(day, site, fresh, 0, 0, 0) for site in readiness.SITES if site != '2250']
+            rows += [(day, '2049', stale, 4, 5, 1), (day, '2116', None, 3, 1, 0),
+                     ('2026-11-24', '2250', fresh, 1, 2, 0)]
+            db.executemany("INSERT INTO kunlunads_dev.ads_facebook_page_insight VALUES(?,?,?,?,?,?)", rows)
+
+            def query(settings, sql, limit):
+                sql = sql.replace('FORCE INDEX(sd)', 'INDEXED BY sd')
+                return [json.loads(bytes.fromhex(row[0])) for row in db.execute(sql)]
+
+            with patch.object(readiness, 'read_settings', return_value={}), patch.object(readiness, 'query_rows', query):
+                evidence, waiting = readiness.check_counts(day, 'fixture')
+                self.assertEqual(waiting, ['2049', '2116', '2250'])
+                self.assertEqual(evidence['2284']['clicks'], 0)
+                db.execute("UPDATE kunlunads_dev.ads_facebook_page_insight SET updated_at=?", (fresh,))
+                db.execute("INSERT INTO kunlunads_dev.ads_facebook_page_insight VALUES(?,?,?,?,?,?)",
+                           (day, '2250', fresh, 0, 0, 0))
+                self.assertEqual(readiness.check_counts(day, 'fixture')[1], [])
 
 
 if __name__ == '__main__':

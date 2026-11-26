@@ -36,6 +36,7 @@ class OwnerCardTests(unittest.TestCase):
         report = present(fixture(), day)
         report["platforms"]["youtube"]["quality"]["state"] = "unavailable"
         with tempfile.TemporaryDirectory() as folder, \
+             patch("scripts.social_publisher_daily_report.check_counts", return_value=({}, [])), \
              patch("scripts.social_publisher_daily_report.collect", return_value=report), \
              patch("scripts.social_publisher_daily_report.send_card") as send, \
              patch("scripts.social_publisher_daily_report.SocialDeliveryStore.freeze") as freeze:
