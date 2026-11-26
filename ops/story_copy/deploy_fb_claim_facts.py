@@ -16,7 +16,7 @@ from features.story_copy import store
 from ops.story_copy import deploy as release
 from ops.story_copy.deploy_click_hooks import central_switch
 
-BASE = "8e7ca1c015a707d9f84df08986e5a46147f77c30"
+BASE = "2fcc96bb6623468999d256332a954ca5c9958a84"
 FILES = ("bridge.py", "sources.py", "store.py", "worker.py", "fb_facts.py")
 PACKAGE = Path("features/story_copy")
 
