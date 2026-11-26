@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import closing
+from contextlib import closing, nullcontext
 import hashlib
 import ipaddress
 import json
@@ -19,6 +19,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from features.fb_page_assignment_v2.audit import Workers
 from features.fb_page_assignment_v2.audit_sandbox import SQLiteAuditSink
+from features.fb_page_assignment_v2.audit_qa_table import QATable, run_lock
 from features.fb_page_assignment_v2.ledger import Store
 from features.fb_page_assignment_v2.server import Endpoint
 from features.fb_page_assignment_v2.service import Assignment
@@ -64,23 +65,28 @@ class OfflineRelay:
             c.commit()
 
 
-def diagnostics(root, store, assignment, budget=None):
+def diagnostics(root, store, assignment, budget=None, mysql=None):
     with store.db() as db:
         totals = db.execute("SELECT count(*),count(receipt),count(details),coalesce(sum(attempts),0) "
                             "FROM assignment").fetchone()
         large = db.execute("SELECT count(packed) FROM candidate_snapshot").fetchone()[0]
-    with closing(sqlite3.connect(str(root/"qa-audit.sqlite3"))) as db:
-        kinds = dict(db.execute("SELECT selection_stage,count(*) FROM audit GROUP BY selection_stage"))
-        headers = db.execute("SELECT count(*) FROM audit WHERE item_index=0 AND "
-                             "selection_stage<>'candidate_snapshot'").fetchone()[0]
-        items = db.execute("SELECT count(*) FROM audit WHERE item_index>0").fetchone()[0]
-        no_page = dict(db.execute("SELECT error_code,count(*) FROM audit WHERE item_index>0 "
-                                  "AND page_id IS NULL GROUP BY error_code"))
-        alerts = dict(db.execute("SELECT kind,count(*) FROM qa_event GROUP BY kind"))
     backlog = store.status()
+    with closing(sqlite3.connect(str(root/"qa-audit.sqlite3"))) as db:
+        if mysql is None:
+            kinds = dict(db.execute("SELECT selection_stage,count(*) FROM audit GROUP BY selection_stage"))
+            headers = db.execute("SELECT count(*) FROM audit WHERE item_index=0 AND "
+                                 "selection_stage<>'candidate_snapshot'").fetchone()[0]
+            items = db.execute("SELECT count(*) FROM audit WHERE item_index>0").fetchone()[0]
+            no_page = dict(db.execute("SELECT error_code,count(*) FROM audit WHERE item_index>0 "
+                                      "AND page_id IS NULL GROUP BY error_code"))
+        else:
+            headers,items,kinds,no_page = mysql.counts(totals[1],backlog["pending"])
+        alerts = dict(db.execute("SELECT kind,count(*) FROM qa_event GROUP BY kind"))
     age = max(0, time.time()-backlog["oldest"]) if backlog["oldest"] is not None else 0.
     return {"qa_only": True, "instance": (root/"qa-instance").read_text().strip(),
-            "audit_target": "isolated-sqlite", "feishu": "disabled", "receipts": totals[0],
+            "audit_target": "hk-mysql-qa-table" if mysql else "isolated-sqlite",
+            "audit_identity": mysql.identity if mysql else None, "feishu": "disabled", "receipts": totals[0],
+            "sql_during_audit": mysql.overlap() if mysql else None,
             "confirmed": totals[1], "unretired_details": totals[2], "unretired_snapshots": large,
             "audit_retries": totals[3], "pending": backlog["pending"], "oldest_pending_seconds":round(age,1),
             "audit_headers": headers,
@@ -89,13 +95,17 @@ def diagnostics(root, store, assignment, budget=None):
             "sql_budget": budget.status() if budget is not None else None}
 
 
-async def serve(root, bind, port, *, compute=None, on_ready=None, stop=None):
+async def serve(root, bind, port, *, compute=None, on_ready=None, stop=None, mysql=None):
     if bind not in ("127.0.0.1", "10.89.0.125"):
         raise ValueError("use the Hong Kong private address or loopback")
     token = (root/"qa-bearer").read_text().strip()
+    if mysql is None and (root/"qa-mysql-target.json").exists():
+        raise ValueError("this instance is bound to its recorded MySQL QA table")
     store = Store(root/"state")
     assignment = Assignment(store, compute=compute)
-    sink = SQLiteAuditSink(root/"qa-audit.sqlite3")
+    if mysql is not None:
+        mysql.foreground_busy = assignment.busy
+    sink = mysql if mysql is not None else SQLiteAuditSink(root/"qa-audit.sqlite3")
     relay = OfflineRelay(root/"qa-audit.sqlite3")
     budget = None
     if compute is None:
@@ -105,7 +115,7 @@ async def serve(root, bind, port, *, compute=None, on_ready=None, stop=None):
     workers = Workers(store, busy=assignment.busy, sink=sink, relay=relay)
     assignment.alerts = workers
     endpoint = Endpoint(assignment, token, QASources(bind),
-                        diagnostics=lambda: diagnostics(root, store, assignment, budget))
+                        diagnostics=lambda: diagnostics(root, store, assignment, budget, mysql))
     if stop is None:
         stop = asyncio.Event()
         if os.name == "posix":
@@ -116,7 +126,8 @@ async def serve(root, bind, port, *, compute=None, on_ready=None, stop=None):
         async with await asyncio.start_server(endpoint.serve, bind, port, backlog=2048) as server:
             address = server.sockets[0].getsockname()
             print(json.dumps({"qa_ready": True, "bind": address[0], "port": address[1],
-                              "state": str(root), "sink": "isolated-sqlite"}), flush=True)
+                              "state": str(root), "sink": "hk-mysql-qa-table" if mysql else "isolated-sqlite",
+                              "audit_identity": mysql.identity if mysql else None}), flush=True)
             if on_ready is not None:
                 on_ready.set_result(address[1])
             await stop.wait()
@@ -129,6 +140,8 @@ async def serve(root, bind, port, *, compute=None, on_ready=None, stop=None):
 
 
 def export(root, destination):
+    if (root/"qa-mysql-target.json").exists():
+        raise ValueError("the named MySQL table is the original audit record for this run")
     if not (root/"qa-instance").is_file() or not (root/"qa-audit.sqlite3").is_file():
         raise ValueError("QA run not found")
     if Store(root/"state").status()["pending"]:
@@ -153,11 +166,26 @@ if __name__ == "__main__":
     runner.add_argument("--root", type=Path, required=True)
     runner.add_argument("--bind", default="127.0.0.1")
     runner.add_argument("--port", type=int, default=8945)
+    runner.add_argument("--mysql-table", help="isolated table in ads_ai for this run")
+    runner.add_argument("--claim-empty-qa-table", action="store_true", help="claim an explicitly pre-created empty clone")
+    drop = sub.add_parser("drop-qa-table")
+    drop.add_argument("--root", type=Path, required=True)
+    drop.add_argument("--mysql-table", required=True)
+    drop.add_argument("--instance", required=True,help="UUID from the completed QA evidence")
     copy = sub.add_parser("export")
     copy.add_argument("--root", type=Path, required=True)
     copy.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "serve":
-        asyncio.run(serve(initialize(args.root), args.bind, args.port))
+        root = initialize(args.root)
+        with run_lock(root) if args.mysql_table else nullcontext():
+            mysql = QATable(root,args.mysql_table).prepare(claim_empty=args.claim_empty_qa_table) if args.mysql_table else None
+            asyncio.run(serve(root, args.bind, args.port, mysql=mysql))
+    elif args.command == "drop-qa-table":
+        with run_lock(args.root):
+            store = Store(args.root/"state")
+            if store.status()["pending"]:
+                raise ValueError("pending QA receipts must be verified before cleanup")
+            print(json.dumps(QATable(args.root,args.mysql_table).drop(args.instance)))
     else:
         export(args.root, args.output)

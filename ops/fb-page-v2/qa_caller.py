@@ -217,6 +217,8 @@ def run_script(args):
             "--output","report.json"]
     if args.allow_representative:
         argv.append("--allow-representative")
+    if args.expect_mysql_table:
+        argv.extend(["--expect-mysql-table", args.expect_mysql_table])
     return ('exec 9>run.lock\nflock 9\nif test -f replay.exit; then exit 0; fi\n'
             'if test -e replay.started; then echo QA_ERROR_PRIOR_REPLAY_INCOMPLETE; exit 77; fi\n'
             'date -u +%FT%TZ > replay.started\nset +e\n'
@@ -264,6 +266,7 @@ def main():
     parser.add_argument("--speed",type=float,default=1)
     parser.add_argument("--drain-timeout",type=float,default=300)
     parser.add_argument("--allow-representative",action="store_true")
+    parser.add_argument("--expect-mysql-table")
     parser.add_argument("--credentials",type=Path,default=Path("/root/.config/tencentcloud-billing/credentials.json"))
     parser.add_argument("--instance",help="optionally require a specific cloud instance ID")
     parser.add_argument("--output",type=Path,required=True,help="same path resumes the same run")
@@ -284,7 +287,7 @@ def main():
     instance = cloud.publisher(args.instance)
     binding = dict(instance_id=instance,caller_ip=PUBLISHER,origin=args.origin,profile=args.profile,
                    speed=args.speed,drain_timeout=args.drain_timeout,representative=args.allow_representative,
-                   input_sha256=digest)
+                   input_sha256=digest,mysql_qa_table=args.expect_mysql_table)
     if jpath.exists():
         journal = json.loads(jpath.read_bytes())
         if any(journal.get(k)!=v for k,v in binding.items()):

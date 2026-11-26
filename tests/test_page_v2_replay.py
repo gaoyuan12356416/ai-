@@ -48,6 +48,18 @@ class Inputs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"missing authorized fixture"):
             qa_replay.make_plan([[0,4,3302,54,1]],fs,True,"a")
 
+    def test_exact_historical_request_keeps_its_actual_current_authorized_pool(self):
+        trace = [[1,2,1479,4,1],[1,2,1479,25,1]]
+        first = fixture(1,2,1479,24,61,"cross")
+        first["historical_pool"] = 4
+        second = fixture(1,2,1479,55,62,"cross")
+        second["historical_pool"] = 25
+        plan,stats = qa_replay.make_plan(trace,[second,first],False,"x")
+        self.assertTrue(stats["exact_historical_arrivals_and_inputs"])
+        self.assertEqual(stats["differences"]["different_authorized_pool"],2)
+        self.assertEqual([p["page_group_id"] for _,p in plan],[24,55])
+        self.assertTrue(plan[0][1]["external_task_id"].startswith("cross:61:"))
+
     def test_prevent_mistarget_and_reuse_of_non_qa_state_directory(self):
         sources = qa_server.QASources("10.89.0.125")
         self.assertTrue(sources.allows("10.89.0.17"))

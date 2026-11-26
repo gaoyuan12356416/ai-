@@ -72,10 +72,11 @@ def isolated_mysql_sink(container):
 
     @contextmanager
     def writer(role, deadline):
-        if role != "write":
+        if role not in ("read","write"):
             raise ValueError("unexpected_sandbox_role")
         with closing(connect()) as conn:
-            conn.begin()
+            with conn.cursor() as cur:
+                cur.execute("START TRANSACTION READ ONLY" if role=="read" else "START TRANSACTION READ WRITE")
             try:
                 yield conn
             finally:

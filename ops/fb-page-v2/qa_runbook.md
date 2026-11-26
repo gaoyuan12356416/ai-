@@ -1,6 +1,22 @@
 # 香港 Page V2 隔离验收
 
-在香港运行与正式版本相同的 HTTP 入口、SQL 预算、授权检查和画像选择器。QA 使用独立 Token、回执目录和 SQLite 审计目标，真实提交并逐行回读。有消息时只在 QA 库记录事件。CPU 另用断网 MySQL 5.7.44 容器复核同一批记录。所有输出都区分调用方到返回 Page 的耗时与后续审计清空时间。
+在香港运行与正式版本相同的 HTTP 入口、SQL 预算、授权检查和画像选择器。QA 使用独立 Token 和回执目录。有消息时只在 QA 本地记录事件。与业务同库的具名 QA 表可实测真实查询与真实写入共用 30 路，SQLite 模式可供独立对照。所有输出都区分调用方到返回 Page 的耗时与后续审计清空时间。
+
+### 香港同库并发真写
+
+使用单次专用目录和表。以下命令使用生产审计表的结构新建 QA 副本。默认拒绝认领已有表。QA 表内有一个携带运行 UUID 的归属行，统计自动排除此行。只有该 QA 表接受回放数据。
+
+~~~sh
+python3 ops/fb-page-v2/qa_server.py serve --root /data/fb-page-v2-qa-mysql-1126 --bind 10.89.0.125 --port 8945 --mysql-table fb_page_assignment_qa_20261126
+~~~
+
+在 .17 分别向两条回放命令加入 `--expect-mysql-table fb_page_assignment_qa_20261126`。两轮使用不同的 QA 报告文件。QA Token 由上述新目录单独提供。状态页返回数据库 server_uuid、结构摘要、运行 UUID、远端请求头、决策及快照行和本地待确认详情。审计在同一个共享预算中用写角色提交并回读，sql_during_audit 记录审计占用写通道时实际观测的读通道数、前台活动及总占用。读回表统计也使用该预算，按需采样，末尾作独立核对。若需两轮互相重叠，使用独立目录、端口和带不同合法后缀的表，便于逐轮核对。
+
+两轮证据落盘并且待补写归零后，先停止本次 QA 服务。按实际报告的 instance UUID 回收该表并保存回执。本地回执继续保留。工具核对本地身份、数据库实例、表结构、归属行及运行锁。
+
+~~~sh
+python3 ops/fb-page-v2/qa_server.py drop-qa-table --root /data/fb-page-v2-qa-mysql-1126 --mysql-table fb_page_assignment_qa_20261126 --instance <报告的运行UUID>
+~~~
 
 ### 准备香港和发布端
 

@@ -94,7 +94,7 @@ def consumer_access(directory, ledger, consumers):
         for folder in (ROOT/"features",ROOT/"features/hk_sql_budget",ROOT/"ops/hk-sql-budget/bridge"):
             grant(user,folder,"r-x")
         for path in [ROOT/"ops/hk-sql-budget/launch.py",*(ROOT/"features/hk_sql_budget").glob("*.py"),
-                     ROOT/"ops/hk-sql-budget/bridge/sitecustomize.py"]:
+                     *(ROOT/"ops/hk-sql-budget/bridge").glob("*.py")]:
             grant(user,path,"r--")
         grant(user,ledger.directory,"rwx")
         grant(user,ledger.directory,"rwx",default=True)

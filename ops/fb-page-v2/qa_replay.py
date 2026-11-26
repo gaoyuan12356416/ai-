@@ -64,9 +64,10 @@ def make_plan(trace, fixtures, representative, run_id):
         stratum = (n, product, group, cross)
         if exact_mode:
             fs = exact[sec,n,product,cross]
-            pos = next((i for i,f in enumerate(fs) if group == 0 or f["page_group_id"] == group), None)
-            if pos is None:
-                raise ValueError("exact trace does not contain required historical pool")
+            # Every row in this stratum is a real request from that second. The old
+            # parent-pool field is descriptive; current permissions decide the pool.
+            # If the extraction includes the original pool, preserve that association.
+            pos = next((i for i,f in enumerate(fs) if f.get("historical_pool")==group), 0)
             chosen = fs.pop(pos)
         else:
             if stratum not in indexed:
@@ -103,7 +104,7 @@ def make_plan(trace, fixtures, representative, run_id):
 
 
 class Client:
-    def __init__(self, url, token):
+    def __init__(self, url, token, expect_mysql_table=None):
         u = urlsplit(url)
         if (u.scheme != "http" or u.username or u.password or u.query or u.fragment
                 or u.path not in ("", "/") or not u.hostname):
@@ -112,6 +113,9 @@ class Client:
         if addr.version != 4 or not addr.is_private:
             raise ValueError("QA only supports a private IPv4 origin")
         self.host, self.port = str(addr), u.port or 80
+        self.expect_mysql_table = expect_mysql_table
+        if expect_mysql_table and not re.fullmatch(r"fb_page_assignment_qa_[0-9]{8}(?:_[a-z0-9]{1,16})?",expect_mysql_table):
+            raise ValueError("invalid expected QA table")
         self.token = token.strip().encode("ascii")
         if len(self.token)<32 or any(b<33 or b>126 for b in self.token):
             raise ValueError("invalid QA credential")
@@ -138,9 +142,17 @@ class Client:
 
     async def status(self):
         status, body = await asyncio.wait_for(self.http("GET", "/qa/status"), 8)
-        if (status != 200 or body.get("qa_only") is not True or body.get("audit_target") != "isolated-sqlite"
+        target = body.get("audit_target")
+        identity = body.get("audit_identity") or {}
+        mysql_ok = (target=="hk-mysql-qa-table" and identity.get("schema")=="ads_ai"
+                    and identity.get("instance")==body.get("instance") and identity.get("server_uuid")
+                    and re.fullmatch(r"fb_page_assignment_qa_[0-9]{8}(?:_[a-z0-9]{1,16})?",identity.get("table",""))
+                    and re.fullmatch(r"[a-f0-9]{64}",identity.get("schema_sha256","")))
+        if (status != 200 or body.get("qa_only") is not True or (target!="isolated-sqlite" and not mysql_ok)
                 or body.get("feishu") != "disabled" or not body.get("instance")):
             raise ValueError("the endpoint has not authenticated as an isolated QA instance")
+        if self.expect_mysql_table and (not mysql_ok or identity["table"] != self.expect_mysql_table):
+            raise ValueError("the endpoint does not point to the requested isolated MySQL table")
         return body
 
 
@@ -238,6 +250,8 @@ async def replay(client, plan, speed, duration, drain_timeout, report):
     stages = dict(Counter(final["stages"])-Counter(baseline["stages"]))
     ok = load_pass and matched > 0 and not null_causes.get("drama_not_in_task")
     report.update(ok=ok, load_criteria_met=load_pass, positive_selection_observed=matched>0,
+                  audit_target=final["audit_target"], audit_identity=final.get("audit_identity"),
+                  sql_during_audit=final.get("sql_during_audit"),
                   stages=stages, null_causes=null_causes,
                   origin=client.host, instance=final["instance"], speed_multiplier=speed,
                   historical_seconds=duration, target_wall_seconds=duration/speed, attempted=attempts,
@@ -257,6 +271,7 @@ async def replay(client, plan, speed, duration, drain_timeout, report):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin",default="http://127.0.0.1:8945")
+    parser.add_argument("--expect-mysql-table",help="require this exact isolated HK table before sending any requests")
     parser.add_argument("--token-file",type=Path,required=True)
     parser.add_argument("--inputs",type=Path,required=True)
     parser.add_argument("--profile",choices=("burst","hour"),required=True)
@@ -272,7 +287,7 @@ def main():
     fixtures = json.loads(args.inputs.read_text(encoding="utf8"))["events"]
     plan, mapping = make_plan(trace, fixtures, args.allow_representative, run_id)
     report = {"run":run_id,"profile":args.profile,"trace":trace_meta,"inputs":mapping}
-    client = Client(args.origin,args.token_file.read_text())
+    client = Client(args.origin,args.token_file.read_text(),args.expect_mysql_table)
     # Reserve the distinct report first, so a repeated invocation cannot destroy previous evidence.
     with args.output.open("x",encoding="utf8") as out:
         try:
