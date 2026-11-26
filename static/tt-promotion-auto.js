@@ -1,6 +1,7 @@
 (function(){
   "use strict";
   const {id,h,money,time,badge,empty,notify,get:read,post:write,modal,confirmAction,action,boot,byId,name,status,statusBadge}=window.TTPromotion;
+  const {channelMetricRanges,channelMetricSort,channelRangeInputs,channelSortOptions,followersText}=window.TTPromotion;
   const modeNames={template:"按模板选材",drama:"指定爆款剧",material:"指定素材",pool:"素材池分配",serial:"短剧连载"};
   let canSetChannels=false,editorDirty=false;
   let templates=[],channels=[],actorId="",currentView="templates",requestToken=0;
@@ -85,7 +86,7 @@
     return [...all.values()];
   }
   function picker(editor=false){
-    return `<fieldset class="group" data-picker>${editor?"":"<legend>目标频道</legend>"}<div class="picker-filters"><label>搜索频道<input type="search" data-search placeholder="昵称或频道 ID"></label>${editor?'<details class="picker-more"><summary>更多筛选</summary><div class="extra-filters">':""}<label>剧语言<select data-pick="language"></select></label><label>主要受众<select data-pick="audience"></select></label><label>发布资格<select data-pick="eligible"><option value="">全部资格</option><option value="yes">可发布</option><option value="no">受限</option></select></label><label>旧排期<select data-pick="conflict"><option value="">全部排期</option><option value="yes">有旧排期或冲突</option><option value="no">未见旧排期或冲突</option><option value="unknown">待核验</option></select></label><label>28 天收入下限（USD）<input type="number" data-pick="min" min="0" step="0.01" placeholder="不限"></label><label>收入上限（USD）<input type="number" data-pick="max" min="0" step="0.01" placeholder="不限"></label><label>排序<select data-pick="order"><option value="default">频道顺序</option><option value="desc">收入降序</option><option value="asc">收入升序</option></select></label>${editor?"</div></details>":""}</div>
+    return `<fieldset class="group" data-picker>${editor?"":"<legend>目标频道</legend>"}<div class="picker-filters"><label>搜索频道<input type="search" data-search placeholder="昵称或频道 ID"></label>${editor?'<details class="picker-more"><summary>更多筛选</summary><div class="extra-filters">':""}<label>剧语言<select data-pick="language"></select></label><label>主要受众<select data-pick="audience"></select></label><label>发布资格<select data-pick="eligible"><option value="">全部资格</option><option value="yes">可发布</option><option value="no">受限</option></select></label><label>旧排期<select data-pick="conflict"><option value="">全部排期</option><option value="yes">有旧排期或冲突</option><option value="no">未见旧排期或冲突</option><option value="unknown">待核验</option></select></label>${channelRangeInputs("data-pick")}<label>排序<select data-pick="order"><option value="default">频道顺序</option>${channelSortOptions()}</select></label>${editor?"</div></details>":""}</div>
       <div class="inline"><button type="button" class="row-link" data-add>选当前结果</button><button type="button" class="row-link" data-clear>清空已选</button>${editor?'<label class="only-selected"><input type="checkbox" data-selected-only> 只看已选</label>':""}<span class="muted" data-count></span><button type="button" class="row-link" data-first-use hidden>确认所选新频道观看范围</button></div><div class="check-list" data-accounts></div></fieldset>`;
   }
   function setupPicker(form,rows,initial,onChange=()=>{}){
@@ -99,12 +100,12 @@
     let visible=[];
     function draw(){
       const term=search.value.trim().toLowerCase(),val=k=>getControl(k).value;
-      visible=rows.filter(c=>(!onlySelected?.checked||selected.has(byId(c)))&&(!term||[name(c),byId(c),c.drama_language].some(v=>String(v||"").toLowerCase().includes(term)))&&(!val("language")||c.drama_language===val("language"))&&(!val("audience")||audience(c)===val("audience"))&&(!val("eligible")||(c.eligible?"yes":"no")===val("eligible"))&&(!val("conflict")||conflicts(c)===val("conflict"))&&(!val("min")||(c.revenue_28d!=null&&c.revenue_28d>=Number(val("min"))))&&(!val("max")||(c.revenue_28d!=null&&c.revenue_28d<=Number(val("max")))));
-      if(val("order")!=="default")visible.sort((a,b)=>a.revenue_28d==null&&b.revenue_28d!=null?1:b.revenue_28d==null&&a.revenue_28d!=null?-1:((a.revenue_28d??0)-(b.revenue_28d??0))*(val("order")==="asc"?1:-1));
+      visible=rows.filter(c=>(!onlySelected?.checked||selected.has(byId(c)))&&(!term||[name(c),byId(c),c.drama_language].some(v=>String(v||"").toLowerCase().includes(term)))&&(!val("language")||c.drama_language===val("language"))&&(!val("audience")||audience(c)===val("audience"))&&(!val("eligible")||(c.eligible?"yes":"no")===val("eligible"))&&(!val("conflict")||conflicts(c)===val("conflict"))&&channelMetricRanges(val,c));
+      if(val("order")!=="default")visible.sort((a,b)=>channelMetricSort(val("order"),a,b));
       list.innerHTML=visible.map(c=>{
         const aid=byId(c);
         const qualification=c.eligible?"可发布":window.TTFirstUse.needed(c)?"待选观看范围":"受限";
-        const details=[c.drama_language,audience(c),c.revenue_28d==null?"收入待回传":money(c.revenue_28d),
+        const details=[c.drama_language,audience(c),"28 天 "+money(c.revenue_28d),"累计 "+money(c.revenue_total),"粉丝 "+followersText(c.followers),
           ({yes:"有旧排期/冲突",unknown:"旧排期待核验"})[conflicts(c)]].filter(Boolean);
         if(!onlySelected)return `<label><input type="checkbox" value="${h(aid)}" ${selected.has(aid)?"checked":""}><span>${h(name(c))} · #${h(aid)}<small class="secondary">${h([...details,qualification].join(" · "))}</small></span></label>`;
         return `<label><input type="checkbox" value="${h(aid)}" ${selected.has(aid)?"checked":""}><span><strong>${h(name(c))}</strong> <small>#${h(aid)}</small><small class="secondary">${h(details.join(" · "))}</small></span>${badge(qualification,c.eligible?"positive":"warning")}</label>`;
@@ -178,29 +179,39 @@
       <button class="row-link" type="button" data-clear-types>清空类型（不限）</button></details>`;
   }
 
+  const effectSources={x:"X",facebook:"Facebook",all:"X + Facebook 合计",tiktok:"TikTok"};
+  const effectMetrics={x_views:"播放",x_likes:"点赞",x_comments:"评论",x_shares:"分享",x_revenue:"归属收入"};
+  const sortNames={roas:"D0 ROAS",spend:"消耗",...effectMetrics};
+
   function ruleCard(key, c) {
     const drama = key === "drama", label = drama ? "剧目" : "素材";
     const rule = {...(drama?{}:{duration_min_seconds:0,duration_max_seconds:3600}),...c[key+"_rule"]};
     function range(title, low, high, unit, limits = {}) {
       const inputs = [[low,"下限"],[high,"上限"]].map(([name, bound]) =>
-        `<input type="number" name="${key}_${name}" aria-label="${label}${title}${bound}" min="0" ${limits.max ? `max="${limits.max}"` : ""} step="any" value="${h(rule[name] ?? "")}" placeholder="${bound}不限">`
+        `<input type="number" name="${key}_${name}" aria-label="${label}${title}${bound}" min="0" ${limits.max ? `max="${limits.max}"` : ""} step="${limits.step||"any"}" value="${h(rule[name] ?? "")}" placeholder="${bound}不限">`
       );
       return `<fieldset class="range-field"><legend>${title}（${unit}）</legend><div>${inputs.join('<span aria-hidden="true">至</span>')}</div></fieldset>`;
     }
     return `<section class="rule-card"><h3>${drama?"先筛选剧目":"再筛选素材"}</h3>
       ${drama ? resourceTypes(rule) : range("素材时长","duration_min_seconds","duration_max_seconds","秒",{max:3600})}
       ${range("消耗","spend_min","spend_max","USD")}${range("D0 ROAS","roas_min","roas_max","%")}
-      <div class="form-grid"><label>排序指标<select name="${key}_sort_by"><option value="roas">D0 ROAS</option><option value="spend">消耗</option></select></label>
+      <details class="effect-options" ${Object.keys(effectMetrics).some(k=>rule[k+"_min"]!=null||rule[k+"_max"]!=null||rule.sort_by===k)||rule.effect_channel&&rule.effect_channel!=="x"?"open":""}><summary>社媒表现筛选</summary>
+        <label class="field">社媒指标来源<select name="${key}_effect_channel">${Object.entries(effectSources).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}</select></label>
+        <p class="muted" data-effect-info="${key}"></p>
+        ${Object.entries(effectMetrics).map(([metric,title])=>`<div data-effect-range="${key}_${metric}">${range(title,metric+"_min",metric+"_max",metric==="x_revenue"?"USD":"次",{step:metric==="x_revenue"?"0.01":"1",max:1e15})}</div>`).join("")}</details>
+      <div class="form-grid"><label>排序指标<select name="${key}_sort_by">${Object.entries(sortNames).map(([v,label])=>`<option value="${v}">${label}</option>`).join("")}</select></label>
       <label>排序方向<select name="${key}_sort_direction"><option value="desc">从高到低</option><option value="asc">从低到高</option></select></label></div></section>`;
   }
 
   function metricValues(form, key, previous) {
     const controls = form.elements, rule = {...previous};
     const ranges = [["spend_min","spend_max","消耗"],["roas_min","roas_max","D0 ROAS"]];
+    rule.effect_channel=controls[key+"_effect_channel"].value;
+    for(const [metric,label] of Object.entries(effectMetrics))ranges.push([metric+"_min",metric+"_max",label]);
     if(key==="material") ranges.push(["duration_min_seconds","duration_max_seconds","时长"]);
     for(const [low,high,label] of ranges) {
       for(const name of [low,high]) {
-        const value = controls[key+"_"+name].value;
+        const input=controls[key+"_"+name],value=input.disabled?"":input.value;
         rule[name] = value==="" ? null : Number(value);
       }
       if(rule[low]!=null && rule[high]!=null && rule[low]>rule[high]) {
@@ -212,6 +223,28 @@
     rule.sort_by=controls[key+"_sort_by"].value;
     rule.sort_direction=controls[key+"_sort_direction"].value;
     return rule;
+  }
+
+  function syncEffectSource(form,key){
+    const e=form.elements,source=e[key+"_effect_channel"].value,sort=e[key+"_sort_by"];
+    for(const metric of Object.keys(effectMetrics)){
+      const disabled=source==="tiktok"&&metric!=="x_revenue";
+      const range=form.querySelector(`[data-effect-range="${key}_${metric}"]`);
+      range.hidden=disabled;
+      for(const control of range.querySelectorAll("input"))control.disabled=disabled;
+      sort.querySelector(`option[value="${metric}"]`).disabled=disabled;
+      if(disabled&&sort.value===metric)sort.value="x_revenue";
+    }
+    form.querySelector(`[data-effect-info="${key}"]`).textContent=source==="tiktok"?"TikTok 按已回传的累计归属收入筛选和排序。":source==="all"?"合计 X 和 Facebook 已回传的累计社媒表现。":"按当前来源已回传的累计社媒表现筛选和排序。";
+  }
+
+  function launchWindow(input){
+    let value=input.value.trim().replaceAll("～","~");
+    if((value.startsWith("[")&&value.endsWith("]"))||(value.startsWith("【")&&value.endsWith("】")))value=value.slice(1,-1).trim();
+    if(/^\d{1,10}$/.test(value)&&Number(value)<=3650)return Number(value);
+    const span=value.match(/^(-?\d+)\s*~\s*(-?\d+)$/);
+    if(span&&Number(span[1])>=-3650&&Number(span[2])<=3650&&Number(span[1])<=Number(span[2]))return Number(span[1])+"~"+Number(span[2]);
+    input.focus();throw new Error("剧目上线窗口请填 0、天数或从小到大的相对天数区间，例如 -1~0。");
   }
 
   function setupSchedule(form, schedule, changed) {
@@ -268,10 +301,11 @@
         <label>视频制作<select name="video_template"><option value="random_overlay">随机模板</option><option value="direct_outro">固定教程片尾</option></select></label></div>`)}
       ${panel("选择 TT 频道",picker(true))}
       ${panel("两层筛选与排序",`<div class="window-fields form-grid">
-        ${numberField("metric_window_days","指标统计（天）",c.metric_window_days??7,1,30)}
-        ${numberField("drama_launch_window_days","剧目上线窗口（天）",c.drama_launch_window_days??30,0,3650)}
-        ${numberField("material_window_days","素材窗口（天）",c.material_window_days??30,0,3650)}
+        ${numberField("metric_window_days","投放指标统计（天）",c.metric_window_days??7,1,30)}
+        <label>剧目上线窗口（相对天数）<input name="drama_launch_window_days" value="${h(c.drama_launch_window_days??30)}" placeholder="0、30 或 -1~0" required></label>
+        ${numberField("material_window_days","素材入库窗口（天）",c.material_window_days??30,0,3650)}
         ${numberField("cooldown_days","同频道同剧冷却（天）",c.cooldown_days??7,0,3650)}</div>
+        <p class="window-guide">剧目窗口 0 包含所有已上线剧；填 7 表示近 7 天上线，填 -1~0 包含基准时刻至未来 24 小时上线的剧。素材窗口按入库时间计算，0 表示不限。预演与执行会核对同剧冷却、已用素材和在途占用。</p>
         <div class="rule-flow">${ruleCard("drama",c)}${ruleCard("material",c)}</div>`)}
       ${panel("发布时间",`<div class="schedule-options" role="radiogroup" aria-label="排期方式">
         <label><input name="schedule_mode" type="radio" value="fixed">固定时间</label>
@@ -283,7 +317,7 @@
         <label class="stretch">模板文案<textarea name="caption_template" rows="3" maxlength="2200" required>${h(c.caption_template??"{desc} {code}")}</textarea></label></div>
         <div class="macro-tools"><span>插入变量</span>${[["{desc}","素材描述"],["{{drama_name}}","剧名"],["{code}","四位码"],["{url}","归因链接"]].map(([v,label])=>`<button class="row-link" type="button" data-macro="${h(v)}">${label}</button>`).join("")}</div>`)}
       </div><aside class="panel editor-summary" tabindex="-1" aria-label="保存摘要"><h2>保存摘要</h2><div id="edit-volume"><strong id="edit-summary"></strong><small id="edit-times"></small></div>
-      <dl>${[["version","模板版本"],["accounts","已选频道"],["languages","剧语言"],["model","选材方式"],["window","指标统计"],["drama","剧目排序"],["material","素材排序"],["video","视频制作"],["copy","文案来源"]].map(([key,title])=>`<div><dt>${title}</dt><dd data-summary="${key}"></dd></div>`).join("")}</dl>
+      <dl>${[["version","模板版本"],["accounts","已选频道"],["languages","剧语言"],["model","选材方式"],["window","投放指标统计"],["drama","剧目排序"],["material","素材排序"],["video","视频制作"],["copy","文案来源"]].map(([key,title])=>`<div><dt>${title}</dt><dd data-summary="${key}"></dd></div>`).join("")}</dl>
       <p class="muted">${fresh?"草稿保存后可预演，启用后按排期执行。":t.enabled?"当前模板已启用。新版本用于后续排期。":"保存后可继续预演此版本。"}</p>
       <button class="button primary" type="submit">${fresh?"保存草稿":"保存新版本"}</button>
       <button class="button" type="button" data-return>返回模板列表</button></aside></form>`;
@@ -294,6 +328,9 @@
     for(const key of ["drama","material"]){
       e[key+"_sort_by"].value=c[key+"_rule"]?.sort_by||"roas";
       e[key+"_sort_direction"].value=c[key+"_rule"]?.sort_direction||"desc";
+      e[key+"_effect_channel"].value=c[key+"_rule"]?.effect_channel||"x";
+      syncEffectSource(form,key);
+      e[key+"_effect_channel"].oninput=()=>syncEffectSource(form,key);
     }
     const initial=(fresh?preselected:c.account_ids||[]).map(String);
     const getIds=setupPicker(form,pickerRows(initial),initial,changed);
@@ -306,7 +343,7 @@
       id("edit-times").textContent=fixed?`北京时间 · ${times.join("、")||"待设置时间点"}`:"北京时间 · 各频道随机排期";
       const typeCount=form.querySelectorAll("[name=resource_type]:checked").length;
       form.querySelector("[data-type-count]").textContent=typeCount?`已选 ${typeCount} 类`:"不限";
-      const sorts=key=>text(e[key+"_sort_by"])+" · "+text(e[key+"_sort_direction"]);
+      const sorts=key=>(e[key+"_sort_by"].value.startsWith("x_")?text(e[key+"_effect_channel"])+" · ":"")+text(e[key+"_sort_by"])+" · "+text(e[key+"_sort_direction"]);
       const selectedIds=new Set(ids);
       const languages=[...new Set(channels.filter(ch=>selectedIds.has(byId(ch))).map(ch=>ch.drama_language||"待确认"))];
       const fields={languages:languages.join("、")||"—",version:fresh?"新草稿":`当前 v${t.version}`,accounts:ids.length+" 个",model:text(e.model),window:(e.metric_window_days.value||"—")+" 天",drama:sorts("drama"),material:sorts("material"),video:text(e.video_template),copy:text(e.ai_copy)};
@@ -358,7 +395,8 @@
         if(fixed&&(!times.length||times.some(v=>!v)||new Set(times).size!==times.length))throw new Error("请至少填写一个北京时间，各时间点不能重复。");
         const body={name:e.name.value.trim(),account_ids,model:e.model.value,video_template:e.video_template.value,
           schedule:fixed?{mode:"fixed",times}:{mode:"random",daily_count:Number(e.count.value)},ai_copy:e.ai_copy.value==="yes",caption_template:e.caption_template.value.trim()};
-        for(const k of ["metric_window_days","drama_launch_window_days","material_window_days","cooldown_days"])body[k]=Number(e[k].value);
+        for(const k of ["metric_window_days","material_window_days","cooldown_days"])body[k]=Number(e[k].value);
+        body.drama_launch_window_days=launchWindow(e.drama_launch_window_days);
         for(const prefix of ["drama","material"])body[prefix+"_rule"]=metricValues(form,prefix,c[prefix+"_rule"]||{});
         if(t)body.expected_version=t.version;
         await post(t?path(t):templatesPath,body);
@@ -397,7 +435,36 @@
   function metricSummary(layer,value,rule){
     const n=v=>v==null?"—":h(v);
     const limit=(lo,hi)=>lo==null&&hi==null?"不限":`${lo==null?"不限":lo}–${hi==null?"不限":hi}`;
-    return `<div class="tool-pair"><strong>${layer}</strong> 消耗 ${n(value?.spend)} USD · D0 ROAS ${value?.d0_roas==null?"—":n(value.d0_roas)+"%"}<small class="secondary">阈值：消耗 ${h(limit(rule?.spend_min,rule?.spend_max))}，ROAS ${h(limit(rule?.roas_min,rule?.roas_max))}% · ${rule?.sort_by==="spend"?"消耗":"ROAS"}${rule?.sort_direction==="asc"?"升序":"降序"}</small></div>`;
+    const sorting=sortNames[rule?.sort_by||"roas"]||"D0 ROAS";
+    const thresholds=rule?`阈值：消耗 ${h(limit(rule.spend_min,rule.spend_max))}，ROAS ${h(limit(rule.roas_min,rule.roas_max))}% · ${h(sorting)}${rule.sort_direction==="asc"?"升序":"降序"}`:"此项使用历史冻结版本";
+    return `<div class="tool-pair"><strong>${layer}</strong> 消耗 ${n(value?.spend)} USD · D0 ROAS ${value?.d0_roas==null?"—":n(value.d0_roas)+"%"}<small class="secondary">${thresholds}</small></div>`;
+  }
+  function effectiveSchedule(row){
+    const effective=row.scheduled_at_utc,original=row.planned_at_utc,release=row.release_at_utc;
+    const changed=original&&effective&&Date.parse(original)!==Date.parse(effective);
+    return `<small class="secondary">有效排期（北京） ${h(time(effective))}</small>${changed?`<small class="secondary">原排期 ${h(time(original))}</small>`:""}${release?`<small class="secondary">剧目上线 ${h(time(release))}</small>`:""}`;
+  }
+  function effectProof(effect,rule){
+    if(!effect){
+      const expected=Object.keys(effectMetrics).some(k=>rule?.sort_by===k||rule?.[k+"_min"]!=null||rule?.[k+"_max"]!=null);
+      return expected?'<small class="secondary">社媒证据 —</small>':"";
+    }
+    const channel=effectSources[effect.channel]||effect.channel||"—";
+    const available=Object.keys(effectMetrics).filter(key=>effect.channel!=="tiktok"||key==="x_revenue");
+    const facts=available.map(key=>{
+      const field=key.slice(2),value=effect.metrics?.[field],coverage=effect.coverage?.[field];
+      const format=n=>field==="revenue"?money(n):Number(n).toLocaleString("zh-CN");
+      const shown=value==null||coverage===false?"—":format(value);
+      const subtotal=effect.known?.[field];
+      const measured=value==null&&subtotal!=null?`已回传小计 ${format(subtotal)}`:"";
+      const covered=Number.isInteger(coverage)&&effect.posts!=null?`已回传 ${coverage}/${effect.posts} 条`:"";
+      const min=rule?.[key+"_min"],max=rule?.[key+"_max"];
+      const threshold=[min!=null?`≥ ${min}`:"",max!=null?`≤ ${max}`:""].filter(Boolean).join("，");
+      const note=[measured,covered,threshold?"规则 "+threshold:""].filter(Boolean).join(" · ");
+      return `<li>${h(effectMetrics[key])} ${h(shown)}${note?`<small class="muted">（${h(note)}）</small>`:""}</li>`;
+    });
+    const versions=Object.entries(effect.versions||{}).filter(([,v])=>v!=null&&v!=="").map(([k,v])=>(effectSources[k]||k)+" "+v);
+    return `<details class="social-evidence"><summary>${h(channel)} 社媒证据${effect.posts!=null?` · ${h(effect.posts)} 条发布`:""}</summary><ul>${facts.join("")}</ul>${versions.length?`<small class="secondary">数据版本 ${h(versions.join(" · "))}</small>`:""}${effect.as_of?`<small class="secondary">数据截至 ${h(effect.as_of)}</small>`:""}</details>`;
   }
   function execution(t){
     const c=cfg(t),scope=(c.account_ids||[]).map(String),today=new Date(Date.now()+8*3600000).toISOString().slice(0,10);
@@ -473,8 +540,10 @@
       return '<small class="secondary">AI 稿生成中…</small>';
     }
     function displayRow(row){
-      const account=channels.find(ch=>byId(ch)===String(row.account_id));
-      return `<tr><td>${h(account?name(account):row.account_id)}<small class="secondary">#${h(row.account_id)} · ${h(time(row.scheduled_at_utc))}</small></td><td>${statusBadge(row.status)}</td><td>${h(row.drama_name||row.content_id||"—")}<small class="secondary">${h(row.content_id||"")} · 素材 ${h(row.material_id||"—")}</small></td><td>${metricSummary("剧目",row.drama_metrics,c.drama_rule)}<hr>${metricSummary("素材",row.material_metrics,c.material_rule)}</td><td>${inspect(row)}</td><td class="caption">${h(row.caption||"—")}${draftCell(row)}</td></tr>`;
+      const account=channels.find(ch=>byId(ch)===String(row.account_id)),effects=row.social_effects||row.choice?.social_effects;
+      const historical=preview.template_version!=null&&preview.template_version!==t.version;
+      const dramaRule=historical?null:c.drama_rule||{},materialRule=historical?null:c.material_rule||{};
+      return `<tr><td>${h(account?name(account):row.account_id)}<small class="secondary">#${h(row.account_id)}</small>${effectiveSchedule(row)}</td><td>${statusBadge(row.status)}</td><td>${h(row.drama_name||row.content_id||"—")}<small class="secondary">${h(row.content_id||"")} · 素材 ${h(row.material_id||"—")}</small></td><td>${metricSummary("剧目",row.drama_metrics,dramaRule)}${effectProof(effects?.drama,dramaRule)}<hr>${metricSummary("素材",row.material_metrics,materialRule)}${effectProof(effects?.material,materialRule)}</td><td>${inspect(row)}</td><td class="caption">${h(row.caption||"—")}${draftCell(row)}</td></tr>`;
     }
     let rawPayload={},shown=[];
     function summary(){

@@ -132,5 +132,33 @@
   function statusBadge(raw) {
     return badge(status(raw),["published","confirmed","completed","eligible","matched","ready","enabled","selected"].includes(raw)?"positive":["failed","unknown","blocked"].includes(raw)?"danger":["skipped","reconciling","conflict","partial","no_candidate","completed_with_errors"].includes(raw)?"warning":"");
   }
-  window.TTPromotion={id,h,money,cents,time,badge,empty,notify,moduleRetry,get,post,modal,confirmAction,action,boot,byId,name,status,statusBadge};
+  const channelMetricFields=[
+    {field:"revenue_28d",key:"",label:"28 天收入",unit:"USD"},
+    {field:"revenue_total",key:"total_",label:"累计收入",unit:"USD"},
+    {field:"followers",key:"followers_",label:"粉丝数",unit:"人"},
+  ];
+  function channelMetricRanges(value,row){
+    return channelMetricFields.every(({field,key})=>{
+      const min=value(key+"min"),max=value(key+"max"),actual=row[field];
+      if(!min&&!max)return true;
+      return actual!=null&&Number.isFinite(Number(actual))&&(!min||actual>=Number(min))&&(!max||actual<=Number(max));
+    });
+  }
+  function channelMetricSort(order,a,b){
+    const spec=channelMetricFields.find(({key})=>order===key+"asc"||order===key+"desc");
+    if(!spec)return 0;
+    const av=a[spec.field],bv=b[spec.field];
+    if(av==null||bv==null)return av==null&&bv==null?0:av==null?1:-1;
+    return (Number(av)-Number(bv))*(order===spec.key+"asc"?1:-1);
+  }
+  function channelRangeInputs(attribute){
+    return channelMetricFields.map(({key,label,unit})=>["min","max"].map((bound,i)=>
+      `<label>${label}${i?"上限":"下限"}（${unit}）<input ${attribute}="${key+bound}" type="number" ${unit==="人"?'min="0" step="1"':'step="0.01"'} placeholder="不限"></label>`
+    ).join("")).join("");
+  }
+  function channelSortOptions(){
+    return channelMetricFields.map(({key,label})=>`<option value="${key}desc">${label}降序</option><option value="${key}asc">${label}升序</option>`).join("");
+  }
+  function followersText(count){return count==null?"待回传":Number(count).toLocaleString("zh-CN");}
+  window.TTPromotion={id,h,money,cents,time,badge,empty,notify,moduleRetry,get,post,modal,confirmAction,action,boot,byId,name,status,statusBadge,channelMetricRanges,channelMetricSort,channelRangeInputs,channelSortOptions,followersText};
 })();

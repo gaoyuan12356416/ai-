@@ -177,3 +177,4 @@ dialog::backdrop { background: rgba(13,31,54,.52); }
   .tt-directory .channel-table .progress small { display:none; }.themes div { font-size:12px;line-height:1.4; }
   .first-use-body { padding:0 12px 12px; }
 }
+.channel-range-fields { display:contents; }

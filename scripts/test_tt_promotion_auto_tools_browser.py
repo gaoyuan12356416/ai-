@@ -15,6 +15,7 @@ class Fixture:
     def __init__(self):
         self.channels = [
             dict(account_id=str(i), nickname=f"频道{i}", eligible=True, enabled=True,
+                 revenue_total=1200 if i==101 else None, followers=2500 if i==101 else 5000,
                  revenue_28d=100 if i == 101 else None, drama_language="en" if i == 101 else "fr",
                  audience="女频" if i == 101 else None,
                  legacy_scheduled=False if i == 101 else None, legacy_conflict=False if i == 101 else None)
@@ -42,8 +43,11 @@ class Fixture:
     def candidate(i, account, conflict=False):
         return dict(account_id=account, material_id=None if conflict else str(910+i), content_id="the-show",
                     drama_name="测试剧", scheduled_at_utc="2026-11-26T11:00:00Z",
+                    planned_at_utc="2026-11-26T06:00:00Z", release_at_utc="2026-11-26T11:00:00Z",
                     status="skipped" if conflict else "eligible", conflicts=["旧模板 1 冲突"] if conflict else [],
                     reason="preferred_match", drama_metrics=dict(spend=120.5, d0_roas=35.5),
+                    social_effects=dict(drama=dict(channel="all", versions={"x":"20261126","facebook":"20261125"},
+                                                   posts=2, metrics=dict(views=608, likes=None, shares=0, revenue=18.23), known=dict(views=608, likes=12, shares=0), coverage=dict(views=2, likes=1, shares=2))),
                     material_metrics=dict(spend=99, d0_roas=42), caption="两条不同文案预演", decision={})
 
     def handle(self, route):
@@ -186,6 +190,16 @@ def run(screens=None):
 
         form = loc("#edit-template")
         expect(form.locator("[data-count]")).to_contain_text("已选 2")
+        form.locator(".picker-more summary").click()
+        form.locator("[data-pick=total_min]").fill("1000")
+        expect(form.locator("[data-accounts]")).to_contain_text("频道101")
+        expect(form.locator("[data-accounts] label")).to_have_count(1)
+        form.locator("[data-pick=total_min]").fill("")
+        form.locator("[data-pick=followers_min]").fill("3000")
+        expect(form.locator("[data-accounts]")).to_contain_text("频道102")
+        form.locator("[data-pick=followers_min]").fill("")
+        form.locator("[data-pick=order]").select_option("followers_desc")
+        expect(form.locator("[data-accounts] label").first).to_contain_text("频道102")
         form.locator("[data-pick=conflict]").select_option("unknown")
         expect(form.locator("[data-accounts] label")).to_have_count(1)
         expect(form.locator("[data-count]")).to_contain_text("已选 2")
@@ -195,16 +209,28 @@ def run(screens=None):
         form.locator("[name=material_sort_by]").select_option("spend")
         form.locator("[name=material_sort_direction]").select_option("asc")
         form.locator("[name=material_roas_min]").fill("22.55")
-        form.locator("[name=schedule_mode]").select_option("random")
+        form.locator("[name=schedule_mode][value=random]").check()
         form.locator("[name=count]").fill("3")
         expect(loc("#edit-summary")).to_contain_text("6 条计划")
-        loc("#dialog .modal-head button").click()
+        form.locator("[data-return]").click()
         expect(loc("#confirm-title")).to_contain_text("舍弃")
         loc("#confirm-cancel").click()
         form.locator("[type=submit]").click()
-        expect(loc("#modal-error")).to_contain_text("下限不能超过上限")
+        expect(loc("#notice")).to_contain_text("下限不能超过上限")
         assert not fx.sent("/templates")
         form.locator("[name=drama_spend_max]").fill("22")
+        form.locator("[name=drama_launch_window_days]").fill("-1~0")
+        for key in ["drama","material"]:
+            form.locator(f".effect-options:has([name={key}_effect_channel]) summary").click()
+        form.locator("[name=drama_effect_channel]").select_option("facebook")
+        form.locator("[name=drama_x_views_min]").fill("500")
+        form.locator("[name=drama_sort_by]").select_option("x_views")
+        form.locator("[name=material_x_views_min]").fill("11")
+        form.locator("[name=material_sort_by]").select_option("x_views")
+        form.locator("[name=material_effect_channel]").select_option("tiktok")
+        expect(form.locator("[name=material_sort_by]")).to_have_value("x_revenue")
+        expect(form.locator("[name=material_x_views_min]")).to_be_disabled()
+        form.locator("[name=material_x_revenue_min]").fill("9.03")
         screenshot("automation-rules")
         form.locator("[type=submit]").click()
         expect(loc("#dialog")).not_to_be_visible()
@@ -213,6 +239,11 @@ def run(screens=None):
         expect(loc("#dialog")).not_to_be_visible()
         draft = fx.sent("/templates")[0]
         assert draft["account_ids"] == ["101", "102"]
+        assert draft["drama_launch_window_days"] == "-1~0"
+        assert draft["drama_rule"]["effect_channel"] == "facebook" and draft["drama_rule"]["sort_by"] == "x_views"
+        assert draft["drama_rule"]["x_views_min"] == 500
+        assert draft["material_rule"]["effect_channel"] == "tiktok" and draft["material_rule"]["x_views_min"] is None
+        assert draft["material_rule"]["x_revenue_min"] == 9.03
         assert draft["drama_rule"]["spend_min"] == 4 and draft["drama_rule"]["spend_max"] == 22
         assert draft["material_rule"]["roas_min"] == 22.55 and draft["material_rule"]["sort_direction"] == "asc"
 
@@ -274,7 +305,15 @@ def run(screens=None):
         f.locator("[type=submit]").click()
         expect(loc("#preview-feedback")).to_contain_text("已完成 2")
         expect(loc("#preview-output")).to_contain_text("35.5%")
+        expect(loc("#preview-output")).to_contain_text("有效排期（北京） 2026/11/26 19:00")
+        expect(loc("#preview-output")).to_contain_text("原排期 2026/11/26 14:00")
         expect(loc("#preview-output")).to_contain_text("消耗降序")
+        loc(".social-evidence summary").first.click()
+        expect(loc(".social-evidence").first).to_contain_text("播放 608")
+        expect(loc(".social-evidence").first).to_contain_text("点赞 —")
+        expect(loc(".social-evidence").first).to_contain_text("已回传小计 12")
+        expect(loc(".social-evidence").first).to_contain_text("分享 0")
+        expect(loc(".social-evidence").first).to_contain_text("18.23")
         loc("[data-draft-all]").click()
         loc("[data-adopt]").first.click()
         loc("[data-adopt]").first.click()

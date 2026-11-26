@@ -9,6 +9,7 @@ from dataclasses import replace
 from copy import copy
 from datetime import datetime, timedelta
 from pathlib import Path
+from . import pub_launch
 
 from .pub_store import connection, iso, load, now
 
@@ -164,7 +165,7 @@ def at_local(at):
     return datetime.fromisoformat(at.replace("Z", "+00:00")).astimezone(BEIJING).strftime("%H:%M")
 
 
-def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
+def make_selector(native, store, spec, channel, seed, blocked=(), slot_key="", effects=None):
     from features.tt_auto_posts.selector import TwoStageSelector
     from .profiles import rank_candidates
 
@@ -184,7 +185,10 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
             sql = f"SELECT DISTINCT data_source_id FROM `{source.schema}`.ads_custom_source WHERE id IN ({marks})"
             parents.update(str(r["data_source_id"]) for r in source._stream_select(sql, chunk))
     asof = datetime.fromisoformat(spec["_catalog_at"]) if spec.get("_catalog_at") else now()
-    cutoff = asof - timedelta(days=spec.get("material_window_days", 0))
+    launch = pub_launch.normalize(spec.get("drama_launch_window_days", 0))
+    anchor = datetime.fromisoformat(spec["_launch_anchor"]) if spec.get("_launch_anchor") else asof
+    earliest, latest = pub_launch.bounds(launch, anchor)
+    cutoff = (now() if slot_key else asof) - timedelta(days=spec.get("material_window_days", 0))
     excluded = set(spec.get("cooling") or [])
 
     class ScopedSource:
@@ -192,6 +196,8 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
             return getattr(source, name)
 
         def list_drama_rows(self, **kwargs):
+            if isinstance(launch, str):
+                kwargs.update(now_epoch=latest, deploy_since_epoch=earliest)
             rows = source.list_drama_rows(**kwargs)
             # X hit promotion uses the case-sensitive business series_code across languages.
             # Keep every source row for a matched ID so native ambiguity checks still apply.
@@ -204,6 +210,8 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
                 r
                 for r in rows
                 if (not exact or r.content_id == exact)
+                and (not isinstance(launch, str) or earliest <= r.deploy_time <= latest)
+                and (not spec.get("_publish_ceiling") or r.deploy_time <= spec["_publish_ceiling"])
                 and (not (content_ids or resources) or r.content_id in targets)
                 and (not allowed or r.content_id in parents)
             ]
@@ -212,7 +220,12 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
         def _eligible_dramas(self, request, rows, *args):
             if excluded:
                 rows = [r for r in rows if r.content_id not in excluded]
+            if isinstance(launch, str):
+                # Only the hard gate consumes this clock. Metric dates, reservation and cooldown stay real.
+                request = replace(request, now=datetime.fromtimestamp(latest, asof.tzinfo))
             candidates = super()._eligible_dramas(request, rows, *args)
+            if effects is not None:
+                candidates = effects.apply("drama", candidates, args[-1])
             self.ranking = {}
             if spec.get("model") != "income" or not candidates:
                 return candidates
@@ -221,6 +234,24 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
             self.ranking = reason
             lookup = {r.content_id: r for r in candidates}
             return [lookup[r["content_id"]] for r in ranked]
+
+        def _validate_material(self, request, drama, material):
+            # The native strict resolver also checks exact (product, drama, language) release time.
+            # During a simulation project only that read-only resolver to this candidate's own release.
+            resolver = getattr(self.material_validator, "resolver", None)
+            if (
+                drama.deploy_time > int(request.now.timestamp())
+                and isinstance(launch, str)
+                and resolver is not None
+            ):
+                from features.tt_auto_posts.selector import ResolverMaterialValidator
+
+                scoped = copy(self)
+                projected = copy(resolver)
+                projected._now_fn = lambda: datetime.fromtimestamp(drama.deploy_time, asof.tzinfo)
+                scoped.material_validator = ResolverMaterialValidator(projected)
+                return super(Selector, scoped)._validate_material(request, drama, material)
+            return super()._validate_material(request, drama, material)
 
         def _eligible_materials(self, request, drama, rows, *args):
             if allowed:
@@ -235,7 +266,10 @@ def make_selector(native, store, spec, channel, seed, blocked=(), slot_key=""):
                     )
                 }
                 rows = [r for r in rows if r.material_id in recent]
-            return super()._eligible_materials(request, drama, rows, *args)
+            candidates = super()._eligible_materials(request, drama, rows, *args)
+            if effects is not None:
+                candidates = effects.apply("material", candidates, args[-1], drama.content_id)
+            return candidates
 
     history = OldHistory(native.legacy_reader, old_databases()[0], native.store.db_path, slot_key, blocked)
     return Selector(
@@ -312,6 +346,7 @@ class Runtime:
 
     def preview_session(self):
         runtime = copy(self)
+        runtime._preview_effects = {}
         runtime.native = copy(self.native)
         s = runtime.native.selector = copy(self.native.selector)
         s.source = SnapshotReads(
@@ -349,8 +384,18 @@ class Runtime:
 
         config = template.config
         scoped = {**config, **opts}
-        selector = make_selector(self.native, _PreviewStore(self.store), scoped, channel, seed, blocked)
-        rules = selector_rules(config)
+        from .social_effects import SocialRules
+
+        # Keep every slot for the same template/language on one projection generation.
+        cache = getattr(self, "_preview_effects", {})
+        effect_key = (template.id, template.version, channel["drama_language"])
+        if effect_key not in cache:
+            cache[effect_key] = SocialRules(config, channel["drama_language"])
+        effects = cache[effect_key]
+        selector = make_selector(
+            self.native, _PreviewStore(self.store), scoped, channel, seed, blocked, effects=effects
+        )
+        rules = selector_rules(pub_launch.native_config(config))
         # Promotion reserves each account's drama cooldown atomically in its own slot ledger.
         rules = replace(rules, drama=replace(rules.drama, cooldown_days=0))
         req = SelectionRequest(
@@ -382,6 +427,8 @@ class Runtime:
             drama_name=m.get("drama_name") or drama.get("name", ""),
             description=m.get("description", ""),
             material_name=m.get("material_name", ""),
+            deploy_time=drama["deploy_time"],
+            social_effects=effects.audit(drama["content_id"], m["material_id"]),
             drama_metrics=drama["metrics"],
             material_metrics=m["metrics"],
             metric_dates=raw["metric_dates"],
@@ -502,6 +549,13 @@ def promotion_executor(native, path):
     from datetime import datetime
 
     class Executor(AutoPostExecutor):
+        def _select(self, task, claim_token):
+            # Native selection includes credential, duration and creator checks that differ by release.
+            # Project its per-call template without changing the shared executor or native module.
+            phase = copy(self)
+            phase.store = pub_launch.NativeSelectStore(self.store)
+            return super(Executor, phase)._select(task, claim_token)
+
         def _video_route_for_task(self, task):
             route = super()._video_route_for_task(task)
             return replace(route, gpu_client=ReceiptGPU(route.gpu_client, path, task))
@@ -565,12 +619,15 @@ def promotion_executor(native, path):
                 def select_and_reserve(inner, request):
                     task = self.store.get_task(request.task_id)
                     row = self.frozen(task)
-                    spec = load(row["opts"])
+                    spec = {**load(row["config_json"]), **load(row["opts"])}
                     choice = load(row["choice"])
                     spec.update(
                         content_id=choice["content_id"],
                         material_id=choice["material_id"],
                         model="rules",
+                        _publish_ceiling=int(datetime.fromisoformat(row["scheduled_at"]).timestamp())
+                        if choice.get("release_deferred")
+                        else None,
                         material_window_days=load(row["config_json"]).get("material_window_days", 0),
                     )
                     request = replace(
@@ -657,8 +714,63 @@ def promotion_executor(native, path):
                     raise
 
         def _publish(self, task, claim_token=None):
-            if not task.publish_id and not task.unknown_outcome:
-                hits = conflicts(task.account_id, task.scheduled_at_utc)
+            if (
+                not task.publish_id
+                and not task.unknown_outcome
+                and task.status not in {"unknown", "reconciling"}
+            ):
+                row = self.frozen(task)
+                choice = load(row["choice"])
+                at = row["scheduled_at"]
+                if choice.get("release_deferred"):
+                    release = pub_launch.current_release(
+                        native.selector.source, task.content_id, task.drama_language
+                    )
+                    if not release:
+                        raise AutoPostExecutionError(
+                            "tt_promotion_release_unavailable", "原剧目/语言没有可核验的上线时间", 409
+                        )
+                    due, release_at = pub_launch.times(at, release)
+                    if due > iso(self._now()):
+                        if due != at:
+                            if conflicts(task.account_id, due):
+                                raise AutoPostExecutionError(
+                                    "tt_promotion_release_conflict", "调整后的上线时间与旧频道排期冲突", 409
+                                )
+                            with connection(path, write=True) as db:
+                                if db.execute(
+                                    """SELECT 1 FROM ttp_slot WHERE account_id=? AND slot_key<>?
+                                    AND state NOT IN ('skipped','missed') AND abs(julianday(scheduled_at)-julianday(?))*86400<60 LIMIT 1""",
+                                    (task.account_id, row["slot_key"], due),
+                                ).fetchone():
+                                    raise AutoPostExecutionError(
+                                        "tt_promotion_release_conflict",
+                                        "调整后的上线时间与新版频道排期冲突",
+                                        409,
+                                    )
+                                db.execute(
+                                    """UPDATE ttp_slot SET scheduled_at=?,choice=json_set(choice,'$.scheduled_at_utc',?,
+                                    '$.release_at_utc',?,'$.deploy_time',?) WHERE slot_key=?""",
+                                    (due, due, release_at, release, row["slot_key"]),
+                                )
+                        return self.store.transition_task(
+                            task.id,
+                            "retry_wait",
+                            expected_statuses={task.status},
+                            claim_token=claim_token,
+                            updates=dict(
+                                claim_phase="publish",
+                                claim_worker="",
+                                claim_token="",
+                                lease_expires_at_utc="",
+                                next_attempt_at_utc=due,
+                                error_code="tt_promotion_wait_for_release",
+                                error_message="等待原剧目/语言的有效发布时间",
+                            ),
+                            event_type="promotion_release_deferred",
+                            message="原任务延至剧目上线",
+                        )
+                hits = conflicts(task.account_id, at)
                 if hits or self.selector.legacy_reader.seen_material_ids([task.material_id]):
                     raise AutoPostExecutionError(
                         "tt_promotion_legacy_conflict", "原任务存在排期或素材冲突", 409

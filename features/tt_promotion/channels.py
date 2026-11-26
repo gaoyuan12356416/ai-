@@ -307,8 +307,25 @@ def _setting_rows(path, tenant):
         }
 
 
+def _followers(account, sample):
+    raw = account.get("fan_count")
+    flag = account.get("has_metric_snapshot")
+    if flag == 0 or raw is not None and type(raw) is not int:
+        return None
+    if type(raw) is int and (raw > 0 or raw == 0 and flag == 1):
+        return raw
+    # The existing account DTO converts missing counts to zero and omits the
+    # metric flag. Compare the sample's account sync tick to distinguish them.
+    if raw not in (None, 0) or not sample or not sample.get("seen_at"):
+        return None
+    seen_at = str(account.get("last_seen_at") or "").replace("T", " ")[:19]
+    if seen_at == sample["seen_at"] and (raw is None or raw == sample["count"]):
+        return sample["count"]
+    return None
+
+
 def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True, section=None):
-    from .profiles import profiles_for_accounts
+    from .profiles import account_followers, profiles_for_accounts
 
     if section not in (None, "profile", "handoff"):
         raise ChannelError(400, "未知的频道数据模块")
@@ -322,6 +339,11 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
     ids = list(current) if detail is None else [str(detail)]
     if detail is not None and ids[0] not in current:
         raise ChannelError(404, "未找到频道")
+    try:
+        followers = account_followers()
+    except (OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("TT follower snapshot unavailable: %s", type(exc).__name__)
+        followers = {}
     errors = {}
     # Optional read models must never supply account identity or execution permission.
     try:
@@ -365,6 +387,7 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         profile = profile_set["accounts"].get(aid) or {"status": "unavailable", "windows": {}}
         windows = profile.get("windows", {})
         amount = windows.get("28d", {}).get("revenue_cents")
+        cumulative = windows.get("all", {}).get("revenue_cents")
         audiences = windows.get("all", {}).get("audiences") or []
         first = next(
             (
@@ -395,6 +418,8 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
                        for t in first.get("children", []) if (t.get("revenue_cents") or 0) > 0][:3],
             publish_policy=policy,
             revenue_28d=None if amount is None else amount / 100,
+            revenue_total=None if cumulative is None else cumulative / 100,
+            followers=_followers(account, followers.get(aid)),
             has_profile=None if profile.get("status") == "unavailable" else bool(first),
             audience=first.get("name"),
             themes=[t.get("name") for t in first.get("children", [])[:3]],

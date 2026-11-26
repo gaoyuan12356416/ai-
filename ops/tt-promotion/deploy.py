@@ -142,7 +142,7 @@ def stage(sha_id):
     fr = runtime / "features"
     fr.mkdir(exist_ok=True)
     (fr / "__init__.py").touch()
-    for name in ("tt_promotion", "x_tag_revenue", "drama_audience"):
+    for name in ("tt_promotion", "x_tag_revenue", "drama_audience", "social_material_effects"):
         shutil.copytree(
             SRC / "features" / name,
             fr / name,

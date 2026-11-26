@@ -127,3 +127,12 @@
   .editor-section .picker-filters>label { flex-basis:165px; }
   .editor-section .rule-card { padding:12px; }
 }
+.effect-options { margin:12px 0;padding:9px 11px;border:1px solid #d3deeb;border-radius:8px; }
+.effect-options summary { cursor:pointer;font-weight:600; }
+.effect-options[open] summary { margin-bottom:9px; }
+.effect-options .field { display:grid;gap:4px; }
+.effect-options .muted,.window-guide { color:#566d83;font-size:12px;line-height:1.65; }
+.window-guide { margin:0 0 14px; }
+.social-evidence { margin-top:6px;color:#234e75;font-size:12px; }
+.social-evidence summary { cursor:pointer; }
+.social-evidence ul { list-style:none;padding:0;margin:5px 0; }

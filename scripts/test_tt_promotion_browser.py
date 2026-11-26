@@ -22,6 +22,8 @@ def run(screens=None):
             today_published=3,
             today_expected=5,
             revenue_28d=125.50,
+            revenue_total=525.50,
+            followers=100,
             has_profile=True,
             audience="女频",
             themes=["悬疑"],
@@ -37,6 +39,8 @@ def run(screens=None):
             today_published=0,
             today_expected=2,
             revenue_28d=None,
+            revenue_total=None,
+            followers=200,
             has_profile=False,
             themes=[],
         ),
@@ -327,6 +331,19 @@ def run(screens=None):
         page.locator("#list-identity-error button").click()
         expect(page.locator("#channels tr")).to_have_count(2)
         expect(page.locator("#channels")).to_contain_text("待回传")
+        page.locator("#filter-toggle").click()
+        page.locator("[name=total_min]").fill("500")
+        expect(page.locator("#channels tr")).to_have_count(1)
+        expect(page.locator("#channels")).to_contain_text("525.50")
+        page.locator("[name=total_min]").fill("")
+        page.locator("[name=followers_min]").fill("101")
+        expect(page.locator("#channels tbody, #channels")).to_contain_text("剧场乙")
+        page.locator("[name=followers_min]").fill("")
+        page.locator("[name=sort]").select_option("followers_desc")
+        expect(page.locator("#channels tr").first).to_contain_text("剧场乙")
+        page.locator("[name=sort]").select_option("total_asc")
+        expect(page.locator("#channels tr").first).to_contain_text("剧场甲")
+        page.locator("#filter-toggle").click()
         page.get_by_role("button", name="剧场甲").click()
         expect(page.get_by_text("在用旧模板", exact=False)).to_be_visible()
         page.locator("summary").filter(has_text="女频").click()

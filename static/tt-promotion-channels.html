@@ -35,7 +35,7 @@
       <form id="filters" class="filters channel-filters">
         <label class="channel-search">频道<input name="search" type="search" placeholder="昵称或账号 ID"></label>
         <label>剧语言<select name="language"><option value="">全部语言</option></select></label>
-        <label>排序<select name="sort"><option value="desc">收入从高到低</option><option value="asc">收入从低到高</option><option value="name">按频道名称</option></select></label>
+        <label>排序<select name="sort"></select></label>
         <button id="filter-toggle" class="button" type="button" aria-expanded="false" aria-controls="advanced-filters">更多筛选</button>
         <button class="row-link" type="reset">重置</button>
         <div id="advanced-filters" hidden>
@@ -44,14 +44,13 @@
         <label>收入画像<select name="profile"><option value="">全部</option><option value="yes">有收入画像</option><option value="no">暂无画像</option></select></label>
         <label>第一受众<select name="audience"><option value="">全部受众</option></select></label>
         <label>旧排期与在途<select name="legacy"><option value="">全部</option><option value="yes">有旧排期或在途</option><option value="no">无旧排期和在途</option><option value="unknown">待核验</option></select></label>
-        <label>28 天收入下限（USD）<input name="min" type="number" min="0" step="0.01" placeholder="不限"></label>
-        <label>28 天收入上限（USD）<input name="max" type="number" min="0" step="0.01" placeholder="不限"></label>
+        <div id="channel-range-fields" class="channel-range-fields"></div>
         </div>
       </form>
       <div id="selected-strip" class="selection-strip" hidden><span id="selected-summary"></span><button id="first-for-selected" class="row-link" type="button" hidden>确认观看范围</button><button id="review-selection" class="row-link" type="button">查看所选频道</button><button id="clear-selection" class="row-link" type="button">清空选择</button></div>
       <div id="channel-summary" class="channel-summary" role="status"></div>
       <div class="mobile-only mobile-checkbox"><label><input id="select-mobile" type="checkbox"> 选择当前结果</label></div>
-      <div class="table-wrap channel-table"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前结果"></th><th>频道 / 剧语言</th><th>运营统计<small>北京时间</small></th><th>28 天收入<small>美元 · UTC</small></th><th>收入画像<small>受众 · 占频道累计收入</small></th><th>优势题材<small>占第一受众收入</small></th><th>排期与在途</th><th>发布状态</th></tr></thead><tbody id="channels"></tbody></table></div>
+      <div class="table-wrap channel-table"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前结果"></th><th>频道 / 剧语言</th><th>运营统计<small>北京时间</small></th><th>28 天 / 累计收入<small>美元 · UTC</small></th><th>收入画像<small>受众 · 占频道累计收入</small></th><th>优势题材<small>占第一受众收入</small></th><th>排期与在途</th><th>发布状态</th></tr></thead><tbody id="channels"></tbody></table></div>
     </section></section>
   </main>
 </div>

@@ -48,6 +48,17 @@ def stage(folder, commit):
         dirs_exist_ok=True,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
+    # Pin the same projection reader used by the X/FB templates inside this release.
+    social = Path("features/social_material_effects")
+    social_dir = runtime / social
+    if social_dir.is_symlink():
+        social_dir.unlink()
+    shutil.copytree(
+        deploy.SRC / social,
+        social_dir,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     records = []
     for path in sorted((deploy.SRC / "static").glob("tt-promotion*")):
         data = path.read_bytes()
@@ -83,10 +94,13 @@ def stage(folder, commit):
         "from features.tt_promotion import operations,http_server,publishing,profiles",
         cwd=runtime,
     )
+
     def modules(root):
         return {p.name: p.read_bytes() for p in (root / package).glob("*.py")}
+
     state = dict(
-        backend_changed=modules(previous) != modules(runtime),
+        backend_changed=modules(previous) != modules(runtime)
+        or any(deploy.read(previous / social / p.name) != p.read_bytes() for p in social_dir.glob("*.py")),
         commit=commit,
         files=records,
         link=dict(link=str(deploy.CURRENT), before=str(previous), after=str(runtime)),

@@ -7,6 +7,9 @@
   const sectionRequests={profile:0,handoff:0};
   const detailCache=new Map();
   const filters=id("filters");
+  const {channelMetricRanges,channelMetricSort,channelRangeInputs,channelSortOptions,followersText}=window.TTPromotion;
+  id("channel-range-fields").innerHTML=channelRangeInputs("name");
+  filters.elements.sort.innerHTML=channelSortOptions()+'<option value="name">按频道名称</option>';
   const privacyNames={PUBLIC_TO_EVERYONE:"所有人",MUTUAL_FOLLOW_FRIENDS:"互相关注的朋友",FOLLOWER_OF_CREATOR:"关注者",SELF_ONLY:"仅自己"};
   const periodNames={"28d":"近 28 天","7d":"近 7 天",all:"累计 · 选材依据"};
   function topLabel(value){return typeof value==="object" ? value?.name : value;}
@@ -38,9 +41,7 @@
   function filtered(){
     const controls=filters.elements;
     const query=controls.search.value.trim().toLowerCase();
-    const min=controls.min.value,max=controls.max.value;
     return items.filter(row=>{
-      const amount=row.revenue_28d;
       return (!selectedScope || readiness(row)===selectedScope) && (!query || [name(row),row.username,row.account_id].some(piece=>String(piece??"").toLowerCase().includes(query)))
         && (!controls.language.value || row.drama_language===controls.language.value)
         && (!controls.eligible.value || !!row.eligible===(controls.eligible.value==="yes"))
@@ -48,14 +49,10 @@
         && (!controls.profile.value || row.has_profile===(controls.profile.value==="yes"))
         && (!controls.audience.value || topLabel(row.audience)===controls.audience.value)
         && (!controls.legacy.value || legacyState(row)===controls.legacy.value)
-        && (min==="" || (amount!=null && amount>=Number(min)))
-        && (max==="" || (amount!=null && amount<=Number(max)));
+        && channelMetricRanges(key=>controls[key].value,row);
     }).sort((a,b)=>{
       if(controls.sort.value==="name")return name(a).localeCompare(name(b),"zh-CN");
-      if(a.revenue_28d==null && b.revenue_28d!=null)return 1;
-      if(b.revenue_28d==null && a.revenue_28d!=null)return -1;
-      const difference=Number(a.revenue_28d)-Number(b.revenue_28d);
-      return (controls.sort.value==="asc"?difference:-difference)||byId(a).localeCompare(byId(b));
+      return channelMetricSort(controls.sort.value,a,b)||byId(a).localeCompare(byId(b));
     });
   }
   function selectionState(){
@@ -94,9 +91,9 @@
     id("channels").innerHTML=displayed.map(row=>{
       const account=h(byId(row)),state=readiness(row);
       return `<tr><td class="check"><input type="checkbox" data-select="${account}" aria-label="${h("选择 "+name(row))}" ${selected.has(byId(row))?"checked":""}></td>
-      <td class="identity"><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">#${account} · ${h(row.drama_language||"未配置")}</small></td>
+      <td class="identity"><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">#${account} · ${h(row.drama_language||"未配置")}</small><small class="secondary">粉丝 ${h(followersText(row.followers))}</small></td>
       <td class="progress"><span class="metric-label">今日已发 / 应发</span><strong>${h(row.today_published??"—")} / ${h(row.today_expected??"—")}</strong><small class="secondary">最近 ${h(time(row.last_published_at))}</small></td>
-      <td class="income"><span class="mobile-only">28 天收入</span><strong>${h(money(row.revenue_28d))}</strong></td>
+      <td class="income"><span class="mobile-only">28 天收入</span><strong>${h(money(row.revenue_28d))}</strong><small class="secondary">累计 ${h(money(row.revenue_total))}</small></td>
       ${profileCells(row)}
       <td class="wide-only">${h(legacyLabel(row))}</td>
       <td class="readiness">${badge(state==="ready"?"可发布":state==="first"?"待选观看范围":"账号受限",state==="ready"?"positive":"warning")}
@@ -105,7 +102,7 @@
     }).join("") || empty(8,items.length?"当前条件下没有频道":"暂无可见频道");
     selectionState();
   }
-  const profileKeys=["revenue_28d","audience","themes","has_profile","audience_mix","theme_mix"];
+  const profileKeys=["revenue_28d","revenue_total","audience","themes","has_profile","audience_mix","theme_mix"];
   const planKeys=["today_expected","today_published","last_published_at","legacy_scheduled","legacy_template_count","legacy_inflight_count","legacy_conflict"];
   function mergeChannel(row,prior,section){
     if(!prior || !section)return row;
@@ -263,7 +260,7 @@
     const snapshot=errors.profile&&prior?.meta?{...prior.meta,module_errors:errors}:currentMeta;
     const plan=errors.handoff||section==="profile"?prior?.handoff:result.handoff;
     detailCache.set(accountId,{channel,profile,meta:snapshot,handoff:plan});
-    modal(name(channel),`<div class="group"><div class="inline">${badge(channel.eligible?"可发布":"受限",channel.eligible?"positive":"warning")} ${badge(channel.enabled?"新版已参与":"新版已暂停")} ${h(channel.drama_language||"未配置剧语言")} · ID ${h(accountId)}</div><p class="muted">${h(channel.reason||"")} 最近成功发布 ${h(time(channel.last_published_at))} · 今日已发 / 应发 ${h(channel.today_published??"—")} / ${h(channel.today_expected??"—")}</p></div>
+    modal(name(channel),`<div class="group"><div class="inline">${badge(channel.eligible?"可发布":"受限",channel.eligible?"positive":"warning")} ${badge(channel.enabled?"新版已参与":"新版已暂停")} ${h(channel.drama_language||"未配置剧语言")} · ID ${h(accountId)} · 粉丝 ${h(followersText(channel.followers))}</div><p class="muted">${h(channel.reason||"")} 最近成功发布 ${h(time(channel.last_published_at))} · 今日已发 / 应发 ${h(channel.today_published??"—")} / ${h(channel.today_expected??"—")}</p></div>
     <div class="group"><div class="heading"><h3>收入画像</h3><div id="periods" class="periods">${Object.entries(periodNames).map(([v,label])=>`<button class="tab" data-period="${v}">${label}</button>`).join("")}</div></div><div id="detail-profile-error" class="module-error" hidden></div><div id="window"></div></div>
     <div class="group"><h3>模板与交接</h3><div id="detail-handoff-error" class="module-error" hidden></div>${plan?handoff(plan):""}</div>
     <div class="group"><div class="heading"><h3>新版发布策略</h3><button id="edit-policy" class="button" type="button">编辑发布策略</button></div><p class="muted">${h(policySummary(channel))}${channel.policy_source==="account"?" · 已沿用该账号的设置":channel.policy_source==="channel"?" · 已保存于新版":""}</p></div>`);

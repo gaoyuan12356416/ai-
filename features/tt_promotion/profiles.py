@@ -6,9 +6,11 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
+from subprocess import TimeoutExpired
 import tempfile
 import threading
 
@@ -16,6 +18,7 @@ from features.drama_audience.store import records as audience_records
 from features.social_analytics.backend_scope import eligible
 from features.social_analytics.bill_income import FIRST_DAY
 from features.social_analytics.report import campaign_index, identity, resolve
+from features.social_analytics.tiktok_scope import UNASSIGNED
 from features.social_analytics.warehouse_reader import current, connect, DEFAULT_ROOT as WAREHOUSE
 from features.x_tag_revenue.core import language
 from features.x_tag_revenue.hierarchy import build_tree
@@ -74,6 +77,42 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
     ]
     index = campaign_index(catalog)
     owners = {key: resolve(candidates) for key, candidates in index.items()}
+    social = defaultdict(int)
+    targets = {}
+    for key, candidates in index.items():
+        row = owners[key]
+        if (
+            not row
+            or not row["drama"]
+            or not row["channel"]
+            or row["owner"] == UNASSIGNED
+            or not key[2].startswith("tt:")
+            or row.get("platform_only")
+        ):
+            continue
+        # The report resolves campaign ownership at drama level. Credit a material
+        # only if every row for that exact campaign agrees on the frozen material.
+        materials = set()
+        for candidate in candidates:
+            frozen = candidate.get("tt_identity") or []
+            material = ""
+            if (
+                len(frozen) == 6
+                and frozen[0] == candidate["owner"]
+                and frozen[2] == candidate["channel"]
+                and frozen[3] == candidate["drama"]
+                and frozen[4]
+                and candidate.get("tt_frozen_route", {}).get("key") == candidate["key"]
+            ):
+                material = str(frozen[4])
+            materials.add(material)
+        targets[key] = (
+            row["tenant"],
+            row["owner"],
+            language(row["language"]),
+            row["drama"],
+            materials.pop() if len(materials) == 1 else "",
+        )
     grouped = {}
 
     def accept(row, day, revenue=0, iaa=0, publications=0):
@@ -118,6 +157,8 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
             if type(revenue) is not int or type(iaa) is not int:
                 raise ValueError("invalid_warehouse_cents")
             accept(owners[key], day, revenue, iaa)
+            if key in targets and day >= windows["all"]["start"]:
+                social[targets[key]] += revenue
     by_receipt = defaultdict(list)
     for key, candidates in index.items():
         for row in candidates:
@@ -141,6 +182,18 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
             status=windows["all"]["status"],
         ),
         facts=list(grouped.values()),
+        social_income=[
+            dict(
+                product="dramawave",
+                tenant=tenant,
+                owner=owner,
+                language=lang,
+                content_id=content,
+                material_id=material,
+                cents=cents,
+            )
+            for (tenant, owner, lang, content, material), cents in sorted(social.items())
+        ],
         classifications=categories,
     )
 
@@ -187,9 +240,31 @@ def refresh(root=None, warehouse=None, env_file="/root/drama_material_service/.e
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return dict(status="already_running")
-        manifest, path = current(
-            warehouse or os.environ.get("SOCIAL_ANALYTICS_WAREHOUSE_ROOT") or WAREHOUSE
-        )
+        reader = Reader(environment(env_file))
+        try:
+            fans = reader.query(
+                [
+                    """SELECT HEX(JSON_OBJECT('id',CAST(source_account_id AS CHAR),
+                    'followers',fan_count,'seen_at',DATE_FORMAT(last_seen_at,'%Y-%m-%d %H:%i:%s')))
+                FROM ads_ai.tiktok_personal_account_snapshot
+                WHERE is_active=1 AND has_metric_snapshot=1"""
+                ],
+                timeout=25,
+            )
+            _write_snapshot(
+                directory,
+                "followers.json",
+                {
+                    str(row["id"]): {"count": row["followers"], "seen_at": row["seen_at"]}
+                    for row in fans
+                    if type(row["followers"]) is int and row["followers"] >= 0
+                },
+            )
+        except (OSError, RuntimeError, ValueError, KeyError, TimeoutExpired) as exc:
+            logging.getLogger(__name__).warning(
+                "TT follower snapshot refresh deferred: %s", type(exc).__name__
+            )
+        manifest, path = current(warehouse or os.environ.get("SOCIAL_ANALYTICS_WAREHOUSE_ROOT") or WAREHOUSE)
         last_day = datetime.now(timezone.utc).date() - timedelta(days=1)
         window = _windows(manifest, last_day)["all"]
         if window["status"] != "complete" and (directory / "current.json").is_file():
@@ -210,39 +285,100 @@ def refresh(root=None, warehouse=None, env_file="/root/drama_material_service/.e
                 )
             ]
         ids = sorted({r["drama"] for r in catalog if r.get("drama")})
-        classifications = _catalog_labels(Reader(environment(env_file)), ids)
+        classifications = _catalog_labels(reader, ids)
         data = build_snapshot(catalog, effects, classifications, manifest, last_day)
-        with tempfile.NamedTemporaryFile(
-            "w", dir=directory, prefix=".profiles-", encoding="utf-8", delete=False
-        ) as tmp:
-            name = Path(tmp.name)
-            try:
-                json.dump(data, tmp, ensure_ascii=False, separators=(",", ":"))
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            except BaseException:
-                name.unlink(missing_ok=True)
-                raise
-        # Directory access is granted to service users by the scoped install.
+        _write_snapshot(directory, "current.json", data)
+        return dict(status="updated", version=manifest["version"], dramas=len(ids), facts=len(data["facts"]))
+
+
+def _write_snapshot(directory, filename, data):
+    with tempfile.NamedTemporaryFile(
+        "w", dir=directory, prefix=".profiles-", encoding="utf-8", delete=False
+    ) as tmp:
+        name = Path(tmp.name)
+        try:
+            json.dump(data, tmp, ensure_ascii=False, separators=(",", ":"))
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        except BaseException:
+            tmp.close()
+            name.unlink(missing_ok=True)
+            raise
+    try:
         name.chmod(0o640)
-        os.replace(name, directory / "current.json")
-        return dict(
-            status="updated", version=manifest["version"], dramas=len(ids), facts=len(data["facts"])
-        )
+        os.replace(name, directory / filename)
+    finally:
+        name.unlink(missing_ok=True)
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def _cached(path, mtime, size, inode):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _snapshot(directory):
-    path = directory / "current.json"
+def _snapshot(directory, filename="current.json"):
+    path = directory / filename
     try:
         stat = path.stat()
     except FileNotFoundError:
         return None
     return _cached(str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def account_followers(root=None):
+    directory = Path(root or os.environ.get("TT_PROMOTION_PROFILE_ROOT") or DEFAULT_ROOT)
+    return _snapshot(directory, "followers.json") or {}
+
+
+def social_metrics(actor, language_code, *, product="dramawave", snapshot=None, root=None):
+    """Known cumulative 2250 income in USD cents for the actor's visible TT organic campaigns."""
+    if snapshot is None:
+        directory = Path(root or os.environ.get("TT_PROMOTION_PROFILE_ROOT") or DEFAULT_ROOT)
+        try:
+            snapshot = _snapshot(directory)
+        except (OSError, ValueError):
+            snapshot = None
+    data = snapshot or {}
+    meta = data.get("meta") or {}
+    result = dict(
+        status="unavailable",
+        version=meta.get("version", ""),
+        end=meta.get("end", ""),
+        dramas={},
+        materials={},
+    )
+    product = str(product or "").strip().lower()
+    lang = language(language_code)
+    if (
+        not actor.get("tenant_key")
+        or not actor.get("user_id")
+        or product != "dramawave"
+        or not lang
+        or "social_income" not in data
+    ):
+        return result
+    material_parent = defaultdict(set)
+    for row in data["social_income"]:
+        if (
+            row["tenant"] != actor["tenant_key"]
+            or (actor.get("role") != "admin" and row["owner"] != actor["user_id"])
+            or row["product"] != product
+            or row["language"] != lang
+        ):
+            continue
+        content, material, cents = row["content_id"], row["material_id"], row["cents"]
+        result["dramas"][content] = result["dramas"].get(content, 0) + cents
+        if material:
+            material_parent[material].add(content)
+            result["materials"][material] = result["materials"].get(material, 0) + cents
+    for material, parents in material_parent.items():
+        if len(parents) > 1:
+            del result["materials"][material]
+    result["status"] = meta.get("status", "unavailable")
+    if result["status"] == "partial":
+        for scope in ("dramas", "materials"):
+            result[scope] = {key: amount for key, amount in result[scope].items() if amount != 0}
+    return result
 
 
 def _merge_tree(dramas, classifications, window):

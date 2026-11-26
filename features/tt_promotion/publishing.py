@@ -15,7 +15,7 @@ from functools import cached_property
 from datetime import datetime, timedelta
 
 from features.tt_auto_posts.core import AuditActor
-from . import pub_copy
+from . import pub_copy, social_effects, pub_launch
 from .pub_native import PublicationError, Runtime, number
 from .pub_store import BEIJING, PreviewStore, connection, dump, install, iso, load, now
 
@@ -58,10 +58,13 @@ def safe_caption(raw):
 
 def selection_rule(raw, defaults):
     raw = {} if raw is None else raw
-    if not isinstance(raw, dict) or set(raw) - set(defaults):
+    if not isinstance(raw, dict) or set(raw) - set(defaults) - social_effects.FIELDS - {"effect_channel"}:
         raise PublicationError("筛选规则字段无效")
     rule = {**defaults, **raw}
-    if rule["sort_by"] not in ("spend", "roas") or rule["sort_direction"] not in ("asc", "desc"):
+    if rule["sort_by"] not in ("spend", "roas", *social_effects.SORTS) or rule["sort_direction"] not in (
+        "asc",
+        "desc",
+    ):
         raise PublicationError("排序字段或方向无效")
     for lo, hi in [
         ("spend_min", "spend_max"),
@@ -94,10 +97,17 @@ def selection_rule(raw, defaults):
         rule["resource_type_v2"] = (
             [] if values == [] else clean_ids(values, "资源类型", r"[A-Za-z0-9_-]{1,64}")
         )
-    return rule
+    try:
+        return social_effects.normalized(rule)
+    except ValueError as exc:
+        raise PublicationError(str(exc)) from exc
 
 
 def config_for(payload, visible, actor, creator=None):
+    try:
+        launch = pub_launch.normalize(payload.get("drama_launch_window_days", 60))
+    except ValueError as e:
+        raise PublicationError(str(e)) from None
     name = str(payload.get("name") or "").strip()
     if not name or len(name) > 120:
         raise PublicationError("模板名称长度应为1到120个字符")
@@ -137,7 +147,7 @@ def config_for(payload, visible, actor, creator=None):
         video_template=video,
         ai_copy=payload.get("ai_copy", False),
         metric_window_days=number(payload.get("metric_window_days", 7), 1, 30, "指标窗口"),
-        drama_launch_window_days=number(payload.get("drama_launch_window_days", 60), 0, 3650, "剧目窗口"),
+        drama_launch_window_days=launch,
         material_window_days=number(payload.get("material_window_days", 30), 0, 3650, "素材窗口"),
         cooldown_days=number(payload.get("cooldown_days", 0), 0, 3650, "同剧冷却"),
         caption_template=safe_caption(payload.get("caption_template", "{desc}\n{code}")),
@@ -493,13 +503,19 @@ class Publisher:
                         "material_id",
                         "reason",
                         "scheduled_at_utc",
+                        "planned_at_utc",
+                        "release_at_utc",
+                        "release_deferred",
                         "seed",
                         "profile_version",
                         "drama_metrics",
                         "material_metrics",
+                        "social_effects",
                         "copy_facts_key",
                     )
                 }
+                if row.get("release_deferred"):
+                    by_account[r["account"]]["launch_anchor"] = snap["created_at"]
         if set(by_account) != set(ids):
             raise PublicationError("缺少本次执行所需的频道预演", 409)
         adoptions = {}
@@ -581,6 +597,11 @@ class Publisher:
                 slot_opts = {k: v for k, v in opts.items() if k not in ("preview_rows", "adoptions")}
                 if acct in opts.get("preview_rows", {}):
                     slot_opts["expected"] = opts["preview_rows"][acct]
+                    expected = slot_opts["expected"]
+                    if expected.get("release_deferred") and expected.get("status") == "eligible":
+                        slot_opts["_requested_at"] = at
+                        slot_opts["_launch_anchor"] = expected["launch_anchor"]
+                        at = max(at, expected["scheduled_at_utc"])
                 if acct in opts.get("adoptions", {}):
                     slot_opts["adopted_draft"] = opts["adoptions"][acct]
                 # One new owner per account/minute. Older native run IDs remain separate.
@@ -721,11 +742,22 @@ class Publisher:
             return dict(row, reason=reason, conflicts=hits)
         with connection(self.path) as db:
             opts = self._spec(db, t, acct, opts)
+            opts.setdefault("_catalog_at", iso(now()))
             if opts["mode"] != "serial":
                 opts["cooling"] = sorted(
                     set(opts.get("cooling", [])) | self.cooling(db, acct, at, t.config["cooldown_days"])
                 )
         choice = self.runtime.preview(t, channel, opts, key, blocked)
+        effective, release = pub_launch.times(at, choice.get("deploy_time"))
+        row.update(
+            planned_at_utc=opts.get("_requested_at") or at,
+            scheduled_at_utc=effective,
+            release_at_utc=release,
+            release_deferred=bool(release and release > (opts.get("_launch_anchor") or opts["_catalog_at"])),
+        )
+        if effective != at:
+            _, extra = self.gate(channel, effective, own=own)
+            hits = list(dict.fromkeys([*hits, *extra]))
         if choice["material_id"] in blocked or (
             opts["mode"] != "serial" and choice["content_id"] in opts.get("cooling", [])
         ):
@@ -967,6 +999,26 @@ class Publisher:
                             gate=(item.get("reason", ""), item.get("conflicts", [])),
                         )
                         item.pop("options", None)
+                        due = datetime.fromisoformat(item["scheduled_at_utc"])
+                        if item["status"] == "eligible" and any(
+                            abs((due - prev).total_seconds()) < 60 for prev, _ in previous
+                        ):
+                            item.update(
+                                status="skipped",
+                                reason="有效发布时间与本频道另一条预演排期重叠",
+                                conflicts=["本频道有效发布时间重叠"],
+                            )
+                        if (
+                            item["status"] == "eligible"
+                            and item.get("release_deferred")
+                            and opts["mode"] != "serial"
+                            and any(
+                                cid == item["content_id"]
+                                and abs((due - prev).total_seconds()) < t.config["cooldown_days"] * 86400
+                                for prev, cid in previous
+                            )
+                        ):
+                            item.update(status="skipped", reason="频道在有效发布时间仍处于同剧冷却期")
                     except Exception as e:
                         item = dict(
                             account_id=acct,
@@ -984,7 +1036,9 @@ class Publisher:
                         return
                 if item["status"] == "eligible":
                     seen.add(str(item["material_id"]))
-                    cooling.setdefault(acct, []).append((datetime.fromisoformat(at), item["content_id"]))
+                    cooling.setdefault(acct, []).append(
+                        (datetime.fromisoformat(item["scheduled_at_utc"]), item["content_id"])
+                    )
                     if opts["mode"] == "serial":
                         bound = acct
             self.previews.finish(key, token, "")
@@ -1076,12 +1130,16 @@ class Publisher:
                     unknown_outcome=bool(r["unknown_outcome"]),
                     result_bucket=r["result_bucket"],
                     scheduled_at_utc=r["scheduled_at"],
+                    planned_at_utc=ch.get("planned_at_utc") or opts.get("_requested_at") or r["scheduled_at"],
+                    release_at_utc=ch.get("release_at_utc") or expected.get("release_at_utc"),
+                    deploy_time=ch.get("deploy_time"),
                     reason=r["error_message"] or r["reason"] or ch.get("reason", ""),
                     error_code=r["error_code"],
                     content_id=r["content_id"] or ch.get("content_id", ""),
                     material_id=r["native_material"] or r["material_id"],
                     drama_name=ch.get("drama_name", ""),
                     decision=ch.get("decision"),
+                    social_effects=ch.get("social_effects") or {},
                     preview_comparison=dict(
                         status=comparison,
                         reason=detail,
@@ -1150,8 +1208,14 @@ class Publisher:
             slots = db.execute(
                 """SELECT s.*,j.template_id,j.version,j.actor,j.trigger_type FROM ttp_slot s
                 JOIN ttp_job j ON j.id=s.job_id WHERE s.state IN ('planned','reserved') AND s.next_at<=?
-                AND s.scheduled_at<=? ORDER BY s.scheduled_at,s.job_id,s.rowid LIMIT ?""",
-                (iso(current), iso(current + timedelta(minutes=45)), limit),
+                AND (s.scheduled_at<=? OR (s.state='planned' AND json_extract(s.opts,'$._requested_at')<=?))
+                ORDER BY s.scheduled_at,s.job_id,s.rowid LIMIT ?""",
+                (
+                    iso(current),
+                    iso(current + timedelta(minutes=45)),
+                    iso(current + timedelta(minutes=45)),
+                    limit,
+                ),
             ).fetchall()
         scopes = {}
         for row in slots:
@@ -1189,12 +1253,13 @@ class Publisher:
                 s["scheduled_at"]
             ) + timedelta(minutes=20):
                 raise PublicationError("计划时段已过", 409)
+            options = load(s["opts"])
             item = self.sample(
                 t,
                 ch,
-                load(s["opts"]),
+                options,
                 s["scheduled_at"],
-                selection_seed(t, ch["account_id"], s["scheduled_at"]),
+                selection_seed(t, ch["account_id"], options.get("_requested_at") or s["scheduled_at"]),
                 own=s["slot_key"],
             )
             if item["status"] != "eligible":
@@ -1227,18 +1292,28 @@ class Publisher:
                     )
                     self._spec(db, t, s["account_id"], opts)
                 elif item["content_id"] in self.cooling(
-                    db, s["account_id"], s["scheduled_at"], t.config["cooldown_days"], s["slot_key"]
+                    db, s["account_id"], item["scheduled_at_utc"], t.config["cooldown_days"], s["slot_key"]
                 ):
                     raise PublicationError("该频道已预约相同剧目，仍在冷却期", 409)
+                if (
+                    item["scheduled_at_utc"] != s["scheduled_at"]
+                    and db.execute(
+                        """SELECT 1 FROM ttp_slot WHERE account_id=? AND slot_key<>? AND state NOT IN ('skipped','missed')
+                       AND abs(julianday(scheduled_at)-julianday(?))*86400<60 LIMIT 1""",
+                        (s["account_id"], s["slot_key"], item["scheduled_at_utc"]),
+                    ).fetchone()
+                ):
+                    raise PublicationError("频道在剧目上线时已有排期", 409)
                 try:
                     count = db.execute(
                         """UPDATE ttp_slot SET state='reserved',material_id=?,choice=?,account_json=?,opts=?,
-                                changed_at=? WHERE slot_key=? AND state='planned'""",
+                                scheduled_at=?,changed_at=? WHERE slot_key=? AND state='planned'""",
                         (
                             item["material_id"],
                             dump(item),
                             dump(acct),
                             dump(opts),
+                            item["scheduled_at_utc"],
                             iso(current),
                             s["slot_key"],
                         ),
@@ -1317,7 +1392,16 @@ def is_transient(e):
 
 
 def error_text(e):
-    if isinstance(e, PublicationError):
+    counts = getattr(e, "rejection_counts", {})
+    exclusions = [
+        (("剧目" if k.startswith("drama") else "素材"), n) for k, n in counts.items() if "_social_" in k
+    ]
+    if exclusions:
+        totals = {label: sum(n for group, n in exclusions if group == label) for label, _ in exclusions}
+        return "无合格素材。社媒效果阈值排除" + "、".join(
+            f"{count}个{label}" for label, count in totals.items()
+        )
+    if isinstance(e, (PublicationError, social_effects.EffectSourceError)):
         return str(e)[:300]
     return str(getattr(e, "code", "") or type(e).__name__)[:160]
 
