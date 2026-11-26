@@ -11,6 +11,8 @@ Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 ProtectSystem=strict
+# SQLite grouping and sorting need writable temporary files.
+PrivateTmp=true
 UMask=0022
 
 [Install]
