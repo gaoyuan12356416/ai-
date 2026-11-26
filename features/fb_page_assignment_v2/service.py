@@ -13,9 +13,11 @@ import json
 import multiprocessing
 from threading import BrokenBarrierError
 import time
+import uuid
 
 from features.fb_page_assignment.runtime import log
 from features.fb_page_assignment.service import InvalidRequest, validate
+from .ledger import KEYED_INCIDENTS
 
 
 def private_error(status, code):
@@ -97,6 +99,8 @@ class Assignment:
         self.pools = None
         self.warming = None
         self.recoverable = set()
+        self.keyed_incidents = {}
+        self.clearing = {}
         self.notifications = set()
         self.alerts = store
         self.notice_lock = asyncio.Lock()
@@ -104,7 +108,9 @@ class Assignment:
     async def start(self):
         self.slots = asyncio.Semaphore(self.parallel)
         if hasattr(self.store, "active_incidents"):
-            self.recoverable.update(await asyncio.to_thread(self.store.active_incidents))
+            self.recoverable.update((await asyncio.to_thread(self.store.active_incidents)) - KEYED_INCIDENTS)
+        if hasattr(self.store, "active_keyed_incidents"):
+            self.keyed_incidents = await asyncio.to_thread(self.store.active_keyed_incidents)
         if self.compute is None:
             pool = self._pool()
             try:
@@ -156,9 +162,14 @@ class Assignment:
         return bool(self.active or self.pending)
 
     def notify(self, kind, external="", group=None, code="", event_id=None):
-        self.recoverable.add(kind)
-        self._schedule_notice(self.alerts.incident, kind, external_task_id=external,
-                              page_group_id=group, detail=code, event_id=event_id)
+        if kind in KEYED_INCIDENTS and external:
+            event_id = event_id or uuid.uuid4().hex
+            self.keyed_incidents.setdefault(kind,{})[external] = event_id
+            self.clearing.pop((kind,external),None)
+        else:
+            self.recoverable.add(kind)
+        return self._schedule_notice(self.alerts.incident, kind, external_task_id=external,
+                                     page_group_id=group, detail=code, event_id=event_id)
 
     def recover(self, *kinds):
         for kind in kinds:
@@ -166,16 +177,51 @@ class Assignment:
                 self.recoverable.discard(kind)
                 self._schedule_notice(self.alerts.recovery, kind)
 
-    def _schedule_notice(self, function, *args, **kwargs):
+    @staticmethod
+    async def _wait_key_notices(notices, deadline):
+        # Allow ordinary SQLite commits before replying. A slow auxiliary outbox
+        # continues independently and cannot consume the caller's reply budget.
+        wait = min(.25, max(0., deadline - time.monotonic() - .05))
+        if notices and wait:
+            await asyncio.wait(notices, timeout=wait)
+
+    async def _recover_success(self, key, observed, deadline):
+        notices = []
+        for kind, marker in observed:
+            active = self.keyed_incidents.get(kind)
+            if active is None or active.get(key)!=marker:
+                continue
+            del active[key]
+            last = not active
+            if last:
+                del self.keyed_incidents[kind]
+            self.clearing[kind,key] = marker
+            notices.append(self._schedule_notice(self.alerts.recover_key, kind,key,marker,last=last,
+                                                 done=partial(self._key_cleared, kind,key,marker)))
+        await self._wait_key_notices(notices,deadline)
+
+    def _key_cleared(self, kind, key, marker, ok):
+        if self.clearing.get((kind,key)) == marker:
+            del self.clearing[kind,key]
+            if not ok:
+                self.keyed_incidents.setdefault(kind,{})[key] = marker
+
+    def _schedule_notice(self, function, *args, done=None, **kwargs):
         async def apply_notice():
+            ok = False
             try:
                 async with self.notice_lock:
                     await asyncio.to_thread(function, *args, **kwargs)
+                    ok = True
             except Exception as exc:
                 log("v2_notification_record_failed", operation=function.__name__, category=type(exc).__name__)
+            finally:
+                if done is not None:
+                    done(ok)
         task = asyncio.create_task(apply_notice())
         self.notifications.add(task)
         task.add_done_callback(self.notifications.discard)
+        return task
 
     async def submit(self, payload, deadline):
         try:
@@ -184,6 +230,8 @@ class Assignment:
             self.notify("contract", code=str(exc))
             return private_error(400, str(exc))
         key, group = request["external_task_id"], request["page_group_id"]
+        observed = ([(kind,keys[key]) for kind,keys in self.keyed_incidents.items() if key in keys]
+                    if self.keyed_incidents else None)
         self.active += 1
         try:
             remaining = deadline - time.monotonic()
@@ -191,6 +239,8 @@ class Assignment:
                 try:
                     response = await asyncio.wait_for(self._submit(request, fingerprint, deadline), remaining)
                     if time.monotonic() < deadline:
+                        if observed and response[0] == 200:
+                            await self._recover_success(key,observed,deadline)
                         return response
                 except asyncio.TimeoutError:
                     pass
@@ -221,7 +271,8 @@ class Assignment:
             job = self.pending.get(key)
             if job is not None:
                 if job.fingerprint != fingerprint:
-                    self.notify("request_conflict", key, group, "idempotency_conflict")
+                    notice = self.notify("request_conflict", key, group, "idempotency_conflict")
+                    await self._wait_key_notices([notice],deadline)
                     return private_error(409, "idempotency_conflict")
                 job.deadline = max(job.deadline, deadline)
             else:
@@ -233,7 +284,8 @@ class Assignment:
                     return private_error(503, "receipt_unavailable")
                 if cached is not None:
                     if cached[0] == 409:
-                        self.notify("request_conflict", key, group, "idempotency_conflict")
+                        notice = self.notify("request_conflict", key, group, "idempotency_conflict")
+                        await self._wait_key_notices([notice],deadline)
                     return cached
                 if time.monotonic() >= deadline:
                     return private_error(503, "request_deadline")
@@ -329,7 +381,11 @@ class Assignment:
                 # started. No save was attempted; one new calculation serves all waiters.
                 self.incoming.put_nowait(job)
                 return
-            self.notify("pool_authorization" if status == 403 else "page_source", key, group, str(selection))
+            if status == 403:
+                notice = self.notify("pool_authorization", key, group, str(selection))
+                await self._wait_key_notices([notice],job.deadline)
+            else:
+                self.notify("page_source", key, group, str(selection))
             self._done(job, private_error(status, str(selection)))
             return
         try:
@@ -343,7 +399,8 @@ class Assignment:
         if status_body[0] == 200:
             self.recover("page_source", "persistence", "timeout", "saturation")
         elif status_body[0] == 409:
-            self.notify("request_conflict", key, group, "idempotency_conflict")
+            notice = self.notify("request_conflict", key, group, "idempotency_conflict")
+            await self._wait_key_notices([notice],job.deadline)
         self._done(job, status_body)
 
     async def close(self):

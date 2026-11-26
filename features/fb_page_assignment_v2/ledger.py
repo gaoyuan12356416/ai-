@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+KEYED_INCIDENTS = frozenset(("request_conflict", "pool_authorization"))
+
+
 def encoded(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
@@ -67,6 +70,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS alert_outbox(
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS failure_signal(kind TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS failure_key(kind TEXT NOT NULL, external_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,PRIMARY KEY(kind,external_id));
             """)
 
     @contextmanager
@@ -176,10 +181,15 @@ class Store:
         event = event_payload(kind, external_task_id, page_group_id, detail, event_id)
         with self.db(write=True) as db:
             db.execute("INSERT OR IGNORE INTO failure_signal(kind) VALUES(?)", (event["kind"],))
+            if kind in KEYED_INCIDENTS and external_task_id:
+                db.execute("INSERT INTO failure_key VALUES(?,?,?) ON CONFLICT(kind,external_id) "
+                           "DO UPDATE SET event_id=excluded.event_id",(kind,external_task_id,event["id"]))
             db.execute("INSERT OR IGNORE INTO alert_outbox(id,body) VALUES(?,?)", (event["id"], encoded(event)))
 
     def recovery(self, kind):
         kind = safe_code(kind)
+        if kind in KEYED_INCIDENTS:
+            return
         with self.db() as db:
             if not db.execute("SELECT 1 FROM failure_signal WHERE kind=?", (kind,)).fetchone():
                 return
@@ -191,6 +201,33 @@ class Store:
     def active_incidents(self):
         with self.db() as db:
             return {row[0] for row in db.execute("SELECT kind FROM failure_signal")}
+
+    def active_keyed_incidents(self):
+        with self.db() as db:
+            active = {}
+            for kind,key,event in db.execute("SELECT kind,external_id,event_id FROM failure_key"):
+                active.setdefault(kind,{})[key] = event
+            return active
+
+    def recover_key(self, kind, key, event_id, *, last, volatile=False):
+        """Only a successful retry which saw this generation can clear its own key."""
+        if kind not in KEYED_INCIDENTS or not key or not event_id:
+            raise ValueError("invalid_keyed_recovery")
+        with self.db(write=True) as db:
+            if volatile:
+                # The worker still holds this exact newer fault in memory following a disk outage.
+                changed = db.execute("DELETE FROM failure_key WHERE kind=? AND external_id=?",(kind,key)).rowcount
+            else:
+                changed = db.execute("DELETE FROM failure_key WHERE kind=? AND external_id=? AND event_id=?",
+                                     (kind,key,event_id)).rowcount
+            if not last or (not changed and not volatile):
+                return
+            if db.execute("SELECT 1 FROM failure_key WHERE kind=? LIMIT 1",(kind,)).fetchone():
+                return
+            closed = db.execute("DELETE FROM failure_signal WHERE kind=?",(kind,)).rowcount
+            if closed or volatile:
+                event = event_payload(kind,external_task_id=key,action="recovered")
+                db.execute("INSERT INTO alert_outbox(id,body) VALUES(?,?)",(event["id"],encoded(event)))
 
     def alert_events(self):
         with self.db() as db:

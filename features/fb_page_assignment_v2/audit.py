@@ -10,7 +10,7 @@ import zlib
 from collections import deque
 from datetime import datetime, timezone
 
-from .ledger import digest, encoded, event_payload
+from .ledger import KEYED_INCIDENTS, digest, encoded, event_payload
 
 LOG = logging.getLogger(__name__)
 TABLE = "`ads_ai`.`fb_drama_page_assignment_log`"
@@ -167,6 +167,7 @@ class Workers:
         self._emergency_lock = threading.Lock()
         self._emergency_events = deque()
         self._emergency_open = set()
+        self._emergency_keys = {}
 
     def _remember(self, event):
         with self._emergency_lock:
@@ -174,7 +175,9 @@ class Workers:
                 LOG.error("v2_emergency_relay_full kind=%s", event["kind"])
                 return
             self._emergency_events.append(event)
-            if event["action"] == "fault":
+            if event["kind"] in KEYED_INCIDENTS and event["external_task_id"]:
+                self._emergency_keys[event["kind"],event["external_task_id"]] = event["id"]
+            elif event["action"] == "fault":
                 self._emergency_open.add(event["kind"])
             else:
                 self._emergency_open.discard(event["kind"])
@@ -182,11 +185,23 @@ class Workers:
     def incident(self, kind, external_task_id="", page_group_id=None, detail="", event_id=None):
         try:
             self.store.incident(kind, external_task_id, page_group_id, detail, event_id)
+            if kind in KEYED_INCIDENTS:
+                with self._emergency_lock:
+                    self._emergency_keys.pop((kind,external_task_id),None)
         except Exception as exc:
             # A disk outage cannot persist an alert to the broken disk. The
             # independent CPU receiver still deduplicates this event by its ID.
             LOG.error("v2_alert_local_persistence_failed class=%s", type(exc).__name__)
             self._remember(event_payload(kind, external_task_id, page_group_id, detail, event_id))
+
+    def recover_key(self, kind, key, event_id, *, last):
+        with self._emergency_lock:
+            volatile = self._emergency_keys.get((kind,key)) == event_id
+        self.store.recover_key(kind,key,event_id,last=last,volatile=volatile)
+        if volatile:
+            with self._emergency_lock:
+                if self._emergency_keys.get((kind,key)) == event_id:
+                    del self._emergency_keys[kind,key]
 
     def recovery(self, kind):
         try:
