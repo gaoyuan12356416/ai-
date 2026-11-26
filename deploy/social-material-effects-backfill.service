@@ -1,0 +1,13 @@
+[Unit]
+Description=Collect first Facebook engagement observations for historical posts
+RequiresMountsFor=/mnt/data-disk
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/social-material-effects-collector/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 -B -m features.social_material_effects.backfill
+Nice=8
+TimeoutStartSec=30min
+UMask=0022

@@ -1,14 +1,20 @@
-"""Incremental GET-only enrichment, independent of the Facebook publishing queue."""
-from collections import defaultdict
+"""GET-only engagement reads shared by the hourly report and the historical collector."""
+from collections import Counter, defaultdict
 from contextlib import closing
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
+from pathlib import Path
 import sqlite3
 import time
 
+from features.fb_auto_posts.effect_collector import FeedbackError, GatedReader, MetaReader
+
 FIELDS = ('id,reactions.type(LIKE).limit(0).summary(total_count),comments.limit(0).summary(total_count),'
           'shares,insights.metric(post_media_view).period(lifetime)')
+RATE_CODES = {'feedback_graph_'+str(code) for code in (4,17,32,613,429,80001)}
+STOP_CODES = RATE_CODES | {'feedback_graph_usage_high','feedback_request_budget_reached'}
 
 
 def count(value):
@@ -24,103 +30,236 @@ def extract(row):
         'shares':count((row.get('shares') or {}).get('count'))}.items() if value is not None}
 
 
-def sync(posts, cache, *, max_calls=160, max_posts=1500):
-    from features.fb_auto_posts.effect_collector import FeedbackError, GatedReader, MetaReader
-    graph = MetaReader(os.environ.get('FB_GRAPH_API_VERSION','v22.0'), max_calls=max_calls)
-    now = int(time.time())
-    with closing(sqlite3.connect(cache)) as db, closing(graph.session):
-        db.execute('CREATE TABLE IF NOT EXISTS observation(id TEXT PRIMARY KEY,native TEXT NOT NULL,'
-                   'metrics TEXT NOT NULL,observed TEXT,retry INTEGER NOT NULL,error TEXT NOT NULL)')
-        saved = {r[0]:r for r in db.execute('SELECT * FROM observation')}
-        due = [p for k,p in posts.items() if k not in saved or saved[k][4]<=now]
-        due.sort(key=lambda p:(p['post_id'] in saved, (saved.get(p['post_id']) or (0,0,0,0,0))[4],
+class Usage:
+    def __init__(self):
+        self.peak = 0
+        self.wait = 0
+        self.http_status = 0
+
+    def response(self,response,*args,**kwargs):
+        self.http_status = response.status_code
+        def visit(value):
+            if isinstance(value,dict):
+                for key,item in value.items():
+                    if key in ('call_count','total_cputime','total_time') and isinstance(item,(int,float)):
+                        self.peak = max(self.peak,item)
+                    elif key=='estimated_time_to_regain_access' and isinstance(item,(int,float)):
+                        self.wait = max(self.wait,int(item*60))
+                    else:
+                        visit(item)
+            elif isinstance(value,list):
+                for item in value:
+                    visit(item)
+        for key in ('x-app-usage','x-page-usage','x-business-use-case-usage'):
+            try:
+                visit(json.loads(response.headers.get(key,'{}')))
+            except ValueError:
+                pass
+        retry = response.headers.get('Retry-After','')
+        if retry.isdigit():
+            self.wait = max(self.wait,int(retry))
+        elif retry:
+            try:
+                self.wait = max(self.wait,int(parsedate_to_datetime(retry).timestamp()-time.time()))
+            except (TypeError,ValueError,OverflowError):
+                pass
+
+
+def prepare(db):
+    db.execute('CREATE TABLE IF NOT EXISTS observation(id TEXT PRIMARY KEY,native TEXT NOT NULL,'
+               'metrics TEXT NOT NULL,observed TEXT,retry INTEGER NOT NULL,error TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS collection_state(key TEXT PRIMARY KEY,value INTEGER NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS collection_run(id INTEGER PRIMARY KEY,mode TEXT NOT NULL,'
+               'started INTEGER NOT NULL,finished INTEGER NOT NULL,stats TEXT NOT NULL)')
+    db.commit()
+
+
+def plan(posts,saved,history,now,max_posts):
+    if history:
+        due = [p for key,p in posts.items() if key not in saved]
+        due.sort(key=lambda p:(p['published_at'],p['post_id']))
+    else:
+        due = [p for key,p in posts.items() if key not in saved or saved[key][4]<=now]
+        due.sort(key=lambda p:(p['post_id'] in saved,(saved.get(p['post_id']) or (0,0,0,0,0))[4],
                                -datetime.fromisoformat(p['published_at'].replace('Z','+00:00')).timestamp()))
-        pending = defaultdict(list)
-        for p in due:
-            group = pending[p['account_id']]
-            if len(group)<25:
-                group.append(p)
-        by_page = {}
-        slots = max_posts
-        for page,group in pending.items():
-            by_page[page] = group[:slots]
-            slots -= len(by_page[page])
-            if not slots:
-                break
-        status = ''
+    pages = defaultdict(list)
+    for p in due:
+        pages[p['account_id']].append(p)
+    selected = {}
+    for page,rows in pages.items():
+        # A historical Page lookup can serve several full groups of posts.
+        size = min(max_posts,len(rows)) if history else min(max_posts,len(rows),25)
+        selected[page] = rows[:size]
+        max_posts -= size
+        if max_posts==0:
+            break
+    return len(due),selected
+
+
+def engage(values):
+    return 'likes' in values and 'comments' in values
+
+
+def fetch_batch(batch,page,credentials,saved,graph,usage):
+    natives = {p['post_id']:p.get('native') or (saved.get(p['post_id']) or (0,''))[1] for p in batch}
+    pending = {p['post_id']:p for p in batch}
+    samples = defaultdict(dict)
+    error = 'fb_page_access_unavailable'
+    stop = ''
+    winning = None
+    for cred in credentials[:3]:
+        if not pending:
+            break
         try:
-            reader = GatedReader(os.environ)
-            pages = list(by_page)
-            credentials = {}
-            for index,(page, group) in enumerate(by_page.items()):
-                if index % 40 == 0:
-                    credentials = reader.credentials(pages[index:index+40])
-                for i in range(0,len(group),25):
-                    if graph.calls >= max_calls:
-                        break
-                    batch = group[i:i+25]
-                    natives = {p['post_id']:(p['native'] or (saved.get(p['post_id']) or (0,''))[1]) for p in batch}
-                    remaining = {p['post_id']:p for p in batch}
-                    error = 'fb_page_access_unavailable'
-                    def save(key, metrics, observed, retry, code):
-                        db.execute('INSERT OR REPLACE INTO observation VALUES(?,?,?,?,?,?)',
-                                   (key,natives[key],json.dumps(metrics),observed,retry,code))
-                    for cred in credentials.get(page,[])[:3]:
-                        if not remaining or graph.calls >= max_calls:
-                            break
-                        try:
-                            missing = [p for key,p in remaining.items() if not natives[key]]
-                            if missing:
-                                rows = graph.get(dict(ids=','.join(p['object_id'] for p in missing),
-                                                      fields='id,post_id'),cred['value'])
-                                for p in missing:
-                                    row = rows.get(p['object_id'], {})
-                                    native = str(row.get('post_id') or '')
-                                    if native.isdigit():
-                                        native = page + '_' + native
-                                    if str(row.get('id')) == p['object_id'] and native.startswith(page+'_') and native[len(page)+1:].isdigit():
-                                        natives[p['post_id']] = native
-                            native_ids = [natives[key] for key in remaining if natives[key]]
-                            if not native_ids:
-                                error = 'fb_post_id_unavailable'
-                                continue
-                            result = graph.get(dict(ids=','.join(native_ids),fields=FIELDS),cred['value'])
-                            for key,p in list(remaining.items()):
-                                row = result.get(natives[key], {})
-                                values = extract(row) if row.get('id') == natives[key] else {}
-                                if not values:
-                                    error = 'fb_post_metrics_unavailable'
-                                    continue
-                                observed = datetime.now(timezone.utc).isoformat(timespec='seconds')
-                                age = now-datetime.fromisoformat(p['published_at'].replace('Z','+00:00')).timestamp()
-                                interval = 3600 if age<7*86400 else (21600 if age<30*86400 else 86400)
-                                save(key,values,observed,now+interval,'')
-                                del remaining[key]
-                        except FeedbackError as exc:
-                            error = str(exc)
-                            if error in ('feedback_request_budget_reached','feedback_graph_usage_high'):
-                                status = error
-                                break
-                    for key in remaining:
-                        old = saved.get(key)
-                        save(key,json.loads(old[2]) if old else {},old[3] if old else None,now+6*3600,error)
-                    db.commit()
-                    if status:
-                        break
-                if status or graph.calls >= max_calls:
-                    break
-        except FeedbackError as exc:
-            status = str(exc)
-        for key,native,metrics,stamp,_,error in db.execute('SELECT * FROM observation'):
-            p = posts.get(key)
-            if p is None:
+            missing = [p for key,p in pending.items() if not natives[key]]
+            if missing:
+                rows = graph.get(dict(ids=','.join(p['object_id'] for p in missing),fields='id,post_id'),cred['value'])
+                for p in missing:
+                    row = rows.get(p['object_id'],{})
+                    native = str(row.get('post_id') or '')
+                    if native.isdigit():
+                        native = page+'_'+native
+                    if str(row.get('id'))==p['object_id'] and native.startswith(page+'_') and native[len(page)+1:].isdigit():
+                        natives[p['post_id']] = native
+            ids = [natives[key] for key in pending if natives[key]]
+            if not ids:
+                error = 'fb_post_id_unavailable'
                 continue
-            values = json.loads(metrics)
-            if p.get('views') is not None and (p.get('metrics_at') or '') > (stamp or ''):
-                values.pop('views',None)
-            p.update(values)
-            p['metrics_at'] = max(filter(None,(stamp,p.get('metrics_at'))),default=None)
-            if native:
-                p['post_url'] = 'https://www.facebook.com/'+p['account_id']+'/posts/'+native.split('_')[-1]
-            p['error_code'] = error
-        return dict(graph_calls=graph.calls,graph_due=len(due),metrics_upstream_error=status)
+            rows = graph.get(dict(ids=','.join(ids),fields=FIELDS),cred['value'])
+            for key in list(pending):
+                row = rows.get(natives[key],{})
+                if natives[key] and row.get('id')==natives[key]:
+                    samples[key].update(extract(row))
+                if engage(samples[key]):
+                    del pending[key]
+                    winning = cred
+                else:
+                    error = 'fb_post_metrics_unavailable' if natives[key] else 'fb_post_id_unavailable'
+        except FeedbackError as exc:
+            error = 'feedback_graph_429' if usage.http_status==429 else str(exc)
+            if error in STOP_CODES:
+                stop = error
+                break
+    return natives,pending,samples,error,stop,winning
+
+
+def collect(db,posts,history,graph,reader,usage,max_posts,now):
+    saved = {r[0]:r for r in db.execute('SELECT * FROM observation')}
+    due,groups = plan(posts,saved,history,now,max_posts)
+    stats = dict(graph_due=due,first_attempted=0,first_covered=0,attempted=0,graph_calls=0,
+                 peak_usage=0,errors={},metrics_upstream_error='')
+    pages = list(groups)
+    errors = Counter()
+    for begin in range(0,len(pages),40):
+        page_batch = pages[begin:begin+40]
+        if graph.calls>=graph.max_calls:
+            break
+        try:
+            credentials = reader.credentials(page_batch)
+        except FeedbackError as exc:
+            stats['metrics_upstream_error'] = str(exc)
+            break
+        for page in page_batch:
+            rows,creds = groups[page],list(credentials.get(page,()))
+            for offset in range(0,len(rows),25):
+                if graph.calls>=graph.max_calls:
+                    break
+                batch = rows[offset:offset+25]
+                natives,pending,samples,error,stop,winner = fetch_batch(batch,page,creds,saved,graph,usage)
+                if winner is not None:
+                    creds.remove(winner)
+                    creds.insert(0,winner)
+                stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
+                for p in batch:
+                    key = p['post_id']
+                    # An interrupted batch is eligible again immediately. Record only actual outcomes.
+                    if key in pending and stop:
+                        continue
+                    old = saved.get(key)
+                    values = json.loads(old[2]) if old else {}
+                    had_engagement = engage(values)
+                    fresh = samples.get(key,{})
+                    if 'views' in fresh:
+                        values['_views_at'] = stamp
+                    elif 'views' in values and '_views_at' not in values and old:
+                        values['_views_at'] = old[3]
+                    values.update(fresh)
+                    observed = stamp if fresh else old[3] if old else None
+                    code = error if key in pending else ''
+                    if code:
+                        errors[code] += 1
+                        interval = 21600
+                    else:
+                        age = now-datetime.fromisoformat(p['published_at'].replace('Z','+00:00')).timestamp()
+                        interval = 3600 if age<7*86400 else 21600 if age<30*86400 else 86400
+                    db.execute('INSERT OR REPLACE INTO observation VALUES(?,?,?,?,?,?)',
+                               (key,natives[key],json.dumps(values),observed,now+interval,code))
+                    stats['attempted'] += 1
+                    stats['first_attempted'] += int(old is None)
+                    stats['first_covered'] += int(not had_engagement and engage(values))
+                db.commit()
+                if stop:
+                    if stop!='feedback_request_budget_reached':
+                        stats['metrics_upstream_error'] = stop
+                        db.execute("INSERT OR REPLACE INTO collection_state VALUES('resume_at',?)",
+                                   (int(time.time())+max(900,usage.wait),))
+                        db.commit()
+                    break
+            if stop_or_budget(stats,graph):
+                break
+        if stop_or_budget(stats,graph):
+            break
+    stats.update(graph_calls=graph.calls,peak_usage=usage.peak,errors=dict(errors))
+    return stats
+
+
+def stop_or_budget(stats,graph):
+    return bool(stats['metrics_upstream_error']) or graph.calls>=graph.max_calls
+
+
+def apply_cached(db,posts):
+    for key,native,metrics,stamp,_,error in db.execute('SELECT * FROM observation'):
+        p = posts.get(key)
+        if p is None:
+            continue
+        values = json.loads(metrics)
+        view_stamp = values.pop('_views_at',stamp)
+        if p.get('views') is not None and (p.get('metrics_at') or '')>(view_stamp or ''):
+            values.pop('views',None)
+        p.update(values)
+        p['metrics_at'] = max(filter(None,(stamp,p.get('metrics_at'))),default=None)
+        if native:
+            p['post_url'] = 'https://www.facebook.com/'+p['account_id']+'/posts/'+native.split('_')[-1]
+        p['error_code'] = error
+
+
+def sync(posts,cache,*,max_calls=160,max_posts=1500,history=False):
+    import fcntl
+    cache = Path(cache)
+    with closing(sqlite3.connect(cache,timeout=15)) as db,cache.with_suffix('.lock').open('a') as guard:
+        prepare(db)
+        stats = dict(graph_calls=0,metrics_upstream_error='')
+        now = int(time.time())
+        try:
+            fcntl.flock(guard,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            stats['collection_status'] = 'other_collector_active'
+        else:
+            resume = db.execute("SELECT value FROM collection_state WHERE key='resume_at'").fetchone()
+            if resume and resume[0]>now:
+                stats.update(collection_status='rate_cooldown',resume_at=resume[0],metrics_upstream_error='feedback_graph_usage_high')
+            else:
+                graph = MetaReader(os.environ.get('FB_GRAPH_API_VERSION','v22.0'),max_calls=max_calls)
+                usage = Usage()
+                graph.session.hooks['response'].append(usage.response)
+                with closing(graph.session):
+                    try:
+                        stats = collect(db,posts,history,graph,GatedReader(os.environ),usage,max_posts,now)
+                    except FeedbackError as exc:
+                        stats.update(graph_calls=graph.calls,metrics_upstream_error=str(exc),peak_usage=usage.peak)
+            db.execute('INSERT INTO collection_run(mode,started,finished,stats) VALUES(?,?,?,?)',
+                       ('history' if history else 'hourly',now,int(time.time()),json.dumps(stats)))
+            db.commit()
+        if not history:
+            apply_cached(db,posts)
+        return stats
