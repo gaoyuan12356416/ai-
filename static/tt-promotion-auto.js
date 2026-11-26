@@ -2,7 +2,7 @@
   "use strict";
   const {id,h,money,time,badge,empty,notify,get:read,post:write,modal,confirmAction,action,boot,byId,name,status,statusBadge}=window.TTPromotion;
   const modeNames={template:"按模板选材",drama:"指定爆款剧",material:"指定素材",pool:"素材池分配",serial:"短剧连载"};
-  let canSetChannels=false;
+  let canSetChannels=false,editorDirty=false;
   let templates=[],channels=[],actorId="",currentView="templates",requestToken=0;
   let stats=new Map(),historyPage=1,detailEpoch=0,importedAccounts=[],allowClose=null;
   let accessDenied=false,importHandled=false;
@@ -84,9 +84,9 @@
     for(const a of selected)if(!all.has(a))all.set(a,{account_id:a,nickname:"当前不可用",eligible:false});
     return [...all.values()];
   }
-  function picker(){
-    return `<fieldset class="group" data-picker><legend>目标频道</legend><div class="picker-filters"><label>昵称或 ID<input type="search" data-search></label><label>剧语言<select data-pick="language"></select></label><label>主要受众<select data-pick="audience"></select></label><label>发布资格<select data-pick="eligible"><option value="">全部资格</option><option value="yes">可发布</option><option value="no">受限</option></select></label><label>旧排期<select data-pick="conflict"><option value="">全部排期</option><option value="yes">有旧排期或冲突</option><option value="no">未见旧排期或冲突</option><option value="unknown">待核验</option></select></label><label>28 天收入下限（USD）<input type="number" data-pick="min" min="0" step="0.01" placeholder="不限"></label><label>收入上限（USD）<input type="number" data-pick="max" min="0" step="0.01" placeholder="不限"></label><label>排序<select data-pick="order"><option value="default">频道顺序</option><option value="desc">收入降序</option><option value="asc">收入升序</option></select></label></div>
-      <div class="inline"><button type="button" class="row-link" data-add>选当前结果</button><button type="button" class="row-link" data-clear>清空已选</button><span class="muted" data-count></span><button type="button" class="row-link" data-first-use hidden>确认所选新频道观看范围</button></div><div class="check-list" data-accounts></div></fieldset>`;
+  function picker(editor=false){
+    return `<fieldset class="group" data-picker>${editor?"":"<legend>目标频道</legend>"}<div class="picker-filters"><label>搜索频道<input type="search" data-search placeholder="昵称或频道 ID"></label>${editor?'<details class="picker-more"><summary>更多筛选</summary><div class="extra-filters">':""}<label>剧语言<select data-pick="language"></select></label><label>主要受众<select data-pick="audience"></select></label><label>发布资格<select data-pick="eligible"><option value="">全部资格</option><option value="yes">可发布</option><option value="no">受限</option></select></label><label>旧排期<select data-pick="conflict"><option value="">全部排期</option><option value="yes">有旧排期或冲突</option><option value="no">未见旧排期或冲突</option><option value="unknown">待核验</option></select></label><label>28 天收入下限（USD）<input type="number" data-pick="min" min="0" step="0.01" placeholder="不限"></label><label>收入上限（USD）<input type="number" data-pick="max" min="0" step="0.01" placeholder="不限"></label><label>排序<select data-pick="order"><option value="default">频道顺序</option><option value="desc">收入降序</option><option value="asc">收入升序</option></select></label>${editor?"</div></details>":""}</div>
+      <div class="inline"><button type="button" class="row-link" data-add>选当前结果</button><button type="button" class="row-link" data-clear>清空已选</button>${editor?'<label class="only-selected"><input type="checkbox" data-selected-only> 只看已选</label>':""}<span class="muted" data-count></span><button type="button" class="row-link" data-first-use hidden>确认所选新频道观看范围</button></div><div class="check-list" data-accounts></div></fieldset>`;
   }
   function setupPicker(form,rows,initial,onChange=()=>{}){
     const wrapper=form.querySelector("[data-picker]"),list=wrapper.querySelector("[data-accounts]"),selected=new Set(initial.map(String));
@@ -94,18 +94,27 @@
     const audience=c=>typeof c.audience==="object"?c.audience?.name:c.audience;
     const facets=(k,values,label)=>options(getControl(k),[...new Set(values.filter(Boolean))].sort().map(v=>[v,v]),label);
     facets("language",rows.map(c=>c.drama_language),"全部语言");facets("audience",rows.map(audience),"全部受众");
+    const onlySelected=wrapper.querySelector("[data-selected-only]");
     const conflicts=c=>c.legacy_scheduled===true||c.legacy_conflict===true?"yes":c.legacy_scheduled===false&&c.legacy_conflict!==null?"no":"unknown";
     let visible=[];
     function draw(){
       const term=search.value.trim().toLowerCase(),val=k=>getControl(k).value;
-      visible=rows.filter(c=>(!term||[name(c),byId(c),c.drama_language].some(v=>String(v||"").toLowerCase().includes(term)))&&(!val("language")||c.drama_language===val("language"))&&(!val("audience")||audience(c)===val("audience"))&&(!val("eligible")||(c.eligible?"yes":"no")===val("eligible"))&&(!val("conflict")||conflicts(c)===val("conflict"))&&(!val("min")||(c.revenue_28d!=null&&c.revenue_28d>=Number(val("min"))))&&(!val("max")||(c.revenue_28d!=null&&c.revenue_28d<=Number(val("max")))));
+      visible=rows.filter(c=>(!onlySelected?.checked||selected.has(byId(c)))&&(!term||[name(c),byId(c),c.drama_language].some(v=>String(v||"").toLowerCase().includes(term)))&&(!val("language")||c.drama_language===val("language"))&&(!val("audience")||audience(c)===val("audience"))&&(!val("eligible")||(c.eligible?"yes":"no")===val("eligible"))&&(!val("conflict")||conflicts(c)===val("conflict"))&&(!val("min")||(c.revenue_28d!=null&&c.revenue_28d>=Number(val("min"))))&&(!val("max")||(c.revenue_28d!=null&&c.revenue_28d<=Number(val("max")))));
       if(val("order")!=="default")visible.sort((a,b)=>a.revenue_28d==null&&b.revenue_28d!=null?1:b.revenue_28d==null&&a.revenue_28d!=null?-1:((a.revenue_28d??0)-(b.revenue_28d??0))*(val("order")==="asc"?1:-1));
-      list.innerHTML=visible.map(c=>`<label><input type="checkbox" value="${h(byId(c))}" ${selected.has(byId(c))?"checked":""}><span>${h(name(c))} · #${h(byId(c))}<small class="secondary">${h([c.drama_language,audience(c),c.revenue_28d==null?"收入待回传":money(c.revenue_28d),c.eligible?"可发布":window.TTFirstUse.needed(c)?"首次发布待选观看范围":"受限",({yes:"有旧排期/冲突",no:"",unknown:"旧排期待核验"})[conflicts(c)]].filter(Boolean).join(" · "))}</small></span></label>`).join("")||'<span class="muted">无匹配频道</span>';
+      list.innerHTML=visible.map(c=>{
+        const aid=byId(c);
+        const qualification=c.eligible?"可发布":window.TTFirstUse.needed(c)?"待选观看范围":"受限";
+        const details=[c.drama_language,audience(c),c.revenue_28d==null?"收入待回传":money(c.revenue_28d),
+          ({yes:"有旧排期/冲突",unknown:"旧排期待核验"})[conflicts(c)]].filter(Boolean);
+        if(!onlySelected)return `<label><input type="checkbox" value="${h(aid)}" ${selected.has(aid)?"checked":""}><span>${h(name(c))} · #${h(aid)}<small class="secondary">${h([...details,qualification].join(" · "))}</small></span></label>`;
+        return `<label><input type="checkbox" value="${h(aid)}" ${selected.has(aid)?"checked":""}><span><strong>${h(name(c))}</strong> <small>#${h(aid)}</small><small class="secondary">${h(details.join(" · "))}</small></span>${badge(qualification,c.eligible?"positive":"warning")}</label>`;
+      }).join("")||'<span class="muted">无匹配频道</span>';
       wrapper.querySelector("[data-first-use]").hidden=!canSetChannels || !rows.some(c=>selected.has(byId(c))&&window.TTFirstUse.needed(c));
       wrapper.querySelector("[data-count]").textContent=`已选 ${selected.size} 个 · 当前结果 ${visible.length} 个`;
     }
     wrapper.querySelector(".picker-filters").addEventListener("input",draw);
-    list.onchange=e=>{if(e.target.checked)selected.add(e.target.value);else selected.delete(e.target.value);draw();onChange();};
+    if(onlySelected)onlySelected.onchange=draw;
+    list.onchange=e=>{if(e.target.checked)selected.add(e.target.value);else selected.delete(e.target.value);const aid=e.target.value;draw();(Array.from(list.querySelectorAll("input")).find(input=>input.value===aid)||onlySelected)?.focus({preventScroll:true});onChange();};
     wrapper.querySelector("[data-add]").onclick=()=>{visible.forEach(c=>selected.add(byId(c)));draw();onChange();};
     wrapper.querySelector("[data-clear]").onclick=()=>{selected.clear();draw();onChange();};
     action(wrapper.querySelector("[data-first-use]"),"click",async()=>{
@@ -129,82 +138,236 @@
   id("dialog").addEventListener("cancel",ev=>{if(allowClose?.()){ev.preventDefault();void closeEditor();}});
   id("dialog").querySelector("form[method=dialog]").addEventListener("submit",ev=>{if(allowClose?.()){ev.preventDefault();void closeEditor();}});
   id("dialog").addEventListener("close",()=>{if(!id("dialog").open){allowClose=null;detailEpoch++;}});
-  window.addEventListener("beforeunload",ev=>{if(id("dialog").open&&allowClose?.()){ev.preventDefault();ev.returnValue="";}});
+  window.addEventListener("beforeunload",ev=>{if(editorDirty||(id("dialog").open&&allowClose?.())){ev.preventDefault();ev.returnValue="";}});
 
 
-  function metricFields(key,v){
-    const options=(name,label,fields)=>`<label>${label}<select name="${key}_${name}">${fields.map(([k,text])=>`<option value="${k}">${text}</option>`).join("")}</select></label>`;
-    return `<section class="metrics-block"><h4>${key==="drama"?"剧目":"素材"}筛选与排序</h4><div class="metric-grid">${[["spend_min","最低消耗（USD）"],["spend_max","最高消耗（USD）"],["roas_min","最低 D0 ROAS（%）"],["roas_max","最高 D0 ROAS（%）"]].map(([k,l])=>`<label>${l}<input type="number" name="${key}_${k}" step="any" min="0" value="${h(v[k]??"")}" placeholder="不限"></label>`).join("")}${options("sort_by","排序指标",[["roas","D0 ROAS"],["spend","消耗"]])}${options("sort_direction","方向",[["desc","从高到低"],["asc","从低到高"]])}</div></section>`;
+
+  const RESOURCE_OPTIONS = [
+    { value: "0", label: "其他" },
+    { value: "1", label: "翻译剧非首发" },
+    { value: "2", label: "本土首发" },
+    { value: "3", label: "本土对投" },
+    { value: "4", label: "本土二轮采买" },
+    { value: "5", label: "本土自制" },
+    { value: "6", label: "翻译剧首发" },
+    { value: "7", label: "首发本土动态漫" },
+    { value: "8", label: "二轮本土动态漫" },
+    { value: "9", label: "首发翻译动态漫" },
+    { value: "10", label: "二轮翻译动态漫" },
+    { value: "11", label: "翻译剧自制" },
+    { value: "12", label: "漫剧自制" },
+    { value: "13", label: "AI本土真人剧自制" },
+    { value: "14", label: "AI本土真人剧首发" },
+    { value: "15", label: "二轮本土AI真人剧" },
+    { value: "16", label: "翻译AI真人剧首发" },
+    { value: "17", label: "二轮翻译AI真人剧" },
+    { value: "18", label: "AI本土解说剧自制" },
+    { value: "19", label: "AI本土解说剧首发" },
+    { value: "20", label: "AI本土解说剧二轮" },
+    { value: "21", label: "AI翻译解说剧首发" },
+    { value: "22", label: "AI翻译解说剧首发" },
+    { value: "100", label: "小说" },
+  ];
+  const typeNames = new Map(RESOURCE_OPTIONS.map(item => [item.value, item.label]));
+
+  function resourceTypes(rule) {
+    const chosen = new Set((rule.resource_type_v2 || []).map(String));
+    const values = new Set([...typeNames.keys(), ...chosen]);
+    return `<details class="resource-options"><summary>短剧类型 <span data-type-count></span></summary>
+      <div class="resource-grid">${[...values].map(value => `<label><input type="checkbox" name="resource_type" value="${h(value)}" ${chosen.has(value)?"checked":""}>${h(typeNames.get(value)||"其他类型")} · ${h(value)}</label>`).join("")}</div>
+      <button class="row-link" type="button" data-clear-types>清空类型（不限）</button></details>`;
   }
-  function metricValues(controls,prefix,previous){
-    const rule={...previous};
-    for(const k of ["spend_min","spend_max","roas_min","roas_max"]){const val=controls[prefix+"_"+k].value;rule[k]=val===""?null:Number(val);}
-    for(const kind of ["spend","roas"]){if(rule[kind+"_min"]!=null && rule[kind+"_max"]!=null && rule[kind+"_min"]>rule[kind+"_max"])throw new Error(`${prefix==="drama"?"剧目":"素材"}${kind==="roas"?" D0 ROAS":"消耗"}下限不能超过上限。`);}
-    for(const k of ["sort_by","sort_direction"])rule[k]=controls[prefix+"_"+k].value;
+
+  function ruleCard(key, c) {
+    const drama = key === "drama", label = drama ? "剧目" : "素材";
+    const rule = {...(drama?{}:{duration_min_seconds:0,duration_max_seconds:3600}),...c[key+"_rule"]};
+    function range(title, low, high, unit, limits = {}) {
+      const inputs = [[low,"下限"],[high,"上限"]].map(([name, bound]) =>
+        `<input type="number" name="${key}_${name}" aria-label="${label}${title}${bound}" min="0" ${limits.max ? `max="${limits.max}"` : ""} step="any" value="${h(rule[name] ?? "")}" placeholder="${bound}不限">`
+      );
+      return `<fieldset class="range-field"><legend>${title}（${unit}）</legend><div>${inputs.join('<span aria-hidden="true">至</span>')}</div></fieldset>`;
+    }
+    return `<section class="rule-card"><h3>${drama?"先筛选剧目":"再筛选素材"}</h3>
+      ${drama ? resourceTypes(rule) : range("素材时长","duration_min_seconds","duration_max_seconds","秒",{max:3600})}
+      ${range("消耗","spend_min","spend_max","USD")}${range("D0 ROAS","roas_min","roas_max","%")}
+      <div class="form-grid"><label>排序指标<select name="${key}_sort_by"><option value="roas">D0 ROAS</option><option value="spend">消耗</option></select></label>
+      <label>排序方向<select name="${key}_sort_direction"><option value="desc">从高到低</option><option value="asc">从低到高</option></select></label></div></section>`;
+  }
+
+  function metricValues(form, key, previous) {
+    const controls = form.elements, rule = {...previous};
+    const ranges = [["spend_min","spend_max","消耗"],["roas_min","roas_max","D0 ROAS"]];
+    if(key==="material") ranges.push(["duration_min_seconds","duration_max_seconds","时长"]);
+    for(const [low,high,label] of ranges) {
+      for(const name of [low,high]) {
+        const value = controls[key+"_"+name].value;
+        rule[name] = value==="" ? null : Number(value);
+      }
+      if(rule[low]!=null && rule[high]!=null && rule[low]>rule[high]) {
+        controls[key+"_"+low].focus();
+        throw new Error((key==="drama"?"剧目":"素材")+label+"下限不能超过上限。");
+      }
+    }
+    if(key==="drama") rule.resource_type_v2=Array.from(form.querySelectorAll("[name=resource_type]:checked"),input=>input.value);
+    rule.sort_by=controls[key+"_sort_by"].value;
+    rule.sort_direction=controls[key+"_sort_direction"].value;
     return rule;
   }
-  const numberField=(name,label,value,min=0)=>`<label>${h(label)}<input type="number" min="${min}" step="1" name="${name}" value="${h(value)}" required></label>`;
-  async function edit(t,preselected=[]){
-    const c=t?cfg(t):{},fresh=!t;let dirty=false;
-    modal(fresh?"创建自动发布模板":`编辑 ${tName(t)} · v${t.version}`,`<form id="edit-template">
-      <fieldset class="group"><legend>基础设置</legend><div class="form-grid">
-        <label>模板名称<input name="name" value="${h(t?.name||"")}" required></label>
-        <label>选材方式<select name="model"><option value="income">频道收入画像</option><option value="rules">模板规则</option></select></label>
-        <label>视频制作<select name="video_template"><option value="random_overlay">随机模板</option><option value="direct_outro">固定教程片尾</option></select></label>
-      </div></fieldset>
-      ${picker()}
-      <fieldset class="group"><legend>选材窗口</legend><div class="form-grid">
-        ${numberField("metric_window_days","投放指标天数",c.metric_window_days??7,1)}
-        ${numberField("drama_launch_window_days","剧上线窗口（天）",c.drama_launch_window_days??30)}
-        ${numberField("material_window_days","素材窗口（天）",c.material_window_days??30)}
-        ${numberField("cooldown_days","同剧冷却（天）",c.cooldown_days??7)}
-      </div></fieldset>
-      ${metricFields("drama",c.drama_rule||{})}${metricFields("material",c.material_rule||{})}
-      <fieldset class="group"><legend>逐频道排期 · 北京时间</legend><div class="form-grid">
-        <label>排期方式<select name="schedule_mode"><option value="fixed">固定时间</option><option value="random">每天随机</option></select></label>
-        <label id="fixed-times">每日时间（逗号分隔）<input name="times" placeholder="10:00, 15:30" value="${h((c.schedule?.times||["12:30"]).join(", "))}"></label>
-        <label id="random-count">每频道每日条数<input type="number" min="1" max="24" step="1" name="count" value="${h(c.schedule?.daily_count??1)}"></label>
-      </div></fieldset>
-      <fieldset class="group"><legend>发布文案</legend><div class="form-grid"><label>文案来源<select name="ai_copy"><option value="no">模板文案</option><option value="yes">AI 优先，失败用模板稿</option></select></label>
-      <label class="stretch">文案模板<textarea name="caption_template" rows="3" required>${h(c.caption_template??"{desc} {code}")}</textarea></label></div></fieldset>
-      <div class="sticky-edit"><div><strong id="edit-summary"></strong><small class="muted" id="edit-times"></small></div><button class="button primary" type="submit">${fresh?"保存草稿":"保存新版本"}</button></div></form>`);
-    const form=id("edit-template"),controls=form.elements;
-    controls.model.value=c.model||"income";
-    controls.video_template.value=c.video_template||"random_overlay";
-    controls.ai_copy.value=c.ai_copy?"yes":"no";
-    controls.schedule_mode.value=c.schedule?.mode||"fixed";
-    const initial=(fresh?preselected:c.account_ids||[]).map(String);
-    const getIds=setupPicker(form,pickerRows(initial),initial,()=>{dirty=true;summary();});
-    function summary(){
-      const total=getIds().length,fixed=controls.schedule_mode.value==="fixed";
-      const slots=fixed?splitIds(controls.times.value).length:Number(controls.count.value)||0;
-      id("edit-summary").textContent=`${total} 个频道 × 每日 ${slots} 条 = ${total*slots} 条计划`;
-      id("edit-times").textContent=fixed?`北京时间 · ${controls.times.value||"待设置时段"}`:"北京时间 · 每频道独立随机排期";
+
+  function setupSchedule(form, schedule, changed) {
+    const e=form.elements, list=form.querySelector("[data-time-list]"), add=form.querySelector("[data-add-time]");
+    function addTime(value) {
+      const row=document.createElement("div");
+      row.className="edit-time-row";
+      row.innerHTML=`<input type="time" aria-label="北京时间" required><button type="button" class="row-link">移除</button>`;
+      const input=row.querySelector("input");
+      input.value=value;
+      row.querySelector("button").onclick=()=>{
+        row.remove();
+        sync();
+        add.focus();
+        changed();
+      };
+      list.append(row);
+      return input;
     }
-    for(const key of ["drama","material"]){controls[key+"_sort_by"].value=c[key+"_rule"]?.sort_by||"roas";controls[key+"_sort_direction"].value=c[key+"_rule"]?.sort_direction||"desc";}
-    form.addEventListener("input",ev=>{if(ev.target.closest(".picker-filters"))return;dirty=true;summary();});
-    guardClose(()=>dirty);summary();
-    function timing(){id("fixed-times").hidden=controls.schedule_mode.value!=="fixed";id("random-count").hidden=!id("fixed-times").hidden;}
-    controls.schedule_mode.onchange=timing;timing();
+    function sync() {
+      const fixed=e.schedule_mode.value==="fixed";
+      form.querySelector("#fixed-times").disabled=!fixed;
+      form.querySelector("#fixed-times").hidden=!fixed;
+      const count=form.querySelector("#random-count");
+      count.hidden=fixed;
+      e.count.disabled=fixed;
+      add.disabled=list.children.length>=24;
+    }
+    const times=()=>Array.from(list.querySelectorAll("input"),input=>input.value);
+    e.schedule_mode.value=schedule?.mode||"fixed";
+    for(const value of schedule?.times || ["12:30"]) addTime(value);
+    add.onclick=()=>{addTime("").focus();sync();changed();};
+    for(const radio of form.querySelectorAll("[name=schedule_mode]")) radio.onchange=sync;
+    sync();
+    return times;
+  }
+
+  const numberField=(name,label,value,min,max)=>`<label>${h(label)}<input type="number" min="${min}" max="${max}" step="1" name="${name}" value="${h(value)}" required></label>`;
+
+  function edit(t, preselected=[]) {
+    const c=t?cfg(t):{}, fresh=!t, area=id("editor-view");
+    const heading=document.querySelector(".topbar h1");
+    const title=fresh?"创建自动发布模板":`编辑模板 · ${tName(t)}`;
+    heading.textContent=title;
+    document.title=title+" · TT 平台推广";
+    id("list-view").hidden=true;
+    area.hidden=false;
+    editorDirty=false;
+    const panel=(title,content)=>`<section class="panel editor-section"><h2>${title}</h2>${content}</section>`;
+    area.innerHTML=`<div class="editor-nav"><button type="button" class="row-link" data-editor-back>← 返回模板列表</button><button type="button" class="row-link" data-jump-summary>查看保存摘要 ↓</button></div><form id="edit-template"><div class="editor-main">
+      ${panel("基础信息",`<div class="form-grid basic-fields">
+        <label class="stretch">模板名称<input name="name" value="${h(t?.name||"")}" required maxlength="120" placeholder="例如：英语频道晚间推广"></label>
+        <label>选材方式<select name="model"><option value="income">频道收入画像</option><option value="rules">模板规则</option></select></label>
+        <label>视频制作<select name="video_template"><option value="random_overlay">随机模板</option><option value="direct_outro">固定教程片尾</option></select></label></div>`)}
+      ${panel("选择 TT 频道",picker(true))}
+      ${panel("两层筛选与排序",`<div class="window-fields form-grid">
+        ${numberField("metric_window_days","指标统计（天）",c.metric_window_days??7,1,30)}
+        ${numberField("drama_launch_window_days","剧目上线窗口（天）",c.drama_launch_window_days??30,0,3650)}
+        ${numberField("material_window_days","素材窗口（天）",c.material_window_days??30,0,3650)}
+        ${numberField("cooldown_days","同频道同剧冷却（天）",c.cooldown_days??7,0,3650)}</div>
+        <div class="rule-flow">${ruleCard("drama",c)}${ruleCard("material",c)}</div>`)}
+      ${panel("发布时间",`<div class="schedule-options" role="radiogroup" aria-label="排期方式">
+        <label><input name="schedule_mode" type="radio" value="fixed">固定时间</label>
+        <label><input name="schedule_mode" type="radio" value="random">每天随机</label></div>
+        <fieldset id="fixed-times"><legend>每日时间点（北京时间）</legend><div data-time-list></div>
+        <button type="button" class="button" data-add-time>添加时间点</button></fieldset>
+        <label id="random-count" class="field">每频道每日条数<input type="number" min="1" max="24" step="1" required name="count" value="${h(c.schedule?.daily_count??1)}"></label>`)}
+      ${panel("发布文案",`<div class="form-grid"><label>文案来源<select name="ai_copy"><option value="no">模板文案</option><option value="yes">AI 优先，失败用模板稿</option></select></label>
+        <label class="stretch">模板文案<textarea name="caption_template" rows="3" maxlength="2200" required>${h(c.caption_template??"{desc} {code}")}</textarea></label></div>
+        <div class="macro-tools"><span>插入变量</span>${[["{desc}","素材描述"],["{{drama_name}}","剧名"],["{code}","四位码"],["{url}","归因链接"]].map(([v,label])=>`<button class="row-link" type="button" data-macro="${h(v)}">${label}</button>`).join("")}</div>`)}
+      </div><aside class="panel editor-summary" tabindex="-1" aria-label="保存摘要"><h2>保存摘要</h2><div id="edit-volume"><strong id="edit-summary"></strong><small id="edit-times"></small></div>
+      <dl>${[["version","模板版本"],["accounts","已选频道"],["languages","剧语言"],["model","选材方式"],["window","指标统计"],["drama","剧目排序"],["material","素材排序"],["video","视频制作"],["copy","文案来源"]].map(([key,title])=>`<div><dt>${title}</dt><dd data-summary="${key}"></dd></div>`).join("")}</dl>
+      <p class="muted">${fresh?"草稿保存后可预演，启用后按排期执行。":t.enabled?"当前模板已启用。新版本用于后续排期。":"保存后可继续预演此版本。"}</p>
+      <button class="button primary" type="submit">${fresh?"保存草稿":"保存新版本"}</button>
+      <button class="button" type="button" data-return>返回模板列表</button></aside></form>`;
+    const form=id("edit-template"), e=form.elements;
+    e.model.value=c.model||"income";
+    e.video_template.value=c.video_template||"random_overlay";
+    e.ai_copy.value=c.ai_copy?"yes":"no";
+    for(const key of ["drama","material"]){
+      e[key+"_sort_by"].value=c[key+"_rule"]?.sort_by||"roas";
+      e[key+"_sort_direction"].value=c[key+"_rule"]?.sort_direction||"desc";
+    }
+    const initial=(fresh?preselected:c.account_ids||[]).map(String);
+    const getIds=setupPicker(form,pickerRows(initial),initial,changed);
+    const getTimes=setupSchedule(form,c.schedule,changed);
+    const text=control=>control.selectedOptions[0]?.textContent||"—";
+    function summary() {
+      const ids=getIds(), fixed=e.schedule_mode.value==="fixed", times=getTimes().filter(Boolean);
+      const count=fixed?new Set(times).size:Number(e.count.value)||0;
+      id("edit-summary").textContent=`${ids.length} 个频道 × 每日 ${count} 条 = ${ids.length*count} 条计划`;
+      id("edit-times").textContent=fixed?`北京时间 · ${times.join("、")||"待设置时间点"}`:"北京时间 · 各频道随机排期";
+      const typeCount=form.querySelectorAll("[name=resource_type]:checked").length;
+      form.querySelector("[data-type-count]").textContent=typeCount?`已选 ${typeCount} 类`:"不限";
+      const sorts=key=>text(e[key+"_sort_by"])+" · "+text(e[key+"_sort_direction"]);
+      const selectedIds=new Set(ids);
+      const languages=[...new Set(channels.filter(ch=>selectedIds.has(byId(ch))).map(ch=>ch.drama_language||"待确认"))];
+      const fields={languages:languages.join("、")||"—",version:fresh?"新草稿":`当前 v${t.version}`,accounts:ids.length+" 个",model:text(e.model),window:(e.metric_window_days.value||"—")+" 天",drama:sorts("drama"),material:sorts("material"),video:text(e.video_template),copy:text(e.ai_copy)};
+      for(const node of form.querySelectorAll("[data-summary]"))node.textContent=fields[node.dataset.summary];
+    }
+    function changed(){editorDirty=true;summary();}
+    form.addEventListener("input",ev=>{if(!ev.target.closest("[data-picker]"))changed();});
+    form.querySelector("[data-clear-types]").onclick=()=>{
+      for(const input of form.querySelectorAll("[name=resource_type]"))input.checked=false;
+      changed();
+    };
+    form.querySelector(".macro-tools").onclick=ev=>{
+      const macro=ev.target.closest("[data-macro]")?.dataset.macro;
+      if(!macro)return;
+      const field=e.caption_template;
+      field.setRangeText(macro,field.selectionStart,field.selectionEnd,"end");
+      field.focus();
+      changed();
+    };
+    function leave() {
+      editorDirty=false;
+      history.replaceState(null,"",location.pathname);
+      area.hidden=true;
+      area.replaceChildren();
+      id("list-view").hidden=false;
+      heading.textContent="自动发布（新版）";
+      document.title="自动发布（新版） · TT 平台推广";
+      id("new-template").focus({preventScroll:true});
+      window.scrollTo(0,0);
+    }
+    async function cancelEdit(){
+      if(editorDirty&&!await confirmAction("舍弃未保存的更改？","本次更改尚未保存。","舍弃更改"))return;
+      leave();
+      notify("");
+    }
+    area.querySelector("[data-editor-back]").onclick=cancelEdit;
+    form.querySelector("[data-return]").onclick=cancelEdit;
+    area.querySelector("[data-jump-summary]").onclick=()=>form.querySelector(".editor-summary").focus();
+    summary();
     action(form,"submit",async ev=>{
       ev.preventDefault();
-      const button=form.querySelector("button[type=submit]");if(button.disabled)return;button.disabled=true;
-      try{
+      const button=form.querySelector("button[type=submit]");
+      if(button.disabled)return;
+      button.disabled=true;
+      try {
         const account_ids=getIds();
         if(!account_ids.length)throw new Error("至少选择一个目标频道。");
-        const fixed=controls.schedule_mode.value==="fixed";
-        const times=controls.times.value.trim().split(/[\s,，、]+/).filter(Boolean);
-        if(fixed && (!times.length||times.some(v=>!/^([01]\d|2[0-3]):[0-5]\d$/.test(v))||new Set(times).size!==times.length))throw new Error("请填写不重复的北京时间，例如 10:00, 15:30。");
-        const body={name:controls.name.value.trim(),account_ids,model:controls.model.value,video_template:controls.video_template.value,
-          schedule:fixed?{mode:"fixed",times}:{mode:"random",daily_count:Number(controls.count.value)},ai_copy:controls.ai_copy.value==="yes",caption_template:controls.caption_template.value.trim()};
-        for(const k of ["metric_window_days","drama_launch_window_days","material_window_days","cooldown_days"])body[k]=Number(controls[k].value);
-        for(const prefix of ["drama","material"])body[prefix+"_rule"]=metricValues(controls,prefix,c[prefix+"_rule"]||{});
+        const fixed=e.schedule_mode.value==="fixed", times=getTimes();
+        if(fixed&&(!times.length||times.some(v=>!v)||new Set(times).size!==times.length))throw new Error("请至少填写一个北京时间，各时间点不能重复。");
+        const body={name:e.name.value.trim(),account_ids,model:e.model.value,video_template:e.video_template.value,
+          schedule:fixed?{mode:"fixed",times}:{mode:"random",daily_count:Number(e.count.value)},ai_copy:e.ai_copy.value==="yes",caption_template:e.caption_template.value.trim()};
+        for(const k of ["metric_window_days","drama_launch_window_days","material_window_days","cooldown_days"])body[k]=Number(e[k].value);
+        for(const prefix of ["drama","material"])body[prefix+"_rule"]=metricValues(form,prefix,c[prefix+"_rule"]||{});
         if(t)body.expected_version=t.version;
-        await post(t?path(t):templatesPath,body);dirty=false;allowClose=null;id("dialog").close();await updateTemplates();notify(fresh?"草稿已保存，可预演频道分配。":"模板新版本已保存。");
+        await post(t?path(t):templatesPath,body);
+        leave();
+        await updateTemplates();
+        notify(fresh?"草稿已保存，可预演频道分配。":"模板新版本已保存。");
       }finally{button.disabled=false;}
     });
   }
-
   async function toggle(t){
     const verb=t.enabled?"停用":"启用";
     if(!await confirmAction(`${verb}模板`,`${tName(t)} · 版本 ${t.version}\n${scheduleText(cfg(t).schedule)}，共 ${cfg(t).account_ids.length} 个频道。${t.enabled?"已进入发布执行的任务将继续处理。":"启用后将依照该排期创建真实发布任务。"}`,verb))return;
@@ -563,13 +726,13 @@
     void refresh();
   }
   id("template-search").addEventListener("input",templateRows);id("template-state").onchange=templateRows;
-  id("new-template").onclick=()=>edit(null,importedAccounts);
+  id("new-template").onclick=()=>location.assign(location.pathname+"?editor=new");
   action(id("templates"),"click",async ev=>{
     const link=ev.target.closest("[data-to-history]");if(link){await toHistory(link.dataset.template,link.dataset.toHistory);return;}
     const run=ev.target.closest("[data-open-run]");if(run){await showRun(run.dataset.openRun);return;}
     const b=ev.target.closest("[data-act]");if(!b)return;const t=templates.find(row=>String(row.id)===b.dataset.id);if(!t)return;
     if(b.dataset.act==="records")await toHistory(t.id);
-    if(b.dataset.act==="edit")await edit(t);
+    if(b.dataset.act==="edit")location.assign(location.pathname+"?editor="+encodeURIComponent(t.id));
     if(b.dataset.act==="run")execution(t);
     if(b.dataset.act==="toggle")await toggle(t);
     if(b.dataset.act==="inventory")inventory(t);
@@ -584,7 +747,15 @@
     const wanted=(new URLSearchParams(location.search).get("accounts")||"").split(",").map(s=>s.trim()).filter(Boolean),visible=new Set(channels.map(byId));
     importedAccounts=[...new Set(wanted)].filter(a=>visible.has(a));
     importHandled=true;
-    if(wanted.length&&!id("dialog").open){void edit(null,importedAccounts);notify(importedAccounts.length?`已带入 ${importedAccounts.length} 个可见频道。`:"所选频道当前不可见，请重新选择。",true);}
+    const target=new URLSearchParams(location.search).get("editor");
+    if(target==="new"||(!target&&wanted.length)){
+      edit(null,importedAccounts);
+      if(wanted.length)notify(importedAccounts.length?`已带入 ${importedAccounts.length} 个频道。`:"所选频道当前不可见，请重新选择。");
+    }else if(target){
+      const template=templates.find(item=>String(item.id)===target);
+      if(template)edit(template);
+      else notify("模板不存在或当前账号无权查看。");
+    }
   }
   async function loadSource(key){
     const accountSource=key==="channels",node=id(accountSource?"channel-source-error":"template-source-error");

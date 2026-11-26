@@ -215,6 +215,11 @@ def run(screens=None):
                     mutations.append((endpoint, post))
                     templates.append(dict(id=7, name=post["name"], version=1, enabled=False, config=post))
                     data = templates[-1]
+                elif endpoint == "/templates/7" and req.method == "POST":
+                    assert post["expected_version"] == templates[0]["version"]
+                    mutations.append((endpoint, post))
+                    templates[0].update(name=post["name"], version=2, config=post)
+                    data = templates[0]
                 elif endpoint == "/templates/7/enable":
                     assert post["expected_version"] == 1
                     mutations.append((endpoint, post))
@@ -395,13 +400,36 @@ def run(screens=None):
         form = page.locator("#edit-template")
         form.locator("[name=name]").fill("收入选材草稿")
         form.locator("[data-add]").click()
-        form.locator("[name=schedule_mode]").select_option("random")
+        expect(page).to_have_url(BASE + "/tt-promotion-auto.html?editor=new")
+        expect(page.locator("dialog[open]")).to_have_count(0)
+        expect(form.locator("#edit-summary")).to_contain_text("2 条计划")
+        assert form.locator(".editor-summary").bounding_box()["x"] > form.locator(".editor-main").bounding_box()["x"]
+        if screens:
+            page.screenshot(path=str(screens / "tt-template-editor.png"))
+        form.locator("[data-search]").fill("剧场甲")
+        expect(form.locator("[data-accounts] input")).to_have_count(1)
+        expect(form.locator("[data-count]")).to_contain_text("已选 2")
+        form.locator("[data-search]").fill("")
+        form.locator(".resource-options summary").click()
+        form.locator('[name=resource_type][value="5"]').check()
+        form.locator(".resource-options summary").click()
+        form.locator("[name=material_duration_min_seconds]").fill("30")
+        form.get_by_role("button", name="添加时间点").click()
+        form.locator("[type=time]").last.fill("12:30")
+        form.get_by_role("button", name="保存草稿").click()
+        expect(page.locator("#notice")).to_contain_text("不能重复")
+        assert not templates
+        form.locator("[type=time]").last.fill("21:00")
+        expect(form.locator("#edit-summary")).to_contain_text("4 条计划")
+        form.get_by_role("radio", name="每天随机").check()
         form.locator("[name=count]").fill("2")
         form.locator("[name=ai_copy]").select_option("yes")
         form.get_by_role("button", name="保存草稿").click()
         expect(page.locator("#templates")).to_contain_text("收入选材草稿")
         assert templates[0]["config"]["schedule"] == {"mode": "random", "daily_count": 2}
         assert not templates[0]["enabled"] and templates[0]["config"]["ai_copy"]
+        assert templates[0]["config"]["drama_rule"]["resource_type_v2"] == ["5"]
+        assert templates[0]["config"]["material_rule"]["duration_min_seconds"] == 30
         page.get_by_role("button", name="启用", exact=True).click()
         page.get_by_role("button", name="返回", exact=True).click()
         assert not templates[0]["enabled"]
@@ -460,6 +488,26 @@ def run(screens=None):
         expect(page.locator("#quickNav")).to_be_visible()
         page.locator("#nav-toggle").click()
         expect(page.locator("#quickNav")).not_to_be_visible()
+        page.get_by_role("button", name="编辑", exact=True).click()
+        expect(page).to_have_url(BASE + "/tt-promotion-auto.html?editor=7")
+        form = page.locator("#edit-template")
+        expect(form.get_by_role("radio", name="每天随机")).to_be_checked()
+        expect(form.locator("[name=count]")).to_have_value("2")
+        expect(form.locator("[data-type-count]")).to_have_text("已选 1 类")
+        expect(form.locator("[name=material_duration_min_seconds]")).to_have_value("30")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if screens:
+            page.screenshot(path=str(screens / "tt-editor-mobile.png"))
+        form.get_by_role("radio", name="固定时间").check()
+        form.locator("[type=time]").fill("09:00")
+        form.get_by_role("button", name="添加时间点").click()
+        form.locator("[type=time]").last.fill("16:15")
+        form.get_by_role("button", name="返回模板列表").click()
+        page.locator("#confirm-cancel").click()
+        expect(form.locator("#edit-times")).to_contain_text("16:15")
+        form.get_by_role("button", name="保存新版本").click()
+        expect(page.locator("#templates")).to_contain_text("v2")
+        assert templates[0]["config"]["schedule"] == {"mode": "fixed", "times": ["09:00", "16:15"]}
         # Fresh accounts do not require an old-page configuration. Only explicitly
         # chosen and currently allowed audiences are saved, independently per account.
         intake = browser.new_page(viewport={"width": 390, "height": 844})

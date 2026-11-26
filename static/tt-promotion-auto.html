@@ -6,12 +6,12 @@
   <title>自动发布（新版） · TT 平台推广</title>
   <link rel="stylesheet" href="/ui-topbar.css">
   <link rel="stylesheet" href="/tt-promotion.css?v=20261126a">
-  <link rel="stylesheet" href="/tt-promotion-auto-tools.css">
+  <link rel="stylesheet" href="/tt-promotion-auto-tools.css?v=20261126editor">
   <script defer src="/ui-topbar.js"></script>
   <script defer src="/quick-nav.js"></script>
   <script defer src="/tt-promotion-common.js"></script>
   <script defer src="/tt-promotion-first-use.js?v=20261126a"></script>
-  <script defer src="/tt-promotion-auto.js?v=20261126a"></script>
+  <script defer src="/tt-promotion-auto.js?v=20261126editor"></script>
 </head>
 <body>
 <div class="app">
@@ -22,7 +22,7 @@
     </header>
     <div role="alert" id="notice" hidden></div>
     <div role="status" id="loading">正在加载…</div>
-    <section id="workspace" hidden><div id="channel-source-error" aria-live="polite"></div><div id="template-source-error" aria-live="polite"></div><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
+    <section id="workspace" hidden><div id="channel-source-error" aria-live="polite"></div><div id="template-source-error" aria-live="polite"></div><section id="editor-view" hidden></section><div id="list-view"><nav class="tabs" aria-label="自动发布视图"><button class="tab selected" data-view="templates" aria-current="page">发布模板</button><button class="tab" data-view="runs">运行记录</button></nav>
     <section id="templates-view" class="panel">
       <div class="section-head"><h2>发布模板</h2><div class="actions"><span id="templates-meta" class="muted"></span><button class="button primary" id="new-template">创建模板</button></div></div>
       <div class="tool-filters"><label>查找模板<input type="search" id="template-search" placeholder="名称或模板 ID"></label><label>最近批次<select id="template-state"><option value="">全部结果</option><option value="anomaly">有异常</option><option value="failed">有失败</option><option value="skipped">有跳过</option><option value="review">待核对</option></select></label><span id="stats-error" aria-live="polite"></span></div>
@@ -40,7 +40,7 @@
       <div id="history-error" role="status"></div>
       <div class="table-wrap"><table><thead><tr><th>批次 / 模板</th><th>触发方式</th><th>排期 / 创建时间</th><th>状态</th><th>任务统计</th><th>操作</th></tr></thead><tbody id="runs"></tbody></table></div>
       <div id="history-pages" class="tool-pages"></div>
-    </section></section>
+    </section></div></section>
   </main>
 </div>
 <dialog id="dialog" aria-labelledby="dialog-title"><form method="dialog" class="modal-head"><h2 id="dialog-title"></h2><button class="button" value="cancel" aria-label="关闭">关闭</button></form><div id="dialog-content"></div></dialog>
