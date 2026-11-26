@@ -62,14 +62,15 @@ def content(name, live):
     before = subprocess.run(['git','-C',str(SRC),'show',BASE+':'+name],capture_output=True)
     old = before.stdout if before.returncode==0 else b''
     actual = live.read_bytes() if live.is_file() else b''
-    if actual in (old,desired) or (not actual and not old):
+    # Git stores LF for text staged from either LF or CRLF service releases.
+    if actual.replace(b'\r\n', b'\n') in (old.replace(b'\r\n', b'\n'), desired.replace(b'\r\n', b'\n')):
         return desired
     if not actual or not old:
         raise RuntimeError('unexpected_live_file:'+str(live))
     with tempfile.TemporaryDirectory() as tmp:
         files=[Path(tmp)/s for s in ('current','base','desired')]
         for f,raw in zip(files,(actual,old,desired)):
-            f.write_bytes(raw)
+            f.write_bytes(raw.replace(b'\r\n', b'\n'))
         merged=subprocess.run(['git','merge-file','-p',*map(str,files)],capture_output=True)
         if merged.returncode:
             raise RuntimeError('concurrent_change_conflict:'+str(live))
