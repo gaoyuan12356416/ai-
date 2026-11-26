@@ -148,6 +148,8 @@ def fb_task(family, row):
         if snap.get("moboreels")
         else mat.get("source_app_id") or mat.get("app_id") or "dramawave"
     )
+    planned = publish_time(row.get("planned_at_utc"))
+    created = publish_time(row.get("created_at_utc"))
     return base(
         "fv",
         row["_ord"],
@@ -161,12 +163,12 @@ def fb_task(family, row):
         material_id=row.get("material_id"),
         clip=mat.get("material_name", ""),
         manual=bool(snap.get("story_copy_manual", False)),
-        urgent=row.get("source_kind") == "manual",
+        urgent=row.get("source_kind") == "manual" and not (planned and created and planned > created),
         # Page-pool tasks are created when their slot arrives. Start their copy
         # during video preparation, then promote again when upload can begin.
         publish_priority=(3 if row.get("prepare_state") == row.get("link_state") == "ready"
                           else 2 if row.get("source_kind") == "pool" else 0),
-        publish_at=publish_time(row.get("planned_at_utc")),
+        publish_at=planned,
         publish_batch="fb:video:" + str(row["batch_id"]) if row.get("batch_id") else "",
     )
 
@@ -192,6 +194,10 @@ def x_task(conn, row, tag=False):
     if publish_at is None and timing.get("run_date") and timing.get("publish_time"):
         # Native fixed pool schedules store Beijing wall time separately.
         publish_at = publish_time(timing["run_date"] + "T" + timing["publish_time"] + "+08:00")
+    created = publish_time(parent.get("created_at"))
+    scheduled = parent.get("publish_mode") == "scheduled" or (
+        publish_at is not None and (created is None or publish_at > created)
+    )
     if tag and parent.get("trigger_source") == "auto_template":
         key = re.fullmatch(
             r"x-auto-task-(\d+)", str(parent.get("external_task_key", ""))
@@ -250,7 +256,7 @@ def x_task(conn, row, tag=False):
         episode=episode,
         clip=row.get("material_name", ""),
         material_id=row["material_id"],
-        urgent=bool(parent),
+        urgent=bool(parent) and not scheduled,
         publish_at=publish_at,
     )
     # Accept episode-specific evidence only when it carries both identities.
@@ -290,6 +296,7 @@ def tag_task(row):
         row["template_version"],
         material_id=row["material_id"],
         clip=mat.get("material_name", ""),
+        material_product=mat.get("product") or mat.get("source_provider") or drama.get("catalog"),
         audience=(sel.get("tag_profile") or {}).get("selected_path_names", []),
         publish_at=publish_time(row.get("scheduled_at_utc")),
     )

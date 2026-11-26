@@ -122,6 +122,13 @@ def group_key(task):
     )
 
 
+def generation_group_key(task):
+    # The publisher can reconstruct only its native identity. The selection
+    # snapshot also knows the exact source product used for batching and prompting.
+    brand, content, language = group_key(task)
+    return product(task.get("material_product") or brand), content, language
+
+
 def normalized(value):
     value = unicodedata.normalize("NFKC", value).casefold()
     return "".join(c for c in value if unicodedata.category(c)[0] in "LNM")

@@ -10,6 +10,7 @@ from pathlib import Path
 from .model import (
     ENDPOINTS,
     click_options,
+    generation_group_key,
     group_key,
     normalized,
     signature,
@@ -44,6 +45,8 @@ NEAR_PUBLISH_SECONDS = 300
 FB_LOOKAHEAD = 8
 COLLECT_SECONDS = 60
 SCHEDULED_SINGLETON_WAIT_SECONDS = 300
+X_AUTO_MAX_COLLECTION_SECONDS = 10 * 60
+X_AUTO_GENERATION_LEAD_SECONDS = 15 * 60
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS switches(id INTEGER PRIMARY KEY,endpoint TEXT,enabled INTEGER,marks TEXT,actor TEXT,at REAL);
 CREATE INDEX IF NOT EXISTS switch_endpoint ON switches(endpoint,id DESC);
@@ -158,6 +161,7 @@ def enqueue(c, task):
         (coalesce(json_extract(payload,'$.title'),'')<>'' AND
          coalesce(json_extract(payload,'$.facts.series'),'')<>'') AS has_story,
         json_extract(payload,'$.publish_at') AS publish_at,
+        coalesce(json_extract(payload,'$.urgent'),0) AS urgent,
         coalesce(json_extract(payload,'$.publish_priority'),0) AS priority FROM jobs WHERE key=?""",
         (task["key"],),
     ).fetchone()
@@ -170,17 +174,20 @@ def enqueue(c, task):
         # An intact snapshot and all accepted or finalized drafts stay frozen.
         priority = task.get("publish_priority", 0)
         due = task.get("publish_at")
-        if existing["state"] in ("pending", "retry_wait") and (existing["publish_at"], existing["priority"]) != (due, priority):
+        urgent = int(bool(task.get("urgent")))
+        if existing["state"] in ("pending", "retry_wait") and (
+            existing["publish_at"], existing["priority"], existing["urgent"]
+        ) != (due, priority, urgent):
             c.execute(
-                """UPDATE jobs SET payload=json_set(payload,'$.publish_at',?,'$.publish_priority',?)
+                """UPDATE jobs SET payload=json_set(payload,'$.publish_at',?,'$.publish_priority',?,'$.urgent',json(?))
                 WHERE key=? AND state IN ('pending','retry_wait')""",
-                (due, priority, task["key"]),
+                (due, priority, "true" if urgent else "false", task["key"]),
             )
         return True
     task = dict(task, facts=dict(task["facts"]))
     for row in c.execute(
         "SELECT * FROM reviewed_facts WHERE product=? AND content=? AND lang=? AND material_id=? ORDER BY source_ref",
-        (*group_key(task), str(task.get("material_id") or "")),
+        (*generation_group_key(task), str(task.get("material_id") or "")),
     ):
         episode = int(row["episode"])
         if episode and task.get("episode") != episode:
@@ -197,7 +204,7 @@ def enqueue(c, task):
         (
             task["key"],
             task["endpoint"],
-            *group_key(task),
+            *generation_group_key(task),
             dump(task),
             "manual" if manual else "pending",
             time.time(),
@@ -249,10 +256,13 @@ def normal_claim_rows(c, now, prefer_imminent, reserved):
         FROM jobs WHERE state='pending' AND key NOT IN (SELECT value FROM json_each(?))
         GROUP BY product,content,lang,priority
         HAVING count(*)>=100 OR urgent=1 OR first_publish<=?
-          OR min(created)<=? - CASE WHEN count(*)=1 AND first_publish IS NOT NULL
+          OR (min(created)<=? - CASE WHEN count(*)=1 AND first_publish IS NOT NULL
                                     THEN ? ELSE ? END
+              AND (min(CASE WHEN endpoint='x_tag_auto' THEN 1 ELSE 0 END)=0
+                   OR first_publish IS NULL OR first_publish<=? OR min(created)<=?))
         ORDER BY priority DESC,due,min(created),product,content,lang LIMIT 1""",
-        (near, prefer_imminent, reserved, near, now, SCHEDULED_SINGLETON_WAIT_SECONDS, COLLECT_SECONDS),
+        (near, prefer_imminent, reserved, near, now, SCHEDULED_SINGLETON_WAIT_SECONDS, COLLECT_SECONDS,
+         now + X_AUTO_GENERATION_LEAD_SECONDS, now - X_AUTO_MAX_COLLECTION_SECONDS),
     ).fetchone()
     # Carry failures into the next ready queue, even if its drama/language differs.
     # With no new work, retry after one normal collection window instead of waiting forever.

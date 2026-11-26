@@ -12,7 +12,7 @@ import time
 
 from . import store
 from .publish_length import publish_limit
-from .model import body_length_target, click_prefix, group_key
+from .model import body_length_target, click_prefix, generation_group_key
 
 CAPACITY_FALLBACK_MODEL = "gpt-6-sol"
 
@@ -126,7 +126,7 @@ def prompt(tasks):
     return store.dump(
         dict(
             title=tasks[0]["title"],
-            product=group_key(tasks[0])[0],
+            product=generation_group_key(tasks[0])[0],
             click_prefix=click_prefix(tasks[0]["language"]),
             fact_text=segments,
             tasks=items,
@@ -154,7 +154,7 @@ def splits(tasks):
     # still has exactly one title/product/language and its own supplied facts.
     groups = {}
     for task in tasks:
-        groups.setdefault(group_key(task), []).append(task)
+        groups.setdefault(generation_group_key(task), []).append(task)
     for rows in groups.values():
         yield from fit(rows)
 

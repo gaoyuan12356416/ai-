@@ -752,8 +752,36 @@ class CaptionTests(unittest.TestCase):
             row = dict(id=1, manual_run_id=1, source_type="material", content_id="story", material_id="m1",
                        material_language="en", drama_name="Title", description="Fact")
             self.assertEqual(sources.x_task(c, row)["publish_at"], epoch)
+            self.assertFalse(sources.x_task(c, row)["urgent"])
+            c.execute("ALTER TABLE x_post_manual_run ADD COLUMN publish_mode TEXT")
+            c.execute("UPDATE x_post_manual_run SET publish_mode='immediate',scheduled_at=''")
+            self.assertTrue(sources.x_task(c, row)["urgent"])
             row.update(manual_run_id=None, schedule_run_id=1)
             self.assertEqual(sources.x_task(c, row)["publish_at"], epoch)
+
+    def test_manual_appointments_and_slot_collection(self):
+        now = 1800000000
+        from datetime import datetime, timezone
+        def ts(value):
+            return datetime.fromtimestamp(value, timezone.utc).isoformat()
+        row = dict(_ord=1, task_id="video", content_id="s", source_kind="manual", created_at_utc=ts(now))
+        self.assertTrue(sources.fb_task("fv", dict(row, planned_at_utc=ts(now)))["urgent"])
+        self.assertFalse(sources.fb_task("fv", dict(row, planned_at_utc=ts(now+3600)))["urgent"])
+        with store.connection() as c, patch.object(store.time, "time", return_value=now):
+            for i, product in enumerate(("Moboshort", "Moboreels", "Moboshort"), 1):
+                task = dict(self.task(i), family="ta", endpoint="x_tag_auto", urgent=False,
+                            material_product=product, publish_at=now+2100)
+                store.enqueue(c, task)
+            c.commit()
+            self.assertEqual(store.claim(c)[1], [])
+            with patch.object(store.time, "time", return_value=now+601):
+                sizes = sorted(len(store.claim(c)[1]) for _ in range(2))
+            self.assertEqual(sizes, [1, 2])
+            urgent = dict(self.task(8), family="ta", endpoint="x_tag_auto", urgent=False,
+                          material_product="Moboshort", publish_at=now+299)
+            store.enqueue(c, urgent)
+            c.commit()
+            self.assertEqual(store.claim(c, lane="priority")[1][0]["key"], urgent["key"])
 
     def test_three_generation_workers_claim_once_and_overlap(self):
         tasks = [dict(self.task(i), content="story-" + str(i)) for i in range(1, 4)]
