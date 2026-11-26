@@ -1,5 +1,48 @@
 (function () {
+  const TAG_PUBLISH_ITEMS = [
+    { key: "xTagAutoPublishTemplates", label: "标签画像自动发布",
+      description: "按频道标签收入画像选择剧目和素材", kind: "page",
+      href: "/x-tag-auto-publish-templates.html", module: "x_accounts",
+      adminOnly: false, enabled: true, order: 25 },
+    { key: "xTagMaterialPool", label: "标签画像素材池",
+      description: "维护按频道标签画像分配的独立素材池", kind: "page",
+      href: "/x-tag-material-pool.html", module: "x_accounts",
+      adminOnly: false, enabled: true, order: 26 },
+  ];
+  const TAG_PAGE_ACTIVE_KEYS = {
+    "/x-tag-auto-publish-templates.html": "xTagAutoPublishTemplates",
+    "/x-tag-auto-publish-template.html": "xTagAutoPublishTemplates",
+    "/x-tag-auto-publish-runs.html": "xTagAutoPublishTemplates",
+    "/x-tag-material-pool.html": "xTagMaterialPool",
+  };
+  const INDEPENDENT_REPORTS = [
+    {
+      key: "socialkitAnalytics", label: "SocialKit 效果报表", order: 30,
+      description: "按平台、产品、账号和剧目查看每日发布与收入",
+      kind: "page", href: "/socialkit-analytics.html", module: "socialkit_analytics", enabled: true,
+    },
+    {
+      key: "xMaterialEffects", label: "X 素材效果", order: 40,
+      description: "查看 X 素材累计浏览、互动与收入",
+      kind: "page", href: "/x-material-effects.html", module: "x_material_effects", enabled: true,
+    },
+  ];
+  const RETIRED_X_KEYS = new Set(["xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"]);
+  const RETIRED_X_PAGES = new Set([
+    "/x-auto-publish-templates.html", "/x-auto-publish-template.html",
+    "/x-auto-publish-runs.html", "/x-post-material-pool.html",
+  ]);
+  function retiredXItem(item) {
+    if (!item) return false;
+    const path = String(item.href || "").split(/[?#]/, 1)[0];
+    return RETIRED_X_KEYS.has(item.key) || RETIRED_X_KEYS.has(item.view) || RETIRED_X_PAGES.has(path);
+  }
   const DEFAULT_NAV = [
+    {key:"partner_libraries", label:"合作方剧库", order:16, enabled:true,
+     items:[{key:"moboreelsLibrary", label:"Moboreels 短剧库", order:10,
+       href:"/moboreels-library.html", module:"moboreels_library", enabled:true},
+       {key:"moboreelsRecommendations",label:"Moboreels 推荐剧单",order:20,href:"/moboreels-recommendations.html",module:"moboreels_library",enabled:true},
+       {key:"moboreelsMediaAccounts",label:"Moboreels 媒体账号报备",order:30,href:"/moboreels-media-accounts.html",module:"moboreels_library",enabled:true}]},
     {
       key: "pipeline_overview", label: "运行监测", order: 1,
       items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
@@ -10,7 +53,10 @@
       key: "video_editing", label: "视频剪辑", order: 15, module: "video_editing",
       items: [{ key: "videoEditing", label: "视频剪辑工作台", order: 10,
         description: "共享视频素材、逐剧剪辑与制作任务", kind: "page",
-        href: "/video-editing.html", module: "video_editing", enabled: true }],
+        href: "/video-editing.html", module: "video_editing", enabled: true },
+        { key: "videoEditingAi", label: "AI 智能剪辑", order: 20,
+          description: "分析原片、调整剪辑方案并制作成片", kind: "page",
+          href: "/video-editing-ai.html", module: "video_editing", enabled: true }],
     },
     {
       key: "ad_control",
@@ -269,6 +315,7 @@
       order: 40,
       module: "x_accounts",
       items: [
+        ...TAG_PUBLISH_ITEMS,
         {
           key: "xAccounts",
           label: "X账号授权",
@@ -291,42 +338,9 @@
           order: 20,
         },
         {
-          key: "xAutoPublishTemplates",
-          label: "X Post 自动发布模板",
-          description: "维护独立的选材、文案和发布时间模板",
-          kind: "page",
-          href: "/x-auto-publish-templates.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 21,
-        },
-        {
-          key: "xAutoPublishRuns",
-          label: "X Post 自动发布记录",
-          description: "查看模板运行、账号任务和最终发布结果",
-          kind: "page",
-          href: "/x-auto-publish-runs.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 22,
-        },
-        {
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 30,
-        },
-        {
           key: "xPostDramaPool",
           label: "Post短剧池",
-          description: "按短剧免费集数顺序维护和发布Post",
+          description: "按频道标签画像分配新剧并顺序续发",
           kind: "page",
           href: "/x-post-drama-pool.html",
           module: "x_accounts",
@@ -449,7 +463,7 @@
     },
   ];
 
-  const CONFIG_CACHE_KEY = "quickNavConfigCache:v5";
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v6";
   const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
@@ -563,6 +577,7 @@
     if (item.enabled === false) return false;
     if (item.adminOnly && !(user && user.is_admin)) return false;
     if (item.module && !userCan(auth, item.module)) return false;
+    if (item.requiredModules && !item.requiredModules.every(key => userCan(auth, key))) return false;
     return true;
   }
 
@@ -573,6 +588,7 @@
   const INTERNAL_VIEW_HREFS = {
     pipelineMonitor: "/pipeline-monitor.html",
     videoEditing: "/video-editing.html",
+    videoEditingAi: "/video-editing-ai.html",
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
@@ -587,13 +603,13 @@
     xAccountList: "/x-account-list.html",
     xVideoPublish: "/x-video-publish.html",
     xVideoPublishRecords: "/x-video-publish.html?view=records",
-    xAutoPublishTemplates: "/x-auto-publish-templates.html",
-    xAutoPublishRuns: "/x-auto-publish-runs.html",
-    xPostMaterialPool: "/x-post-material-pool.html",
+    xTagAutoPublishTemplates: "/x-tag-auto-publish-templates.html",
+    xTagMaterialPool: "/x-tag-material-pool.html",
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
     socialAnalytics: "/social-analytics.html",
     socialkitAnalytics: "/socialkit-analytics.html",
+    xMaterialEffects: "/x-material-effects.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
@@ -617,70 +633,113 @@
     return JSON.parse(JSON.stringify(Array.isArray(config) ? config : []));
   }
 
+  // The source configuration also authorizes API requests. Project its group
+  // and item permissions onto individual links when combining sidebar groups.
+  function inheritNavAccess(item, group, skipModule = false) {
+    if (group.enabled === false) item.enabled = false;
+    if (group.adminOnly) item.adminOnly = true;
+    if (!skipModule && group.module && group.module !== item.module) {
+      item.requiredModules = [...new Set([...(item.requiredModules || []), group.module])];
+    }
+  }
+
+  function consolidateReportNavigation(groups) {
+    const defaults = DEFAULT_NAV.find(group => group.key === "social_reports");
+    let reports = groups.find(group => group.key === defaults.key);
+    if (!reports) {
+      reports = cloneNav([defaults])[0];
+      groups.push(reports);
+    }
+    reports.label = defaults.label;
+    if (!Array.isArray(reports.items)) reports.items = [];
+    const sourceReports = { ...reports };
+    const oldMixedAcl = sourceReports.module && (sourceReports.module !== "social_analytics" ||
+      reports.items.some(item => item.module && item.module !== "social_analytics"));
+    const oldX = groups.find(group => group.key === "x_platform");
+    const oldSocialKit = groups.find(group => group.key === "socialkit_reports");
+
+    // A saved link in the destination takes precedence over a legacy duplicate.
+    const sources = [reports, ...groups.filter(group => group !== reports)];
+    for (const definition of INDEPENDENT_REPORTS) {
+      let saved;
+      for (const group of sources) {
+        group.items = (group.items || []).filter(item => {
+          if (item.key !== definition.key && item.view !== definition.key &&
+              String(item.href || "").split(/[?#]/, 1)[0] !== definition.href) return true;
+          if (!saved) {
+            saved = { ...definition, ...item, key: definition.key, href: definition.href };
+            // The dedicated report module is always required, including for old aliases.
+            if (saved.module !== definition.module) {
+              inheritNavAccess(saved, { module: definition.module });
+            }
+            inheritNavAccess(saved, group, group.key === "x_platform" && definition.key === "xMaterialEffects");
+          }
+          return false;
+        });
+      }
+      const entry = saved || { ...definition };
+      if (!saved && definition.key === "xMaterialEffects" && oldX) inheritNavAccess(entry, oldX, true);
+      if (!saved && definition.key === "socialkitAnalytics") {
+        if (oldSocialKit) inheritNavAccess(entry, oldSocialKit);
+        else if (!oldMixedAcl) inheritNavAccess(entry, sourceReports, true);
+      }
+      reports.items.push(entry);
+    }
+    // Existing data reports keep their former group AND item restrictions.
+    for (const item of reports.items) {
+      if (!INDEPENDENT_REPORTS.some(report => report.key === item.key)) inheritNavAccess(item, sourceReports);
+    }
+    delete reports.module;
+    const analytics = reports.items.find(item => item.key === "socialAnalytics");
+    if (analytics) analytics.label = "社媒效果分析";
+    if (!reports.items.some(item => item.key === "aiImageDaily")) {
+      const daily = { ...defaults.items.find(item => item.key === "aiImageDaily") };
+      inheritNavAccess(daily, sourceReports);
+      reports.items.push(daily);
+    }
+    // Older releases could create a second group when the main one was absent.
+    for (const group of groups) {
+      if (!["socialkit_reports", "drama_reports", "moboreels_reports"].includes(group.key)) continue;
+      for (const item of group.items || []) {
+        if (reports.items.some(existing => existing.key === item.key)) continue;
+        inheritNavAccess(item, group);
+        reports.items.push(item);
+      }
+      group.items = [];
+    }
+    return reports;
+  }
+
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    const reports = consolidateReportNavigation(normalized);
+    // DRAMA_PAY_RANK_NAV_V1
+    if (!normalized.some(g => (g.items || []).some(i => i.key === "dramaPayRank"))) {
+      const rankItem = {key:"dramaPayRank", label:"短剧付费 TOP100", kind:"page",
+        href:"/drama-pay-rank.html", module:"drama_pay_rank", enabled:true, order:5};
+      // In stored navigation this report inherits the data group's original ACL.
+      const sourceGroup = config.find(group => group.key === "social_reports");
+      if (sourceGroup) inheritNavAccess(rankItem, sourceGroup);
+      reports.items.push(rankItem);
+    }
     if (!normalized.some(group => (group.items || []).some(item => item.key === "pipelineMonitor"))) {
       normalized.unshift({ key: "pipeline_overview", label: "运行监测", order: 1,
         items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
           description: "任务进度、服务器容量与制作发布效率", kind: "page",
           href: "/pipeline-monitor.html", enabled: true }] });
     }
-    // SocialKit has its own module; retain inherited permissions on old items.
-    let socialkitReports = normalized.find(group => group && group.key === "social_reports");
-    if (!socialkitReports) {
-      socialkitReports = cloneNav([DEFAULT_NAV.find(group => group.key === "social_reports")])[0];
-      normalized.push(socialkitReports);
-    }
-    if (!Array.isArray(socialkitReports.items)) socialkitReports.items = [];
-    const socialkitExists = normalized.some(group => Array.isArray(group.items) &&
-      group.items.some(item => item && item.key === "socialkitAnalytics"));
-    const customReportAcl = socialkitReports.module && (socialkitReports.module !== "social_analytics" ||
-      socialkitReports.items.some(item => item && item.module && item.module !== "social_analytics"));
-    if (!socialkitExists && customReportAcl) {
-      let separate = normalized.find(group => group && group.key === "socialkit_reports");
-      if (!separate) {
-        separate = {key: "socialkit_reports", label: "数据报表 · SocialKit", order: 51, items: []};
-        normalized.push(separate);
+    const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
+    const missingEditorItems = editorDefault.items.filter(entry => !normalized.some(group =>
+      Array.isArray(group?.items) && group.items.some(item => item?.key === entry.key)));
+    if (missingEditorItems.length) {
+      let editorGroup = normalized.find(group => group?.key === editorDefault.key);
+      if (!editorGroup) {
+        editorGroup = {...editorDefault, items: []};
+        normalized.push(editorGroup);
       }
-      socialkitReports = separate;
-    }
-    if (!socialkitExists && socialkitReports.module === "social_analytics") {
-      socialkitReports.items.forEach(item => { if (!item.module) item.module = "social_analytics"; });
-      delete socialkitReports.module;
-    }
-    if (!socialkitExists) {
-      socialkitReports.items.push({key: "socialkitAnalytics", label: "SocialKit 效果报表",
-        description: "按平台、产品、账号和剧目查看每日发布与收入",
-        kind: "page", href: "/socialkit-analytics.html", module: "socialkit_analytics",
-        enabled: true, order: 30});
-    }
-
-
-    // Upgrade saved and cached navigation without replacing other groups or ACLs.
-    const reportDefault = DEFAULT_NAV.find(group => group.key === "social_reports");
-    let reports = normalized.find(group => group && group.key === "social_reports");
-    if (!reports) {
-      reports = cloneNav([reportDefault])[0];
-      normalized.push(reports);
-    } else {
-      reports.label = "数据报表";
-      if (!Array.isArray(reports.items)) reports.items = [];
-      const analytics = reports.items.find(item => item && item.key === "socialAnalytics");
-      if (analytics) analytics.label = "社媒效果分析";
-      if (!reports.items.some(item => item && item.key === "aiImageDaily")) {
-        reports.items.push(cloneNav(reportDefault.items.filter(item => item.key === "aiImageDaily"))[0]);
-      }
-    }
-
-    if (!normalized.some(group => group && Array.isArray(group.items) &&
-        group.items.some(item => item && item.key === "videoEditing"))) {
-      const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
-      const editorGroup = normalized.find(group => group && group.key === "video_editing");
-      if (editorGroup) {
-        if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
-        editorGroup.items.push(JSON.parse(JSON.stringify(editorDefault.items[0])));
-      } else normalized.push(JSON.parse(JSON.stringify(editorDefault)));
+      if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
+      editorGroup.items.push(...missingEditorItems.map(item => ({...item})));
     }
     // Migrate both saved server navigation and cached legacy navigation.
     let assetItem;
@@ -830,6 +889,11 @@
     }
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      TAG_PUBLISH_ITEMS.forEach(item => {
+        if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
+          xPlatform.items.push({ ...item });
+        }
+      });
       [
         { key: "xVideoPublish", label: "手动发布", description: "全部账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
         { key: "xVideoPublishRecords", label: "手动发布记录", description: "查看手动、素材池和 Excel 发布批次", href: "/x-video-publish.html?view=records", order: 24 },
@@ -843,58 +907,12 @@
           item.module = "x_accounts"; item.adminOnly = false;
         }
       });
-      const xAutoPublishTemplatesExists = xPlatform.items.some(
-        item => item && item.key === "xAutoPublishTemplates"
-      );
-      if (!xAutoPublishTemplatesExists) {
-        xPlatform.items.push({
-          key: "xAutoPublishTemplates",
-          label: "X Post 自动发布模板",
-          description: "维护独立的选材、文案和发布时间模板",
-          kind: "page",
-          href: "/x-auto-publish-templates.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 21,
-        });
-      }
-      const xAutoPublishRunsExists = xPlatform.items.some(
-        item => item && item.key === "xAutoPublishRuns"
-      );
-      if (!xAutoPublishRunsExists) {
-        xPlatform.items.push({
-          key: "xAutoPublishRuns",
-          label: "X Post 自动发布记录",
-          description: "查看模板运行、账号任务和最终发布结果",
-          kind: "page",
-          href: "/x-auto-publish-runs.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 22,
-        });
-      }
-      const exists = xPlatform.items.some(item => item && item.key === "xPostMaterialPool");
-      if (!exists) {
-        xPlatform.items.push({
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 30,
-        });
-      }
       const dramaPoolExists = xPlatform.items.some(item => item && item.key === "xPostDramaPool");
       if (!dramaPoolExists) {
         xPlatform.items.push({
           key: "xPostDramaPool",
           label: "Post短剧池",
-          description: "按短剧免费集数顺序维护和发布Post",
+          description: "按频道标签画像分配新剧并顺序续发",
           kind: "page",
           href: "/x-post-drama-pool.html",
           module: "x_accounts",
@@ -911,9 +929,10 @@
     const retiredGroups = new Set(["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]);
     const retiredModules = new Set(["ad_control_center", "ad_control_v3", "ad_material_tasks", "ad_material_test"]);
     return normalized
-      .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module))
+      .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module) &&
+        (!["socialkit_reports", "drama_reports", "moboreels_reports"].includes(group.key) || group.items.length))
       .map(group => Object.assign({}, group, {
-        items: (group.items || []).filter(item => !retiredModules.has(item.module)),
+        items: (group.items || []).filter(item => !retiredModules.has(item.module) && !retiredXItem(item)),
       }));
   }
 
@@ -1020,6 +1039,7 @@
   }
 
   function setActive(container, activeKey) {
+    activeKey = TAG_PAGE_ACTIVE_KEYS[window.location.pathname] || activeKey;
     const root = typeof container === "string" ? document.querySelector(container) : container;
     if (!root) return;
     root.querySelectorAll(".nav-item").forEach(item => {
