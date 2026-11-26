@@ -33,10 +33,12 @@ def discover(path=FB_DB):
              json_extract(t.moboreels_json,'$.material.material_name') material_name,
              json_extract(t.moboreels_json,'$.material.drama_name') drama_name,
              json_extract(t.moboreels_json,'$.link.koc_code') mobo_code,
-             '' owner,'' tenant
+             CASE WHEN v.created_by=f.created_by THEN f.created_by ELSE '' END owner,'' tenant
           FROM fb_auto_task t JOIN fb_auto_run_page p USING(run_id,page_id)
           JOIN fb_auto_publish_ledger l ON l.task_id=t.id AND l.page_id=t.page_id AND l.material_id=t.material_id
              AND l.graph_post_id=t.graph_post_id AND l.status='published' AND l.unknown_outcome=0
+          LEFT JOIN fb_auto_template f ON f.id=t.template_id
+          LEFT JOIN fb_auto_template_version v ON v.template_id=t.template_id AND v.version=1
           LEFT JOIN fb_auto_post_effect e ON e.task_id=t.id
          WHERE t.status='published' AND t.unknown_outcome=0 AND t.completed_at_utc<>''"""
     manual = """SELECT page_id,graph_post_id,material_id,content_id,
@@ -44,7 +46,8 @@ def discover(path=FB_DB):
              updated_at_utc published_at,source_kind source,NULL native,NULL views,NULL metrics_at,
              json_extract(snapshot_json,'$.material.material_name') material_name,
              json_extract(snapshot_json,'$.material.drama_name') drama_name,
-             json_extract(snapshot_json,'$.moboreels.koc_code') mobo_code,owner_user_id owner,tenant_key tenant
+             json_extract(snapshot_json,'$.moboreels.koc_code') mobo_code,
+             CASE WHEN source_kind='manual' THEN owner_user_id ELSE '' END owner,tenant_key tenant
           FROM fb_video_task WHERE status='published' AND unknown_outcome=0 AND updated_at_utc<>''"""
     posts, conflicts = {}, set()
     with closing(readonly(path)) as db:
@@ -73,6 +76,16 @@ def discover(path=FB_DB):
     for key in conflicts:
         del posts[key]
     return posts, len(conflicts)
+
+
+def resolve_auto_tenants(posts):
+    from features.social_analytics.facebook import users_snapshot, DEFAULT_USERS_DB
+    users = users_snapshot(DEFAULT_USERS_DB)
+    for p in posts.values():
+        if p['source']=='auto_template' and p['owner']:
+            owners = users.get(p['owner'],())
+            if len(owners)==1:
+                p['tenant'] = owners[0]['tenant_key']
 
 
 def enrich(posts, reader, catalog_path=MATERIAL_CATALOG):

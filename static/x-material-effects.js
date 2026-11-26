@@ -55,6 +55,7 @@
     } else if (data.meta.metrics_upstream_error) {
       notes.push('X 指标接口暂不可用，已保留采集结果并安排重试。');
     }
+    if (data.meta.unavailable_channels?.length) notes.push(data.meta.unavailable_channels.map(label).join('、') + ' 快照暂不可用。');
     const fb = data.meta.channels?.facebook;
     if (fb?.metrics_upstream_error) notes.push('Facebook 互动采集暂缓，已保留已采集指标。');
     if (fb?.revenue_incomplete_sites?.length) notes.push('Facebook 部分收入日期尚未齐全，相关收入待核实。');

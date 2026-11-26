@@ -20,6 +20,10 @@ def query(params, actor, root=None):
     def get(key, default=''):
         return params.get(key,[default])[0]
     sources = data.channels(get('channel','all'))
+    unavailable = [s for s in sources if not (data.root_path(root)/(s+'.sqlite3')).is_file()]
+    sources = tuple(s for s in sources if s not in unavailable)
+    if not sources:
+        raise OSError('social_effect_snapshot_unavailable')
     details = get('view') == 'posts'
     page, size = max(1,int(get('page','1'))), max(1,min(100,int(get('page_size','50'))))
     sort, direction = get('sort','views'), get('direction','desc')
@@ -89,7 +93,7 @@ def query(params, actor, root=None):
     stamp = datetime.now(timezone.utc)
     def stale(key):
         return any((stamp-datetime.fromisoformat(m[key].replace('Z','+00:00'))).total_seconds()>7200 for m in meta.values())
-    summary_meta = dict(channels={k:{field:m.get(field) for field in ('version','generated_at','revenue_through','metrics_upstream_error','revenue_incomplete_sites')} for k,m in meta.items()},
+    summary_meta = dict(unavailable_channels=unavailable,channels={k:{field:m.get(field) for field in ('version','generated_at','revenue_through','metrics_upstream_error','revenue_incomplete_sites')} for k,m in meta.items()},
         generated_at=min(m['generated_at'] for m in meta.values()), revenue_through=min(m['revenue_through'] for m in meta.values()),
         stale=stale('generated_at'), revenue_stale=stale('revenue_source_generated_at'),
         metrics_upstream_error=meta.get('x',{}).get('metrics_upstream_error',''))

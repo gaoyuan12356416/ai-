@@ -84,6 +84,38 @@ class ChannelEffectsTest(unittest.TestCase):
             self.assertEqual(evidence['drama']['known']['views'],110)
             self.assertEqual(evidence['material']['revenue_cents'],150)
 
+    def test_facebook_shared_catalog_filters_before_limit(self):
+        from datetime import datetime,timezone
+        from features.fb_auto_posts import catalog_plan
+        from features.fb_auto_posts.metrics import MetricWindow
+        cfg = normalize_template_payload(payload())
+        cfg.update(metric_product='Dramawave', metric_platform=0, _candidate_limit=1)
+        cfg['drama_rule'].update(effect_channel='facebook',x_views_min='100',sort_by='x_views')
+        cfg['material_rule'].update(effect_channel='all',x_views_min='110',sort_by='x_views')
+        window=MetricWindow((3,),('2026-11-25',),{}, {})
+        repo=SimpleNamespace(now_fn=lambda:datetime(2026,11,26,tzinfo=timezone.utc),candidate_limit=1,
+            metric_store=SimpleNamespace(load_metric_window=lambda **kw:window))
+        facts={cid:dict(name=cid,resource_type_v2='2',deploy_time=1,language='en') for cid in ('D1','D2')}
+        def hydrate(_,ids):
+            return {mid:(dict(cid='D1',lang='en',product='Dramawave',name='name',tag_name='',video_duration=10),
+                         'https://example.org/video') for mid in ids}
+        with patch.object(catalog_plan,'BrokerReadOnlyMySQL',return_value=SimpleNamespace(schema='s',blacklist_schema='b')), \
+             patch('features.fb_auto_posts.planning_catalog.open_for_plan',return_value=None), \
+             patch.object(catalog_plan.Catalog,'index',return_value={('D2','en'):[8],('D1','en'):[6,7]}), \
+             patch.object(catalog_plan.Catalog,'drama_facts',return_value=(facts,{}, {},'')), \
+             patch.object(catalog_plan.Catalog,'hydrate',hydrate):
+            chosen=catalog_plan.snapshots(repo,cfg,{('en',False)})['en',False].candidates
+        self.assertEqual([m.material_id for m in chosen],['7'])
+        self.assertEqual(chosen[0].social_effect['material']['channel'],'all')
+
+    def test_one_missing_channel_leaves_other_report_available(self):
+        (self.root/'facebook.sqlite3').unlink()
+        result=report.query({},self.admin,self.root)
+        self.assertEqual(result['meta']['unavailable_channels'],['facebook'])
+        self.assertEqual(result['post_count'],1)
+        with self.assertRaises(OSError):
+            report.query({'channel':['facebook']},self.admin,self.root)
+
     def test_native_identity_and_observed_zero(self):
         self.assertEqual(facebook.identity('12','13'),facebook.identity('12','12_13'))
         self.assertIsNone(facebook.identity('12','14_13'))

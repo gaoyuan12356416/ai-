@@ -19,10 +19,16 @@ def project_facebook(root, graph_calls):
     from features.social_analytics.warehouse_refresh import Reader, environment
     from .graph import sync
     posts, conflicts = facebook.discover()
+    facebook.resolve_auto_tenants(posts)
     reader = Reader(environment('/root/drama_material_service/.env'))
     facebook.enrich(posts,reader)
     revenue = facebook.revenue(posts)
-    metrics = sync(posts,root/'facebook-observations.sqlite3',max_calls=graph_calls)
+    try:
+        metrics = sync(posts,root/'facebook-observations.sqlite3',max_calls=graph_calls)
+    except Exception as exc:
+        # Existing Page observations and verified revenue are independently usable.
+        metrics = dict(metrics_upstream_error='fb_collection_'+type(exc).__name__)
+        print(json.dumps(metrics),flush=True)
     stamp = data.utc()
     return data.publish(root,'facebook',posts.values(), dict(version=stamp,generated_at=stamp,
                         identity_conflicts=conflicts,timezone='Asia/Shanghai',currency='USD',**revenue,**metrics))
