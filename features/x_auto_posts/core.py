@@ -749,8 +749,8 @@ def ensure_storage(db_path: Any) -> None:
                 );
 
                 CREATE TABLE IF NOT EXISTS x_auto_material_ledger (
-                    material_id TEXT PRIMARY KEY COLLATE BINARY,
-                    task_id INTEGER NOT NULL UNIQUE,
+                    material_id TEXT NOT NULL COLLATE BINARY,
+                    task_id INTEGER PRIMARY KEY,
                     run_id INTEGER NOT NULL,
                     template_id INTEGER NOT NULL,
                     content_id TEXT NOT NULL COLLATE BINARY,
@@ -831,6 +831,8 @@ def ensure_storage(db_path: Any) -> None:
             )
             if "created_by_tenant_key" not in {r[1] for r in conn.execute("PRAGMA table_info(x_auto_template)")}:
                 conn.execute("ALTER TABLE x_auto_template ADD COLUMN created_by_tenant_key TEXT NOT NULL DEFAULT ''")
+            from features.x_material_effects.migrations import auto_ledger
+            auto_ledger(conn)
             template_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(x_auto_template)")
@@ -2348,13 +2350,16 @@ class XAutoPostStore:
         reconcile_only: bool = False,
         publish_delegated: bool = False,
         planning_cutoff: Optional[Any] = None,
+        candidate_guard: Optional[Callable[[int], bool]] = None,
+        defer_selection_recovery: bool = False,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
         An expired ``publishing`` task is converted to ``unknown`` and claimed
         only for reconciliation.  It can therefore never be initialized again.
-        Active work for one account remains serialized inside the same
-        ``BEGIN IMMEDIATE`` transaction.
+        Claims remain serialized inside ``BEGIN IMMEDIATE``. When native
+        workers own publication, alternate new work with receipt observation
+        so repeated observations cannot exhaust every bounded runner cycle.
         """
 
         worker = _bounded_text(worker_id, "worker id", 128)
@@ -2411,6 +2416,31 @@ class XAutoPostStore:
                     (current, current, current, current, current, current),
                 )
             else:
+                fairness_order = ""
+                if publish_delegated:
+                    # Persist the turn through existing audit events, inside the
+                    # claim transaction. Concurrent callers and service restarts
+                    # therefore share one turn without new scheduler state.
+                    last_claim = conn.execute(
+                        "SELECT event_type FROM x_auto_event WHERE event_type IN "
+                        "('task_claimed_selection','task_claimed_prepare',"
+                        "'task_claimed_publish','task_claimed_reconcile') "
+                        "ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                    observe_first = not last_claim or last_claim[0] != "task_claimed_reconcile"
+                    observation = (
+                        "(status IN ('publishing','reconciling','unknown','ready') "
+                        "OR (status='retry_wait' AND claim_phase='reconcile'))"
+                    )
+                    # A just-observed old run must go behind other due receipts;
+                    # original run time alone would repeatedly select that run.
+                    fairness_order = (
+                        "CASE WHEN %s THEN %d ELSE %d END, "
+                        "CASE WHEN %s THEN COALESCE(NULLIF(next_attempt_at_utc,''),"
+                        "NULLIF(lease_expires_at_utc,''),scheduled_at_utc) ELSE '' END, "
+                        % (observation, 0 if observe_first else 1,
+                           1 if observe_first else 0, observation)
+                    )
                 candidates = conn.execute(
                     """
                 SELECT * FROM x_auto_task
@@ -2433,9 +2463,11 @@ class XAutoPostStore:
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
                 ORDER BY
+                    {fairness_order}
                     CASE
                         WHEN status IN ('publishing','reconciling','unknown') THEN 0
                         WHEN status='ready' THEN 1
+                        WHEN status='selecting' THEN 2
                         WHEN status IN ('reserved','preparing','retry_wait') THEN 2
                         ELSE 3
                     END,
@@ -2443,11 +2475,17 @@ class XAutoPostStore:
                     scheduled_at_utc ASC,
                     template_id ASC,
                     id ASC
-                """,
+                """.format(fairness_order=fairness_order),
                     (current, current, current, current, current, current, current, current, current),
                 )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
+                # When the independent recovery owner is enabled, only its
+                # cross-ledger proof may turn an ended selection into retry_wait.
+                if defer_selection_recovery and candidate["status"] == "selecting":
+                    continue
+                if candidate_guard is not None and not candidate_guard(int(candidate["id"])):
+                    continue
                 if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", ("x:auto:" + str(candidate["id"]),)).fetchone():
                     continue
                 backlog = disposition_record(conn, "x:auto:" + str(candidate["id"]), candidate)
@@ -2507,6 +2545,11 @@ class XAutoPostStore:
 
             if publish_delegated and phase == "publish":
                 phase, target_status = "reconcile", "reconciling"
+
+            # Selection cannot hold a three-hour publishing lease. Renewals are
+            # tied to the executor's request lifetime; publishing stays protected.
+            phase_seconds = min(seconds, 180 if phase == "selection" else 900 if phase == "prepare" else seconds)
+            lease_expires = (current_dt + timedelta(seconds=phase_seconds)).isoformat(timespec="seconds")
 
             token = secrets.token_urlsafe(32)
             assignments = [
@@ -2743,7 +2786,20 @@ class XAutoPostStore:
                 "SELECT task_id FROM x_auto_material_ledger WHERE material_id=?",
                 (clean_material_id,),
             ).fetchone()
-            if existing_ledger is not None:
+            from features.x_material_effects.selection import POLICY
+            effect = _json_object(selection_json).get('x_effect') or {}
+            pool = _json_object(selection_json).get('candidate_pool') or {}
+            from features.publish_candidate_pool import POLICY as POOL_POLICY
+            from features.x_material_effects.window import POLICY as WINDOW_POLICY
+            window = _json_object(selection_json).get('material_window') or {}
+            if effect.get('policy') == POLICY or pool.get('policy') == POOL_POLICY or window.get('policy') == WINDOW_POLICY:
+                from features.x_material_effects.reuse import client, lane
+                try:
+                    client('reserve', lane=lane(), task_id=normalized_task_id,
+                        account_id=str(task['account_id']), material_id=clean_material_id)
+                except (OSError, ValueError, RuntimeError):
+                    raise XAutoPostStoreError('x_auto_material_already_reserved', '素材已被同账号使用或其他在途任务占用', 409) from None
+            elif existing_ledger is not None:
                 raise XAutoPostStoreError("x_auto_material_already_reserved", "material has already appeared in the automatic publishing ledger", 409)
             conn.execute(
                 """
