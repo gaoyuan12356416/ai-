@@ -305,7 +305,11 @@
         <label>剧目上线窗口（相对天数）<input name="drama_launch_window_days" value="${h(c.drama_launch_window_days??30)}" placeholder="0、30 或 -1~0" required></label>
         ${numberField("material_window_days","素材入库窗口（天）",c.material_window_days??30,0,3650)}
         ${numberField("cooldown_days","同频道同剧冷却（天）",c.cooldown_days??7,0,3650)}</div>
-        <p class="window-guide">剧目窗口 0 包含所有已上线剧；填 7 表示近 7 天上线，填 -1~0 包含基准时刻至未来 24 小时上线的剧。素材窗口按入库时间计算，0 表示不限。预演与执行会核对同剧冷却、已用素材和在途占用。</p>
+        <dl class="window-guide">
+          <dt>剧目上线</dt><dd>0 选全部已上线剧，7 选近 7 天上线的剧，-1~0 选未来 24 小时内上线的剧。未来剧最早安排在上线时发布。</dd>
+          <dt>素材入库</dt><dd>按素材入库时间筛选。30 仅看近 30 天入库，0 可选所有入库日期。</dd>
+          <dt>发布排重</dt><dd>按素材 ID 核对新旧发布账本，排除已用素材和在途占用。调整入库天数仍沿用同一份排重记录。同剧冷却按频道和剧目单独计算。</dd>
+        </dl>
         <div class="rule-flow">${ruleCard("drama",c)}${ruleCard("material",c)}</div>`)}
       ${panel("发布时间",`<div class="schedule-options" role="radiogroup" aria-label="排期方式">
         <label><input name="schedule_mode" type="radio" value="fixed">固定时间</label>
