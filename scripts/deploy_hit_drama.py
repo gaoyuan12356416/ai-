@@ -155,7 +155,7 @@ def activate(platform,folder,rollback=False,*,defer_plan_read=True):
             save(folder/'switch-audit.json',audit)
             run(sys.executable,HEALTH,'restore','--baseline',folder/'schedulers-before.json','--wait-seconds','25','--output',folder/'schedulers-after.json')
     else:
-        from scripts.deploy_x_hierarchy import active, lock_file
+        from scripts.deploy_moboreels_resources import active, lock_file
         from contextlib import ExitStack
         triggers=['x-tag-auto-scheduler.timer','x-tag-auto-runner.timer','x-tag-auto-runner.path'];workers=['x-tag-auto-scheduler.service','x-tag-auto-runner.service']
         states={unit:active(unit) for unit in triggers}
