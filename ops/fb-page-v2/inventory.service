@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Hong Kong publisher private source addresses
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/fb-page-v2-inventory.env
+UMask=0077
+ExecStart=/usr/bin/python3 -B /opt/fb-page-assignment-v2/current/ops/fb-page-v2/inventory.py --credentials ${TENCENT_CREDENTIALS_PATH} --out /mnt/data-disk/fb-page-v2/catalog/publishers.json --network-state /mnt/data-disk/fb-page-v2/network/security-group.json

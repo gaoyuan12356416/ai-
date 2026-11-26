@@ -1,0 +1,10 @@
+[Unit]
+Description=Discover verified publisher CVMs for Page V2
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=5min
+Unit=fb-page-v2-inventory.service
+
+[Install]
+WantedBy=timers.target

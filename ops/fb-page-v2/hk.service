@@ -1,0 +1,23 @@
+[Unit]
+Description=Hong Kong internal Page assignment API V2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/fb-page-assignment-v2/current
+EnvironmentFile=/etc/ai-backend-offload/sql-client.env
+EnvironmentFile=/etc/fb-page-assignment-v2.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/opt/pipeline-dispatch/venvs/68407465a58d99f9dd2c9a14da000f167115f804/bin/python -B -m features.fb_page_assignment_v2.server
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=75
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
