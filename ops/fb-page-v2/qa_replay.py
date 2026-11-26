@@ -230,7 +230,8 @@ async def replay(client, plan, speed, duration, drain_timeout, report):
     expected_items = sum(len(p["drama_ids"]) for _,p in plan)
     deltas = {key:final[key]-baseline[key] for key in ("receipts","confirmed","audit_headers","audit_items","audit_retries")}
     load_pass = (not errors and attempts == len(plan) == len(task_ids) == statuses[200] and not final["pending"]
-          and not final["unretired_details"] and not final["unretired_snapshots"] and max(times)<50000
+          and not final["unretired_details"] and not final["unretired_snapshots"]
+          and max(times)<=50000 and sum(times)/len(times)<=10000
           and matched+null == expected_items and deltas["receipts"] == deltas["confirmed"] == len(plan)
           and deltas["audit_headers"] == len(plan) and deltas["audit_items"] == expected_items)
     null_causes = dict(Counter(final["null_causes"])-Counter(baseline["null_causes"]))
@@ -242,6 +243,7 @@ async def replay(client, plan, speed, duration, drain_timeout, report):
                   historical_seconds=duration, target_wall_seconds=duration/speed, attempted=attempts,
                   unique_receipts=len(task_ids), items=matched+null, assigned=matched, null=null,
                   errors=dict(errors), http_status=dict(statuses), e2e_latency_ms={
+                      "mean":round(sum(times)/len(times),2) if times else None,
                       "p50":percentile(times,.5), "p95":percentile(times,.95), "p99":percentile(times,.99),
                       "max":percentile(times,1)}, start_lag_ms={"p99":percentile(start_delays,.99),"max":percentile(start_delays,1)},
                   wall_to_last_response=round(responses_done-beginning,3),

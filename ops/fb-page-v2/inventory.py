@@ -15,6 +15,7 @@ import urllib.request
 REGION = "ap-hongkong"
 VPC = "vpc-lg5p8p82"
 SOURCE_GROUP = "sg-lqtd1q1l"
+PUBLISHER_GROUPS = {SOURCE_GROUP, "sg-pgzi0n4v"}
 NON_PROD = re.compile(r"(?:测试|临时|预发|沙箱|(?:^|[\s_-])(?:test|testing|staging|temp|sandbox)(?:[\s_-]|\d|$))",re.I)
 PRIVATE_V4 = tuple(ipaddress.ip_network(v) for v in ("10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"))
 
@@ -64,7 +65,7 @@ def inventory(describer):
             net = row.get("VirtualPrivateCloud", {})
             name = row.get("InstanceName","")
             if (net.get("VpcId") != VPC or
-                    row.get("InstanceState") != "RUNNING" or SOURCE_GROUP not in row.get("SecurityGroupIds", []) or
+                    row.get("InstanceState") != "RUNNING" or not PUBLISHER_GROUPS.intersection(row.get("SecurityGroupIds", [])) or
                     not name.startswith("ads发布调控") or NON_PROD.search(name)):
                 continue
             addresses = []

@@ -59,6 +59,109 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def consumer_access(directory, ledger, consumers):
+    """Only the original service identities may traverse the release and share the SQL ledger."""
+    base = Path("/data/fb-page-assignment-v2")
+    book = {}
+    def save():
+        atomic(directory/"consumer-acls.json",json.dumps(book,sort_keys=True).encode(),0o600)
+    def grant(user,path,mode,default=False):
+        if not path.exists():
+            return
+        if not default:
+            # Earlier grants make the existing Unix mode effective for later paths.
+            flags = {"r":"-r","w":"-w","x":"-x"}
+            if all(subprocess.run(["runuser","-u",user,"--","test",flags[flag],str(path)],
+                                  stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0
+                   for flag in mode if flag != "-"):
+                return
+        acl = run("getfacl","-cp","--",str(path))
+        if default and "default:user:"+user+":"+mode in acl.splitlines():
+            return
+        entry = book.setdefault(str(path),{"before":acl})
+        save()
+        spec = ("d:" if default else "") + "u:"+user+":"+mode
+        run("setfacl","-m",spec,"--",str(path))
+        entry["after"] = run("getfacl","-cp","--",str(path))
+        save()
+    for user in sorted({info[0] for info in consumers.values()} - {"root"}):
+        directories = {p for target in (ROOT,ledger.directory) for p in (target,*target.parents)
+                       if p==base or base in p.parents}
+        for path in sorted(directories,key=lambda p:len(p.parts)):
+            grant(user,path,"--x")
+        for folder in (ROOT/"ops",ROOT/"ops/hk-sql-budget"):
+            grant(user,folder,"--x")
+        for folder in (ROOT/"features",ROOT/"features/hk_sql_budget",ROOT/"ops/hk-sql-budget/bridge"):
+            grant(user,folder,"r-x")
+        for path in [ROOT/"ops/hk-sql-budget/launch.py",*(ROOT/"features/hk_sql_budget").glob("*.py"),
+                     ROOT/"ops/hk-sql-budget/bridge/sitecustomize.py"]:
+            grant(user,path,"r--")
+        grant(user,ledger.directory,"rwx")
+        grant(user,ledger.directory,"rwx",default=True)
+        for suffix in ("","-wal","-shm"):
+            grant(user,Path(str(ledger.path)+suffix),"rw-")
+
+
+def restore_consumer_access(directory):
+    path = directory/"consumer-acls.json"
+    if not path.is_file():
+        return
+    # A campaign child might still be draining the adapter after the unit files revert.
+    marker = ("HK_SQL_BUDGET_RELEASE="+str(ROOT)).encode()
+    pids=set()
+    for unit in UNITS:
+        pid=prop(unit,"MainPID")
+        if pid.isdecimal() and int(pid):
+            pids.add(pid)
+        group=prop(unit,"ControlGroup")
+        if not group.startswith("/") or ".." in Path(group).parts or group=="/":
+            continue
+        for root in (Path("/sys/fs/cgroup/systemd"),Path("/sys/fs/cgroup")):
+            for member in (root/group.lstrip("/")).glob("**/cgroup.procs"):
+                try:
+                    pids.update(pid for pid in member.read_text().split() if pid.isdecimal())
+                except FileNotFoundError:
+                    continue
+    for pid in pids:
+        try:
+            if marker in Path("/proc",pid,"environ").read_bytes().split(b"\0"):
+                return
+        except OSError:
+            continue
+    entries=json.loads(path.read_bytes())
+    for name, item in sorted(entries.items(),key=lambda pair:len(Path(pair[0]).parts),reverse=True):
+        if Path(name).exists() and item.get("after")==run("getfacl","-cp","--",name):
+            subprocess.run(["setfacl","--set-file=-","--",name],input=item["before"]+"\n",
+                           text=True,check=True,stdout=subprocess.DEVNULL)
+
+
+def consumer_probe(unit,user,exe,module,ledger):
+    # Read only the import path setting; no database credentials or tokens are needed.
+    python_path=""
+    paths=re.findall(r"(/[^\s;]+)\s+\(ignore_errors=",prop(unit,"EnvironmentFiles"))
+    for path in paths:
+        if not Path(path).is_file():
+            continue
+        for line in Path(path).read_text().splitlines():
+            key,sep,val=line.partition("=")
+            if sep and key.strip()=="PYTHONPATH":
+                values=shlex.split(val)
+                if len(values)==1:
+                    python_path=values[0]
+    result=subprocess.run(["runuser","-u",user,"--","env","PYTHONDONTWRITEBYTECODE=1",
+                           "PYTHONPATH="+python_path,"HK_SQL_BUDGET_DIR="+str(ledger.directory),
+                           exe,"-B",str(ROOT/"ops/hk-sql-budget/launch.py"),module,"--check"],
+                          cwd=prop(unit,"WorkingDirectory"),stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                          text=True,timeout=20)
+    if result.returncode or "hk_sql_consumer_preflight_ok" not in result.stdout.splitlines():
+        reason = next((line.strip() for line in reversed(result.stderr.splitlines())
+                       if re.fullmatch(r"HK private SQL adapter startup failed \([A-Za-z]+\)",line.strip())), "")
+        if not reason:
+            reason = next((m[1] for line in reversed(result.stderr.splitlines())
+                           if (m:=re.match(r"^([A-Za-z_.]+(?:Error|Exception)):",line.strip()))),"")
+        raise RuntimeError("consumer_preflight_failed_"+unit+" "+reason)
+
+
 def restore(directory, ledger):
     facts = manifest(directory)
     ledger.configure(legacy_reserved=1)
@@ -94,6 +197,7 @@ def restore(directory, ledger):
             run("systemctl", "restart", METADATA, timeout=150)
     ledger.configure(capacity=facts.get("previous_capacity",30),
                      legacy_reserved=facts.get("rollback_legacy",1))
+    restore_consumer_access(directory)
 
 
 def apply(directory, ledger):
@@ -110,6 +214,7 @@ def apply(directory, ledger):
     facts = {"release":str(ROOT),"units":{},"previous_capacity":baseline["capacity"],
              "rollback_legacy":baseline["legacy_reserved"]}
     payloads = {}
+    consumers = {}
     for unit,module in UNITS.items():
         match = re.search(r"argv\[\]=([^;]+?)\s*;", prop(unit,"ExecStart"))
         args = shlex.split(match[1]) if match else []
@@ -120,6 +225,10 @@ def apply(directory, ledger):
             raise RuntimeError("unrecognized_current_entrypoint_"+unit)
         if original:
             facts["rollback_legacy"] = max(facts["rollback_legacy"],1)
+        user = prop(unit,"User") or "root"
+        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_.-]*",user):
+            raise RuntimeError("invalid_consumer_user")
+        consumers[unit]=(user,args[0],module)
         payload = ("[Service]\nExecStart=\nExecStart="+args[0]+" "+
                    str(ROOT/"ops/hk-sql-budget/launch.py")+" "+module+"\n").encode()
         path = dropin(unit)
@@ -131,6 +240,9 @@ def apply(directory, ledger):
     atomic(directory/"consumers.json",json.dumps(facts,sort_keys=True,indent=2).encode(),0o600)
     ledger.configure(capacity=30,legacy_reserved=1)
     try:
+        consumer_access(directory,ledger,consumers)
+        for unit,(user,exe,module) in consumers.items():
+            consumer_probe(unit,user,exe,module,ledger)
         for unit,data in payloads.items():
             atomic(dropin(unit),data)
         run("systemctl","daemon-reload")
@@ -151,10 +263,15 @@ def apply(directory, ledger):
 def using_adapter(unit):
     pid = prop(unit,"MainPID")
     if not pid.isdecimal() or int(pid)==0:
-        return prop(unit,"ActiveState") not in ("active","activating","deactivating")
+        return unit != METADATA and prop(unit,"ActiveState") not in ("active","activating","deactivating")
     try:
         env=Path("/proc",pid,"environ").read_bytes().split(b"\0")
-        return ("HK_SQL_BUDGET_RELEASE="+str(ROOT)).encode() in env
+        if ("HK_SQL_BUDGET_RELEASE="+str(ROOT)).encode() not in env:
+            return False
+        if unit==METADATA:
+            return any("127.0.0.1:19980" in row and "pid="+pid+"," in row
+                       for row in run("ss","-Hlnpt","sport","=","19980").splitlines())
+        return True
     except FileNotFoundError:
         return False
 

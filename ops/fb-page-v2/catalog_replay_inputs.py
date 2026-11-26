@@ -75,6 +75,34 @@ def collect(open_reader, start, stop, *, representative=False):
                                        available_pools=len(pools), external_task_id="native:%d:%d" % (ref.key, offset),
                                        page_group_id=pool, drama_ids=part))
         begin = end
+    if representative:
+        # Exact maximum original batches in the dated hour, established by the
+        # bulk demand scan. Native children of these tasks can each be smaller.
+        maxima = {2974352:(3302,57), 2974967:(1479,20)}
+        with open_reader() as r:
+            refs = {Task("cross",key) for key in maxima}
+            grants, materials = permissions(r,refs)
+            source_ids = {sid for ids in materials.values() for sid in ids}
+            titles = {int(row["id"]): str(row["data_source_id"]).strip() for row in r.many(
+                "SELECT s.id,c.data_source_id FROM " + TABLE + "ads_source s JOIN " + TABLE +
+                "ads_custom_source c ON s.source_type=3 AND c.id=CAST(s.source_id AS UNSIGNED) "
+                "WHERE s.id IN ({ids})",source_ids) if row["data_source_id"]}
+            for row in r.many("SELECT id,created_at,app_id FROM " + TABLE +
+                              "ads_cross_template_queue WHERE id IN ({ids})",maxima):
+                key = int(row["id"])
+                ts = datetime.fromisoformat(str(row["created_at"]))
+                ref = Task("cross",key)
+                product, expected = maxima[key]
+                pools = grants.get(ref,())
+                sources = materials.get(ref,set())
+                ids = sorted({titles[s] for s in sources if s in titles})
+                if (not start <= ts < stop or int(row["app_id"]) != product or len(pools) != 1
+                        or len(ids) != expected or sources - titles.keys()):
+                    ignored["parent_sample_changed"] += 1
+                    continue
+                all_events.append(dict(offset=(ts-start).total_seconds(),source_product=product,available_pools=1,
+                                       external_task_id="cross:%d:0"%key,page_group_id=next(iter(pools)),drama_ids=ids))
+    all_events.sort(key=lambda e:(e["offset"],e["external_task_id"]))
     return dict(start=start.isoformat(" "), stop_exclusive=stop.isoformat(" "), ignored=dict(ignored),
                 mode="stratified_native_samples" if representative else "standalone_native_burst",
                 request_count=len(all_events), item_count=sum(len(v["drama_ids"]) for v in all_events),

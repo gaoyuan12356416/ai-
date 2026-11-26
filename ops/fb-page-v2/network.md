@@ -1,6 +1,6 @@
 # 发布机清单和香港安全组
 
-CPU 上的 `fb-page-v2-inventory.timer` 每五分钟查询腾讯云香港地域。发布机属于 VPC `vpc-lg5p8p82`，关联发布专用安全组 `sg-lqtd1q1l`，实例名以“ads发布调控”开头，实例状态为 RUNNING。清单收录实例的私网 IPv4，排除带临时、测试或预发标记的节点。同 VPC 新子网通过相同身份条件自动纳入。实例移除、停机或角色调整会撤销其地址。
+CPU 上的 `fb-page-v2-inventory.timer` 每五分钟查询腾讯云香港地域。发布机属于 VPC `vpc-lg5p8p82`，关联已核实的发布安全组 `sg-lqtd1q1l` 或 `sg-pgzi0n4v`，实例名以“ads发布调控”开头，实例状态为 RUNNING。第二个组目前包含发布机 `10.89.0.14`。清单收录实例的私网 IPv4，排除带临时、测试或预发标记的节点。同 VPC 新子网通过相同身份条件自动纳入。实例移除、停机或角色调整会撤销其地址。
 
 服务先原子更新 CPU 清单 `/mnt/data-disk/fb-page-v2/catalog/publishers.json`，再同步香港云规则。香港应用独立拉取同一清单。专用安全组 `fb-page-v2-hk-8944` 有 `managed-by=fb-page-v2` 和 `target-instance=ins-52tbyu6m` 标签。每个发现的地址对应一条 TCP 8944 入站 /32 许可，出站规则为空。CPU 在更新前检查专用组身份、云端关联数量和实例私网地址，在更新后读回规则与绑定。创建途中遇到网络异常，下一轮按标记查找云端对象。未确定是否创建成功的记录保存在 `/mnt/data-disk/fb-page-v2/network/security-group.json`，可配合对应账号的 CloudAudit 查看请求结果。
 

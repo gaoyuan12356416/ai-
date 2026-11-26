@@ -60,6 +60,14 @@ class Receipts(unittest.TestCase):
             self.assertEqual(r.execute("SELECT count(*) FROM audit").fetchone()[0], 16)
         self.assertEqual(self.store.status()["pending"], 0)
 
+    def test_persisted_incidents_can_recover_after_restart(self):
+        self.store.incident("page_source", "t", 62, "lookup_failed")
+        reopened = Store(self.root / "hk")
+        self.assertEqual(reopened.active_incidents(), {"page_source"})
+        reopened.recovery("page_source")
+        self.assertEqual(reopened.active_incidents(), set())
+        self.assertEqual([e["action"] for e in reopened.alert_events()], ["fault", "recovered"])
+
     def test_lost_commit_reconciles_original_and_cleans_after_readback(self):
         result = self.save()
         sink = self.sink

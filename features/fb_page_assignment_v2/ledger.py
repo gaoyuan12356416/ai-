@@ -188,6 +188,10 @@ class Store:
                 event = event_payload(kind, action="recovered")
                 db.execute("INSERT INTO alert_outbox(id,body) VALUES(?,?)", (event["id"], encoded(event)))
 
+    def active_incidents(self):
+        with self.db() as db:
+            return {row[0] for row in db.execute("SELECT kind FROM failure_signal")}
+
     def alert_events(self):
         with self.db() as db:
             rows = db.execute("SELECT body FROM alert_outbox ORDER BY seq LIMIT 50").fetchall()

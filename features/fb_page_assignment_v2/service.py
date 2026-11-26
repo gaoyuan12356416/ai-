@@ -96,7 +96,6 @@ class Assignment:
         self.groups = set()
         self.pools = None
         self.warming = None
-        self.last_activity = 0.
         self.recoverable = set()
         self.notifications = set()
         self.alerts = store
@@ -104,6 +103,8 @@ class Assignment:
 
     async def start(self):
         self.slots = asyncio.Semaphore(self.parallel)
+        if hasattr(self.store, "active_incidents"):
+            self.recoverable.update(await asyncio.to_thread(self.store.active_incidents))
         if self.compute is None:
             pool = self._pool()
             try:
@@ -152,7 +153,7 @@ class Assignment:
                     raise
 
     def busy(self):
-        return bool(self.active or self.pending or time.monotonic() - self.last_activity < 2)
+        return bool(self.active or self.pending)
 
     def notify(self, kind, external="", group=None, code="", event_id=None):
         self.recoverable.add(kind)
@@ -198,7 +199,6 @@ class Assignment:
             return private_error(503, "request_deadline")
         finally:
             self.active -= 1
-            self.last_activity = time.monotonic()
 
     @asynccontextmanager
     async def _admission(self, key):

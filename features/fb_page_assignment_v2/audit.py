@@ -115,21 +115,22 @@ def missing_records(records, expected, existing):
 
 
 class MySQLSink:
+    table = TABLE
+
     def __init__(self, connection=None):
         if connection is None:
             from features.hk_sql_budget import budget_connection
             connection = budget_connection
         self.connection = connection
 
-    @staticmethod
-    def _read(conn, expected, lock=False):
+    def _read(self, conn, expected, lock=False):
         found = {}
         with conn.cursor() as c:
             for ids in _chunks(sorted({key[0] for key in expected}), 100):
                 c.execute("SELECT task_id,item_index,revision,payload_hash,"
                           "CONVERT(SHA2(diagnostics_json,256) USING ascii),"
                           "external_task_id,pool_group_id,drama_id,page_id,status,selection_stage,error_code,"
-                          "http_status FROM " + TABLE + " WHERE task_id IN (" +
+                          "http_status FROM " + self.table + " WHERE task_id IN (" +
                           ",".join(["%s"] * len(ids)) + ")" + (" FOR UPDATE" if lock else ""), ids)
                 for row in c.fetchall():
                     found[row[0], row[1]] = tuple(row[2:])
@@ -138,7 +139,7 @@ class MySQLSink:
     def write(self, records, expected):
         # Only exact primary keys are used. Duplicate immutable rows are read back,
         # including after loss of a COMMIT acknowledgment.
-        sql = ("INSERT INTO " + TABLE + " (" + ",".join(COLS) + ") VALUES "
+        sql = ("INSERT INTO " + self.table + " (" + ",".join(COLS) + ") VALUES "
                "(" + ",".join(["%s"] * len(COLS)) + ") ON DUPLICATE KEY UPDATE task_id=VALUES(task_id)")
         with self.connection(role="write", deadline=time.monotonic() + 25) as conn:
             # Reconcile original keys on the primary before retrying any ambiguous
@@ -241,7 +242,8 @@ class Workers:
 
     def _writer(self, idle_only):
         last_busy = time.monotonic()
-        local_failure = False
+        # The first successful claim also proves local audit persistence recovered after a restart.
+        local_failure = True
         while not self.stop.is_set():
             try:
                 busy = self.busy()
