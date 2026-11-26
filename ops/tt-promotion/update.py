@@ -83,7 +83,10 @@ def stage(folder, commit):
         "from features.tt_promotion import operations,http_server,publishing,profiles",
         cwd=runtime,
     )
+    def modules(root):
+        return {p.name: p.read_bytes() for p in (root / package).glob("*.py")}
     state = dict(
+        backend_changed=modules(previous) != modules(runtime),
         commit=commit,
         files=records,
         link=dict(link=str(deploy.CURRENT), before=str(previous), after=str(runtime)),
@@ -122,15 +125,20 @@ def switch(folder, rollback):
         if deploy.blob(Path(record["target"])) not in (record["before"], record["after"]):
             raise ValueError("later file change preserved: " + record["target"])
     baseline = folder / "enabled-before.json"
-    if rollback:
-        rollback_ready(json.loads(baseline.read_text()))
-    elif not baseline.exists():
-        deploy.atomic(baseline, deploy.json_bytes(template_versions()), 0o600)
-    if not rollback:
-        deploy.init_db(folder)
+    backend_changed = manifest.get("backend_changed", True)
+    if backend_changed:
+        if rollback:
+            rollback_ready(json.loads(baseline.read_text()))
+        else:
+            if not baseline.exists():
+                deploy.atomic(baseline, deploy.json_bytes(template_versions()), 0o600)
+            deploy.init_db(folder)
     for record in records:
         deploy.file_switch(record, folder, rollback)
     deploy.switch_link(link, rollback)
+    if not backend_changed:
+        print("static assets switched; runtime modules identical")
+        return
     deploy.run("systemctl", "restart", "tt-promotion.service")
     for _ in range(25):
         try:

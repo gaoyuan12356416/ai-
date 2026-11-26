@@ -93,9 +93,8 @@
     id("channel-summary").textContent=`当前结果 · 参与 ${displayed.filter(r=>r.enabled).length} · 旧排期或在途 ${meta.module_errors?.handoff?"待核验":displayed.filter(r=>legacyState(r)==="yes").length}`;
     id("channels").innerHTML=displayed.map(row=>{
       const account=h(byId(row)),state=readiness(row);
-      const username=row.username&&row.username!==row.account_id?"@"+String(row.username).replace(/^@/,"")+" · ":"";
       return `<tr><td class="check"><input type="checkbox" data-select="${account}" aria-label="${h("选择 "+name(row))}" ${selected.has(byId(row))?"checked":""}></td>
-      <td class="identity"><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">${h(username)}#${account} · ${h(row.drama_language||"未配置")}</small></td>
+      <td class="identity"><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">#${account} · ${h(row.drama_language||"未配置")}</small></td>
       <td class="progress"><span class="metric-label">今日已发 / 应发</span><strong>${h(row.today_published??"—")} / ${h(row.today_expected??"—")}</strong><small class="secondary">最近 ${h(time(row.last_published_at))}</small></td>
       <td class="income"><span class="mobile-only">28 天收入</span><strong>${h(money(row.revenue_28d))}</strong></td>
       ${profileCells(row)}
