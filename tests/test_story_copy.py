@@ -577,7 +577,7 @@ class CaptionTests(unittest.TestCase):
             _, rows = store.claim(c)
             self.assertEqual([t["key"] for t in rows], [later["key"]])
 
-    def test_future_schedule_retains_collection_window(self):
+    def test_future_singleton_flushes_and_bypasses_collection_at_deadline(self):
         now = time.time()
         with store.connection() as c:
             t = dict(self.task(1), urgent=False, publish_at=now + 3600)
@@ -585,7 +585,34 @@ class CaptionTests(unittest.TestCase):
             c.commit()
             self.assertFalse(store.claim(c)[1])
             with patch.object(store.time, "time", return_value=now + 61):
-                self.assertEqual(len(store.claim(c)[1]), 1)
+                self.assertFalse(store.claim(c, lane="bulk")[1])
+            with patch.object(store.time, "time", return_value=now + 301):
+                self.assertFalse(store.claim(c, lane="priority")[1])
+                self.assertEqual([r["key"] for r in store.claim(c, lane="shared")[1]], [t["key"]])
+            soon = dict(self.task(2), urgent=False, publish_at=now+320)
+            store.enqueue(c, soon)
+            c.commit()
+            with patch.object(store.time, "time", return_value=now+21):
+                self.assertEqual([r["key"] for r in store.claim(c,lane="priority")[1]], [soon["key"]])
+
+    def test_bulk_combines_ordinary_schedules_and_reserves_dispatch_head(self):
+        now = time.time()
+        future = [dict(self.task(i, "fa"), key=f"fb:auto:{i}", urgent=False,
+                       publish_at=now+i*3600) for i in range(1,5)]
+        future[2]["language"] = "de"
+        future[3]["product"] = "hotdrama"
+        head = dict(self.task(5,"fa"), key="fb:auto:5", urgent=False, publish_at=now+240)
+        with store.connection() as c:
+            for t in future+[head]:
+                store.enqueue(c,t)
+            c.commit()
+            order = [head["key"]]
+            with patch.object(store.time,"time",return_value=now+61):
+                self.assertEqual([r["key"] for r in store.claim(c,lane="bulk",publish_order=order)[1]],
+                                 [future[0]["key"],future[1]["key"]])
+                self.assertEqual([r["key"] for r in store.claim(c,lane="priority",publish_order=order)[1]],order)
+                self.assertFalse(store.claim(c,lane="priority",publish_order=[])[1])
+                self.assertFalse(store.claim(c,lane="bulk",publish_order=[])[1])
 
     def test_deadline_refresh_preserves_facts_and_finalized_copy(self):
         t = dict(self.task(1), publish_at=100)

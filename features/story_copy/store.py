@@ -41,6 +41,8 @@ TAG_POSTS = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
 SOURCES["tm"] = ("x_material", TAG_POSTS, "x_post_queue")
 RETRY_DELAY_SECONDS = 60
 NEAR_PUBLISH_SECONDS = 300
+COLLECT_SECONDS = 60
+SCHEDULED_SINGLETON_WAIT_SECONDS = 300
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS switches(id INTEGER PRIMARY KEY,endpoint TEXT,enabled INTEGER,marks TEXT,actor TEXT,at REAL);
 CREATE INDEX IF NOT EXISTS switch_endpoint ON switches(endpoint,id DESC);
@@ -201,14 +203,16 @@ def normal_claim_rows(c, now, prefer_imminent, reserved):
     near = now + NEAR_PUBLISH_SECONDS
     row = c.execute(
         f"""SELECT product,content,lang,({priority}) * ? AS priority,
-        min(coalesce(json_extract(payload,'$.publish_at'),created)) AS due
+        min(coalesce(json_extract(payload,'$.publish_at'),created)) AS due,
+        max(coalesce(json_extract(payload,'$.urgent'),0)) AS urgent,
+        min(json_extract(payload,'$.publish_at')) AS first_publish
         FROM jobs WHERE state='pending' AND key NOT IN (SELECT value FROM json_each(?))
         GROUP BY product,content,lang,priority
-        HAVING count(*)>=100 OR min(created)<=?
-          OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
-          OR min(json_extract(payload,'$.publish_at'))<=?
+        HAVING count(*)>=100 OR urgent=1 OR first_publish<=?
+          OR min(created)<=? - CASE WHEN count(*)=1 AND first_publish IS NOT NULL
+                                    THEN ? ELSE ? END
         ORDER BY priority DESC,due,min(created),product,content,lang LIMIT 1""",
-        (near, prefer_imminent, reserved, now - 60, near),
+        (near, prefer_imminent, reserved, near, now, SCHEDULED_SINGLETON_WAIT_SECONDS, COLLECT_SECONDS),
     ).fetchone()
     # Carry failures into the next ready queue, even if its drama/language differs.
     # With no new work, retry after one normal collection window instead of waiting forever.
@@ -222,16 +226,25 @@ def normal_claim_rows(c, now, prefer_imminent, reserved):
         (near, now, row is not None, reserved),
     ).fetchall()
     if row:
+        # The due-time band protects an imminent batch. Future drafts of the
+        # same story and language can share a prompt across publication slots.
+        due_soon = row["first_publish"] is not None and row["first_publish"] <= near
+        if row["urgent"] or due_soon:
+            schedule_filter = "coalesce(json_extract(payload,'$.publish_at'),created)<=?"
+            cutoff = near if due_soon else max(now, row["due"]) + NEAR_PUBLISH_SECONDS
+        else:
+            schedule_filter = "(json_extract(payload,'$.publish_at') IS NULL OR json_extract(payload,'$.publish_at')>?)"
+            cutoff = near
         rows += c.execute(
             f"""SELECT key,payload,created,{priority} AS priority,
             coalesce(json_extract(payload,'$.publish_at'),created) AS due
             FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=?
               AND key NOT IN (SELECT value FROM json_each(?))
-              AND coalesce(json_extract(payload,'$.publish_at'),created)<=?
+              AND {schedule_filter}
               AND ({priority})>=?
             ORDER BY priority DESC,due,created,key LIMIT 100""",
             (near, row["product"], row["content"], row["lang"], reserved,
-             max(now, row["due"]) + NEAR_PUBLISH_SECONDS, near, row["priority"]),
+             cutoff, near, row["priority"]),
         ).fetchall()
     rows.sort(key=lambda r: (-r["priority"], r["due"], r["created"], r["key"]))
     return rows, bool(row and row["priority"])
@@ -258,15 +271,22 @@ def claim(c, *, lane="shared", publish_order=None):
         """, (order, now)).fetchone()
     if head is not None and (lane != "bulk" or gate):
         rows, imminent = [head], True
+    elif lane == "priority" and not gate:
+        # Reserve this worker for a real deadline. Bulk workers (or the shared
+        # worker in a single-worker deployment) own ordinary work.
+        near = now + NEAR_PUBLISH_SECONDS
+        rows = c.execute(
+            """SELECT j.key,j.payload,json_extract(j.payload,'$.publish_at') AS due
+               FROM jobs j LEFT JOIN retries r ON r.key=j.key
+               WHERE (j.state='pending' OR (j.state='retry_wait' AND r.state='pending' AND r.retry_after<=?))
+                 AND (due<=? OR json_extract(j.payload,'$.urgent')=1)
+                 AND (? OR j.endpoint!='fb' OR due IS NULL OR due>?)
+               ORDER BY coalesce(json_extract(j.payload,'$.publish_priority'),0) DESC,
+                        coalesce(due,j.created),j.created,j.key LIMIT 1""",
+            (now, near, publish_order is None, near),
+        ).fetchall()
+        imminent = bool(rows)
     else:
-        if lane == "priority" and head is None and publish_order is not None and c.execute(
-            """SELECT 1 FROM jobs WHERE endpoint='fb' AND state IN ('pending','retry_wait')
-               AND json_extract(payload,'$.publish_at')<=? LIMIT 1""", (now + NEAR_PUBLISH_SECONDS,)
-        ).fetchone():
-            # Another worker prepares the backlog while this one stays available
-            # for the publisher's next ready video.
-            c.commit()
-            return None, []
         prefer_imminent = bool(gate) or not c.execute(
             """SELECT 1 FROM cursors JOIN batches ON batches.id=cursors.value
             WHERE cursors.name='generation:imminent-batch' AND batches.finished IS NULL"""
@@ -275,8 +295,8 @@ def claim(c, *, lane="shared", publish_order=None):
         rows, imminent = normal_claim_rows(c, now, prefer_imminent, reserved)
         if not rows and head is not None:
             rows, imminent = [head], True
-        # Recheck the dispatch queue after one draft on the responsive worker.
-        rows = rows[:1 if gate or lane == "priority" else 100]
+        # Only one probe can be submitted after a provider cooldown.
+        rows = rows[:1 if gate else 100]
     if not rows:
         c.commit()
         return None, []
