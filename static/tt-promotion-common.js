@@ -152,9 +152,11 @@
     return (Number(av)-Number(bv))*(order===spec.key+"asc"?1:-1);
   }
   function channelRangeInputs(attribute){
-    return channelMetricFields.map(({key,label,unit})=>["min","max"].map((bound,i)=>
-      `<label>${label}${i?"上限":"下限"}（${unit}）<input ${attribute}="${key+bound}" type="number" ${unit==="人"?'min="0" step="1"':'step="0.01"'} placeholder="不限"></label>`
-    ).join("")).join("");
+    return channelMetricFields.map(({key,label,unit})=>
+      `<fieldset class="metric-range"><legend>${label}（${unit}）</legend><div>${["min","max"].map((bound,i)=>
+        `${i?'<span aria-hidden="true">—</span>':""}<input ${attribute}="${key+bound}" aria-label="${label}${i?"上限":"下限"}（${unit}）" type="number" ${unit==="人"?'min="0" step="1"':'step="0.01"'} placeholder="${i?"最高":"最低"}">`
+      ).join("")}</div></fieldset>`
+    ).join("");
   }
   function channelSortOptions(){
     return channelMetricFields.map(({key,label})=>`<option value="${key}desc">${label}降序</option><option value="${key}asc">${label}升序</option>`).join("");

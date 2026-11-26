@@ -36,7 +36,7 @@
     }).join("");
     const themes=(row.theme_mix?.length?row.theme_mix:(row.themes||[]).map(t=>({name:topLabel(t)})));
     return `<td class="portrait"><span class="mobile-only">累计受众</span>${audience?`<button class="profile-link" data-detail="${h(byId(row))}" data-period-open="all">${h(audience)} <b>${focus?h(pct(focus.share_bp)):""}</b></button>`:h(row.has_profile==null?"画像待回传":mix.length?"受众未识别":"暂无受众画像")}${bars?`<span class="mix-bar">${bars}</span>`:""}</td>
-      <td class="themes"><span class="mobile-only">受众内优势题材</span>${themes.map(t=>`<div>${h(t.name)} <b>${t.share_bp==null?"":h(pct(t.share_bp))}</b></div>`).join("")||"—"}</td>`;
+      <td class="themes"><span class="mobile-only">受众内优势题材</span>${themes.map(t=>`<div><span>${h(t.name)}</span> <b>${t.share_bp==null?"":h(pct(t.share_bp))}</b></div>`).join("")||"—"}</td>`;
   }
   function filtered(){
     const controls=filters.elements;
@@ -95,7 +95,7 @@
       <td class="progress"><span class="metric-label">今日已发 / 应发</span><strong>${h(row.today_published??"—")} / ${h(row.today_expected??"—")}</strong><small class="secondary">最近 ${h(time(row.last_published_at))}</small></td>
       <td class="income"><span class="mobile-only">28 天收入</span><strong>${h(money(row.revenue_28d))}</strong><small class="secondary">累计 ${h(money(row.revenue_total))}</small></td>
       ${profileCells(row)}
-      <td class="wide-only">${h(legacyLabel(row))}</td>
+      <td class="wide-only handoff-cell">${legacyLabel(row).split(" · ").map(part=>`<span>${h(part)}</span>`).join("")}</td>
       <td class="readiness">${badge(state==="ready"?"可发布":state==="first"?"待选观看范围":"账号受限",state==="ready"?"positive":"warning")}
       ${!row.enabled?badge("已暂停"):""}${state==="first"?`<button class="row-link first-action" data-first="${account}">首次确认</button>`:""}
       ${state==="restricted"?`<small class="secondary">${h(row.reason||"请查看账号授权状态")}</small>`:""}</td></tr>`;

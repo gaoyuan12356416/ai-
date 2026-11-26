@@ -71,17 +71,17 @@
     const title=uncertain?"刷新列表以核对状态":enabled?"点击关闭自动发布":"点击开启自动发布";
     const button=(act,text,primary=false,needsConfig=true)=>`<button type="button" class="button${primary?" primary":""}" data-act="${act}" data-id="${h(tid)}"${busy||(needsConfig&&blocked)?" disabled":""}>${text}</button>`;
     return `<tr data-template-id="${h(tid)}">
-      <td><strong>${h(tName(t))}</strong><small class="secondary">#${h(tid)} · v${h(t.version)}</small></td>
-      <td><div class="template-status-control">${badge(label,uncertain||!enabled?"warning":"positive")}
+      <td class="template-name" data-label="模板"><strong>${h(tName(t))}</strong><small class="secondary">#${h(tid)} · v${h(t.version)}</small></td>
+      <td class="template-state" data-label="状态"><div class="template-status-control">${badge(label,uncertain?"warning":enabled?"positive":"")}
         <button type="button" class="template-status-switch" role="switch" data-act="toggle" data-id="${h(tid)}"
           aria-checked="${!!enabled}" aria-busy="${busy}" aria-label="${h(tName(t))} 自动发布" title="${title}"${uncertain?" disabled":disabled}></button></div></td>
-      <td><strong>${h(c.account_ids?.length??0)} 个频道</strong><small class="secondary">${c.model==="rules"?"模板规则":"收入画像"} · ${c.ai_copy?"AI 文案":"模板文案"}</small></td>
-      <td>${h(scheduleText(c.schedule))}</td>
-      <td>剧：${h(listSort(c.drama_rule))}<small class="secondary">素材：${h(listSort(c.material_rule))}</small></td>
-      <td>${h(time(enabled?stat?.next_at:null))}</td>
-      <td>${stat?.latest?`${statusBadge(stat.latest.status)} ${countsHtml(stat.latest,t.id)}<button class="row-link" data-open-run="${h(stat.latest.id)}">#${h(stat.latest.id)}</button>${stat.latest.created_at?`<small class="secondary">${h(time(stat.latest.created_at))}</small>`:""}`:stat?"暂无批次":"—"}</td>
-      <td>${h(stat?.operator_name||"—")}</td>
-      <td><div class="template-row-actions">${button("edit","编辑")}${button("records","记录",false,false)}${button("run","预演与执行",true)}
+      <td class="template-channels" data-label="频道"><strong>${h(c.account_ids?.length??0)} 个频道</strong><small class="secondary">${c.model==="rules"?"模板规则":"收入画像"}<span class="copy-mode">${c.ai_copy?"AI 文案":"模板文案"}</span></small></td>
+      <td class="template-schedule" data-label="发布时间">${c.schedule?.mode==="random"?h(scheduleText(c.schedule)):(c.schedule?.times||[]).map(value=>`<span class="schedule-slot">${h(value)}</span>`).join(" ")||"—"}</td>
+      <td class="template-rules" data-label="两层排序">剧：${h(listSort(c.drama_rule))}<small class="secondary">素材：${h(listSort(c.material_rule))}</small></td>
+      <td class="template-next" data-label="下次执行">${h(time(enabled?stat?.next_at:null))}</td>
+      <td class="template-latest" data-label="最近运行">${stat?.latest?`${statusBadge(stat.latest.status)} ${countsHtml(stat.latest,t.id)}<button class="row-link" data-open-run="${h(stat.latest.id)}">#${h(stat.latest.id)}</button>${stat.latest.created_at?`<small class="secondary">${h(time(stat.latest.created_at))}</small>`:""}`:stat?"暂无批次":"—"}</td>
+      <td class="template-owner" data-label="操作人">${h(stat?.operator_name||"—")}</td>
+      <td class="template-actions" data-label="操作"><div class="template-row-actions">${button("edit","编辑")}${button("records","记录",false,false)}${button("run","预演与执行",true)}
         <details ${expanded?"open":""}><summary class="button" aria-label="${h(tName(t))} 更多操作">更多操作</summary>
           <div class="template-extra-actions">${button("drama","指定爆款剧")}${button("material","指定素材")}${button("inventory","素材池库存",false,false)}</div>
         </details></div></td></tr>`;

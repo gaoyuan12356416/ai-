@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>自动发布（新版） · TT 平台推广</title>
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/tt-promotion.css?v=20261126a">
-  <link rel="stylesheet" href="/tt-promotion-auto-tools.css?v=20261126list">
+  <link rel="stylesheet" href="/tt-promotion.css?v=20261126layout">
+  <link rel="stylesheet" href="/tt-promotion-auto-tools.css?v=20261126layout">
   <script defer src="/ui-topbar.js"></script>
   <script defer src="/quick-nav.js"></script>
-  <script defer src="/tt-promotion-common.js"></script>
+  <script defer src="/tt-promotion-common.js?v=20261126layout"></script>
   <script defer src="/tt-promotion-first-use.js?v=20261126a"></script>
-  <script defer src="/tt-promotion-auto.js?v=20261126list"></script>
+  <script defer src="/tt-promotion-auto.js?v=20261126layout"></script>
 </head>
-<body>
+<body class="tt-automation">
 <div class="app">
   <aside class="sidebar"><div class="brand"><div class="brand-mark">AI</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div><button id="nav-toggle" type="button" class="button" aria-controls="quickNav" aria-expanded="false">展开后台导航</button><nav id="quickNav" aria-label="后台导航"></nav></aside>
   <main class="main">
@@ -39,7 +39,7 @@
           <button class="button" type="reset">重置</button>
         </form>
         <div id="stats-error" aria-live="polite"></div>
-        <div class="table-wrap template-table"><table><thead><tr><th>模板</th><th>状态</th><th>频道</th><th>发布时间</th><th>两层排序</th><th>下次执行</th><th>最近运行</th><th title="最近编辑或启停模板的人员">操作人</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
+        <div class="table-wrap template-table"><table><colgroup><col class="col-template"><col class="col-status"><col class="col-channels"><col class="col-schedule"><col class="col-rules"><col class="col-next"><col class="col-latest"><col class="col-owner"><col class="col-actions"></colgroup><thead><tr><th>模板</th><th>状态</th><th>频道</th><th>发布时间</th><th>两层排序</th><th>下次执行</th><th>最近运行</th><th title="最近编辑或启停模板的人员">操作人</th><th>操作</th></tr></thead><tbody id="templates"></tbody></table></div>
         <div class="template-footer"><span id="templates-meta" class="muted"></span><div id="template-pages" class="tool-pages"></div></div>
       </section>
     </section>
