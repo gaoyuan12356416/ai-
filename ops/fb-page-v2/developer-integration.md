@@ -78,7 +78,7 @@ agent/X11 转发；已有发布机清单和香港 8944 云安全组不变。
 `dev-gateway.py prepare` 在 CPU 生成本机私有 key 并核对已知香港主机指纹；
 HK 用 `install-key --public-key-file FILE --backup DIR` 安装受限公钥。
 CPU 从 GitHub 的已验证提交部署后执行 `apply --backup DIR`，仅启动独立隧道并 reload Nginx。
-实际 Token map 是服务器私有配置，不进入 Git。
+实际 Token 校验片段是服务器私有配置，不进入 Git。
 
 CPU 回滚：`python3 RELEASE/ops/fb-page-v2/dev-gateway.py rollback --backup DIR`。
 HK 如需撤销本次专用公钥：

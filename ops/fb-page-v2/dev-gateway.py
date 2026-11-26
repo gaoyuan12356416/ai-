@@ -20,7 +20,7 @@ FILES = {
     'dev-gateway.http.conf': Path('/etc/nginx/conf.d/fb-page-v2-dev-http.conf'),
     'dev-gateway.locations.conf': Path('/etc/nginx/default.d/fb-page-v2-dev.conf'),
     'dev-gateway.proxy.conf': Path('/etc/nginx/snippets/fb-page-v2-dev-proxy.conf'),
-    'auth.conf': Path('/etc/nginx/conf.d/fb-page-v2-dev-auth.conf'),
+    'auth.conf': Path('/etc/nginx/snippets/fb-page-v2-dev-auth.conf'),
 }
 
 
@@ -83,14 +83,15 @@ def install_key(public_file, backup, remove=False):
     print(json.dumps({'key_removed' if remove else 'key_added': True, 'other_lines_preserved': True}))
 
 
-def token_map(env_file):
+def auth_snippet(env_file):
     token = None
     for line in Path(env_file).read_text().splitlines():
         if line.startswith('FB_PAGE_ASSIGNMENT_API_TOKEN='):
             token = line.split('=', 1)[1].strip().strip('"').strip("'")
     if not token or not re.fullmatch(r'[A-Za-z0-9._~+/=-]{32,512}', token):
         raise ValueError('invalid_existing_bearer_configuration')
-    return ('map $http_authorization $fb_page_v2_dev_authorized {\n    default 0;\n    "Bearer ' + token + '" 1;\n}\n').encode()
+    # Exact string comparison avoids global Nginx map bucket-size dependencies.
+    return ('if ($http_authorization != "Bearer ' + token + '") { return 401 \'{"error":"unauthorized"}\'; }\n').encode()
 
 
 def apply(backup, env_file):
@@ -98,7 +99,7 @@ def apply(backup, env_file):
     assert not (backup / 'manifest.json').exists(), 'backup_exists'
     backup.mkdir(parents=True, exist_ok=True, mode=0o700)
     source = Path(__file__).resolve().parent
-    payloads = {name: token_map(env_file) if name == 'auth.conf' else (source / name).read_bytes() for name in FILES}
+    payloads = {name: auth_snippet(env_file) if name == 'auth.conf' else (source / name).read_bytes() for name in FILES}
     facts = {'source': str(source), 'files': {}, 'unit_active': subprocess.call(['systemctl', 'is-active', '--quiet', UNIT]) == 0,
              'unit_enabled': subprocess.call(['systemctl', 'is-enabled', '--quiet', UNIT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0}
     for name, path in FILES.items():
@@ -108,20 +109,24 @@ def apply(backup, env_file):
     atomic(backup / 'manifest.json', json.dumps(facts, indent=2).encode())
     for name, path in FILES.items():
         atomic(path, payloads[name], 0o600 if name == 'auth.conf' else 0o644)
-    run('systemd-analyze', 'verify', str(FILES['dev-gateway.service']))
-    run('nginx', '-t')
-    run('systemctl', 'daemon-reload')
-    run('systemctl', 'enable', '--now', UNIT)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    for attempt in range(10):
-        try:
-            with opener.open('http://127.0.0.1:19845/healthz', timeout=3) as r:
-                assert json.load(r) == {'ok': True, 'version': 2}
-            break
-        except (OSError, ValueError):
-            if attempt == 9: raise
-            time.sleep(1)
-    run('systemctl', 'reload', 'nginx')
+    try:
+        run('systemd-analyze', 'verify', str(FILES['dev-gateway.service']))
+        run('nginx', '-t')
+        run('systemctl', 'daemon-reload')
+        run('systemctl', 'enable', '--now', UNIT)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for attempt in range(10):
+            try:
+                with opener.open('http://127.0.0.1:19845/healthz', timeout=3) as r:
+                    assert json.load(r) == {'ok': True, 'version': 2}
+                break
+            except (OSError, ValueError):
+                if attempt == 9: raise
+                time.sleep(1)
+        run('systemctl', 'reload', 'nginx')
+    except Exception:
+        rollback(backup)
+        raise
     atomic(backup / 'activated.json', json.dumps({'tunnel_health': True, 'nginx_reloaded': True, 'at': time.time()}).encode())
     print('{"tunnel_health":true,"nginx_reloaded":true,"selector_restart":false}')
 

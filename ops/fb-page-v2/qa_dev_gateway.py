@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
-TOKEN = 'isolated-page-v2-gateway-fixture-token'
+TOKEN = 'isolated-page-v2-gateway-fixture-token-0123456789'
 ROUTE = '/api/integrations/v2/drama-page-assignments'
 calls = []
 lock = threading.Lock()
@@ -54,7 +54,9 @@ def main():
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost',
                     '-addext', 'subjectAltName=DNS:localhost', '-keyout', str(folder/'key.pem'), '-out', str(folder/'cert.pem')],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    (folder/'proxy.conf').write_bytes((source/'dev-gateway.proxy.conf').read_bytes())
+    proxy = (source/'dev-gateway.proxy.conf').read_text().replace('/etc/nginx/snippets/fb-page-v2-dev-auth.conf', str(folder/'auth.conf'))
+    (folder/'proxy.conf').write_text(proxy)
+    (folder/'auth.conf').write_text('if ($http_authorization != "Bearer '+TOKEN+'") { return 401 \'{"error":"unauthorized"}\'; }\n')
     locations = (source/'dev-gateway.locations.conf').read_text().replace('/etc/nginx/snippets/fb-page-v2-dev-proxy.conf', str(folder/'proxy.conf')).replace('127.0.0.1:19845', '127.0.0.1:19847')
     (folder/'locations.conf').write_text(locations)
     header = (source/'dev-gateway.http.conf').read_text()
@@ -65,7 +67,6 @@ events {{ worker_connections 128; }}
 http {{
   access_log off;
   {header}
-  map $http_authorization $fb_page_v2_dev_authorized {{ default 0; "Bearer {TOKEN}" 1; }}
   server {{
     listen 127.0.0.1:19846 ssl;
     listen 127.0.0.1:19848;
