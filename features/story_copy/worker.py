@@ -26,6 +26,15 @@ def alert_item(task, reason, outcome="到点使用现行文案"):
 
 
 def generate_batch(c, batch, tasks, runner=generator.run):
+    # Cover the interval between the dispatch snapshot and a model request,
+    # including the short delay before native final receipts reach this ledger.
+    fb_keys = [t["key"] for t in tasks if t["endpoint"] == "fb"]
+    try:
+        taken = sources.fb_taken(fb_keys)
+    except sqlite3.Error as exc:
+        LOG.warning("FB caption receipt check unavailable: %s", type(exc).__name__)
+    else:
+        tasks = [t for t in tasks if t["key"] not in taken]
     errors = {}
     ready = []
     for t in tasks:
@@ -331,7 +340,8 @@ def main():
     count = concurrency()
     LOG.info("caption generation workers=%s priority=fb_publish_queue", count)
     for i in range(1, count):
-        threading.Thread(target=generation_loop, args=("bulk",), name="caption-" + str(i), daemon=True).start()
+        lane = "lookahead" if i == 1 and count >= 3 else "bulk"
+        threading.Thread(target=generation_loop, args=(lane,), name="caption-" + str(i), daemon=True).start()
     generation_loop("priority" if count > 1 else "shared")
 
 

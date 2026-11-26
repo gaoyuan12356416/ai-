@@ -9,6 +9,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from features.story_copy import alerts, bridge, generator, model, sources, store, worker
@@ -344,7 +345,7 @@ class CaptionTests(unittest.TestCase):
                 CREATE TABLE pipeline_config(id,config_json);
                 INSERT INTO pipeline_config VALUES(1,'{"enabled_channels":["fb"]}');
                 CREATE TABLE pipeline_job(id INTEGER PRIMARY KEY,source_key,channel,stage,status,
-                    hold_reason,scheduled_at,batch_key,resource_keys_json);
+                    hold_reason,scheduled_at,batch_key,resource_keys_json,started_at TEXT DEFAULT '');
                 CREATE TABLE pipeline_fairness(scope,item,last_seq);
                 CREATE TABLE pipeline_resource(resource_key,quarantined);
                 CREATE TABLE pipeline_legacy_resource(resource_key);
@@ -353,7 +354,7 @@ class CaptionTests(unittest.TestCase):
                 INSERT INTO pipeline_fairness VALUES('publish:fb','old',30),('publish:fb','next',10);
             """)
             for i in range(1, 15):
-                q.execute("INSERT INTO pipeline_job VALUES(?,?,'fb','publish','queued','','2026-01-01T08:00:00.000+00:00','old',?)",
+                q.execute("INSERT INTO pipeline_job VALUES(?,?,'fb','publish','queued','','2026-01-01T08:00:00.000+00:00','old',?,'')",
                           (i, f"fb:auto:{i}", json.dumps([f"fb:material:{i}", f"fb:page:{i}"])))
             q.executescript("""
                 UPDATE pipeline_job SET batch_key='next' WHERE id IN (2,14);
@@ -370,9 +371,87 @@ class CaptionTests(unittest.TestCase):
         now = sources.publish_time("2026-01-01T10:00:00Z")
         with patch.object(sources, "DISPATCH_DB", str(path)):
             self.assertEqual(sources.fb_publish_order(now), ["fb:auto:2","fb:auto:1","fb:auto:14","fb:auto:13","fb:auto:6"])
+            # Claimed jobs own their locks. A native receipt removes only the
+            # job that has actually taken its caption, even before mirror sync.
+            with store.connection(path) as q:
+                q.execute("UPDATE pipeline_job SET status='running',started_at='09:02' WHERE id IN (7,9)")
+                q.execute("UPDATE pipeline_job SET status='legacy_running',started_at='09:01' WHERE id=8")
+            with store.connection(self.fb) as native:
+                native.execute("INSERT INTO story_copy_receipt VALUES('fb:auto:9','fb','legacy','','t','',NULL,1)")
+            self.assertEqual(sources.fb_publish_order(now)[:3], ["fb:auto:8","fb:auto:7","fb:auto:2"])
+            self.assertNotIn("fb:auto:9", sources.fb_publish_order(now))
             with store.connection(path) as q:
                 q.execute("INSERT INTO pipeline_cooldown VALUES('channel:fb','2026-01-02')")
-            self.assertEqual(sources.fb_publish_order(now), [])
+            self.assertEqual(sources.fb_publish_order(now), ["fb:auto:8","fb:auto:7"])
+
+    def test_lookahead_prepares_dispatch_prefix_and_keeps_claims_disjoint(self):
+        with store.connection() as c:
+            keys = []
+            for i, lang in enumerate(("en","en","fr","en"), start=1):
+                t = dict(self.task(i, "fa"), key=f"fb:auto:{i}", language=lang)
+                keys.append(t["key"])
+                store.enqueue(c,t)
+            c.commit()
+            order = [keys[1], keys[0], keys[2], keys[3]]
+            batch, rows = store.claim(c,lane="lookahead",publish_order=order)
+            self.assertEqual([t["key"] for t in rows], order[:2])
+            self.assertEqual([t["key"] for t in store.claim(c,lane="priority",publish_order=order)[1]], [keys[2]])
+            with store.connection(self.fb) as native:
+                native.execute("INSERT INTO story_copy_receipt VALUES(?,'fb','legacy','','final','',NULL,1)",(keys[1],))
+            requested = []
+            def run(items, emit, usage):
+                for t in items:
+                    requested.append(t["key"])
+                    emit(self.item(t))
+            worker.generate_batch(c, batch, rows, runner=run)
+            self.assertEqual(requested, [keys[0]])
+            worker.sync_receipts(c)
+            self.assertEqual(c.execute("SELECT state,final FROM jobs WHERE key=?", (keys[1],)).fetchone()[:],
+                             ("legacy","final"))
+
+    def test_fb_plan_freezes_own_material_when_caption_database_is_unavailable(self):
+        material = SimpleNamespace(language="en", drama_name="The Rivals", drama_description="A letter returns",
+                                   material_name="clip-14")
+        selection = {}
+        owner = SimpleNamespace(_link_values=lambda *args: ("own short", "own long"))
+        with patch.object(store,"connection",side_effect=sqlite3.OperationalError("database is locked")):
+            bridge.fb_plan(selection, owner, {"product":"Dramawave"}, None, material, 14, 123)
+        self.assertEqual(selection["story_copy"], dict(product="Dramawave", language="en", title="The Rivals",
+                         description="A letter returns", clip="clip-14", link=["own short","own long"]))
+
+    def test_missing_fb_plan_recovers_only_exact_material_before_take(self):
+        from features.story_copy.fb_facts import with_plan_facts
+        with store.connection(self.fb) as native, store.connection() as c:
+            for field in ("run_id", "template_version", "content_id", "material_id", "selection_json",
+                          "status", "message_text", "short_url", "long_url"):
+                native.execute("ALTER TABLE fb_auto_task ADD COLUMN " + field)
+            donor = dict(product="Dramawave",language="en",title="The Rivals",description="Two heirs find a letter",
+                         clip="m",link=["another page","another redirect"])
+            for i, mat, cid, info in [(1,"10","42",{}), (2,"10","42",donor), (3,"10","43",dict(donor,title="Other")),
+                                       (4,"11","42",dict(donor,title="Other")), (5,"10","42",{})]:
+                native.execute("INSERT INTO fb_auto_task VALUES(?,7,2,?,?,?,'ready','legacy','https://example.org/own','long')",
+                               (i,cid,mat,store.dump({"story_copy":info})))
+            native.commit()
+            raw = dict(native.execute("SELECT * FROM fb_auto_task WHERE id=1").fetchone())
+            task = sources.fb_task("fa",raw)
+            store.enqueue(c,task)
+            c.execute("UPDATE jobs SET state='failed',batch=42,reason='insufficient_evidence' WHERE key=?", (task["key"],))
+            c.commit()
+            with store.connection(self.fb) as publisher:
+                publisher.execute("INSERT INTO story_copy_receipt VALUES('fb:auto:5','fb','legacy','','final','',NULL,1)")
+            sources.discover_family(c,"fa")
+            repaired = c.execute("SELECT state,payload FROM jobs WHERE key=?",(task["key"],)).fetchone()
+            payload = json.loads(repaired["payload"])
+            self.assertEqual((repaired["state"], payload["content"], payload["facts"], payload["extra_link"]),
+                             ("pending","42",{"series":donor["description"]},[]))
+            self.assertIsNone(c.execute("SELECT key FROM jobs WHERE key='fb:auto:5'").fetchone())
+            batch, rows = store.claim(c,lane="priority",publish_order=[task["key"]])
+            worker.generate_batch(c,batch,rows,runner=lambda items,emit,usage: emit(self.item(items[0])))
+            bridge.fb_final(native,"fa",raw)
+            receipt = native.execute("SELECT source,short_url,reason FROM story_copy_receipt WHERE task_key=?", (task["key"],)).fetchone()
+            self.assertEqual(receipt[:], ("ai","https://example.org/own",""))
+            native.execute("UPDATE fb_auto_task SET selection_json=? WHERE id=5",(store.dump({"story_copy":dict(donor,language="de")}),))
+            self.assertIs(with_plan_facts(native,raw),raw)
 
     def test_ready_worker_and_two_backlog_workers_take_disjoint_jobs(self):
         now = time.time()

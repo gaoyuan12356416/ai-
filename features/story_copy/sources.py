@@ -18,11 +18,22 @@ def fb_publish_order(now):
         return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="milliseconds")
 
     with store.connection(DISPATCH_DB, readonly=True, timeout=0.2) as db:
+        db.execute("BEGIN")
         config = db.execute("SELECT config_json FROM pipeline_config WHERE id=1").fetchone()
         config = json.loads(config[0]) if config else {}
+        # A claim removes the video from the runnable queue and acquires its own
+        # resource locks. Neither event means that the publisher has taken copy.
+        claimed = [r[0] for r in db.execute("""
+            SELECT source_key FROM pipeline_job WHERE channel='fb' AND stage='publish'
+              AND status IN ('running','legacy_running')
+            ORDER BY coalesce(nullif(started_at,''),scheduled_at),id
+        """)]
         if "fb" not in config.get("enabled_channels", ()) or "fb" in config.get("preparation_only_channels", ()):
-            return None
-        rows = db.execute("""
+            if not claimed:
+                return None
+            queued = []
+        else:
+            queued = db.execute("""
             SELECT j.source_key, row_number() OVER (
                 PARTITION BY j.batch_key,(j.scheduled_at>:now) ORDER BY j.scheduled_at,j.id
             ) AS batch_position FROM pipeline_job j
@@ -45,8 +56,20 @@ def fb_publish_order(now):
             ORDER BY j.scheduled_at>:now,
               CASE WHEN j.scheduled_at>:now THEN j.scheduled_at END,
               batch_position,coalesce(f.last_seq,0),j.scheduled_at,j.id
-        """, {"now": stamp(now), "near": stamp(now + store.NEAR_PUBLISH_SECONDS)})
-        return [r[0] for r in rows]
+        """, {"now": stamp(now), "near": stamp(now + store.NEAR_PUBLISH_SECONDS)}).fetchall()
+    ordered = claimed + [r[0] for r in queued]
+    taken = fb_taken(ordered)
+    return [key for key in ordered if key not in taken]
+
+
+def fb_taken(keys):
+    if not keys:
+        return set()
+    with store.connection(store.SOURCES["fa"][1], readonly=True, timeout=0.2) as native:
+        return {r[0] for r in native.execute(
+            "SELECT task_key FROM story_copy_receipt WHERE task_key IN (SELECT value FROM json_each(?))",
+            (store.dump(keys),),
+        )}
 
 
 def obj(raw):
@@ -114,7 +137,7 @@ def fb_task(family, row):
             extra_link=info.get("link", []),
             manual=False,
             urgent=False,
-            publish_priority={"ready": 3, "preparing": 1}.get(row.get("status"), 0),
+            publish_priority={"running": 4, "ready": 3, "preparing": 1}.get(row.get("status"), 0),
             publish_at=publish_time(row.get("planned_publish_at_utc")),
             publish_batch="fb:auto:" + str(row["run_id"]) if row.get("run_id") else "",
         )
@@ -292,6 +315,8 @@ def discover(c):
 
 
 def discover_family(c, family):
+    from .fb_facts import with_plan_facts
+
     _, path, table = store.SOURCES[family]
     mark = initial_mark(c, family)
     if mark is None:
@@ -306,6 +331,8 @@ def discover_family(c, family):
         "ta": "material_id IS NOT NULL AND material_id<>'' AND status NOT IN ('published','failed','skipped','cancelled')",
     }
     with store.connection(path, readonly=True) as src:
+        if family == "fa":
+            filters["fa"] += " AND NOT EXISTS (SELECT 1 FROM story_copy_receipt WHERE task_key='fb:auto:'||fb_auto_task.id)"
         for row in src.execute(
             "SELECT rowid AS _ord,* FROM "
             + table
@@ -316,6 +343,8 @@ def discover_family(c, family):
             row = dict(row)
             if not store.eligible(c, family, row["_ord"]):
                 continue
+            if family == "fa":
+                row = with_plan_facts(src, row)
             task = (
                 fb_task(family, row)
                 if family in ("fa", "fv")

@@ -6,7 +6,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import store
+from . import fb_facts, store
 from .model import group_key, render
 from .sources import fb_task, obj, x_task
 
@@ -23,22 +23,21 @@ def fb_redirect(task_id, long_url):
 
 
 def fb_plan(selection, owner, config, page, material, task_id, timestamp):
+    # The native plan already owns these facts. Generation and final selection
+    # independently check the switch for this ordinal in the caption ledger.
+    todo = {
+        "language": material.language,
+        "title": material.drama_name,
+        "description": material.drama_description,
+        "clip": material.material_name,
+        "product": config.get("product") or config.get("material_product"),
+    }
+    selection["story_copy"] = todo
     try:
-        with store.connection(readonly=True, timeout=0) as c:
-            if not store.eligible(c, "fa", task_id):
-                return
-        todo = {
-            "language": material.language,
-            "title": material.drama_name,
-            "description": material.drama_description,
-            "clip": material.material_name,
-            "product": config.get("product") or config.get("material_product"),
-        }
-        selection["story_copy"] = todo
         if "{{m_url}}" not in str(config.get("message_template", "")):
             todo["link"] = list(owner._link_values(page, material, task_id, timestamp))
     except Exception as exc:
-        LOG.warning("story_copy.optional_plan %s", type(exc).__name__)
+        LOG.warning("story_copy.optional_plan_link task=%s error=%s", task_id, type(exc).__name__)
 
 
 def select(task, current, link):
@@ -153,6 +152,8 @@ def fb_final(conn, family, row, *, extra_link_writer=None):
     conn.execute("SAVEPOINT story_copy_optional")
     try:
         data = dict(row)
+        if family == "fa":
+            data = fb_facts.with_plan_facts(conn, data)
         if family == "fv":
             data["_ord"] = conn.execute(
                 "SELECT rowid FROM fb_video_task WHERE task_id=?", (data["task_id"],)

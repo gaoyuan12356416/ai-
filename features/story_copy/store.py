@@ -41,6 +41,7 @@ TAG_POSTS = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
 SOURCES["tm"] = ("x_material", TAG_POSTS, "x_post_queue")
 RETRY_DELAY_SECONDS = 60
 NEAR_PUBLISH_SECONDS = 300
+FB_LOOKAHEAD = 8
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS switches(id INTEGER PRIMARY KEY,endpoint TEXT,enabled INTEGER,marks TEXT,actor TEXT,at REAL);
 CREATE INDEX IF NOT EXISTS switch_endpoint ON switches(endpoint,id DESC);
@@ -151,12 +152,20 @@ def enqueue(c, task):
         return False
     manual = task.get("manual")
     existing = c.execute(
-        """SELECT state,json_extract(payload,'$.publish_at') AS publish_at,
+        """SELECT state,reason,product,lang,
+        (coalesce(json_extract(payload,'$.title'),'')<>'' AND
+         coalesce(json_extract(payload,'$.facts.series'),'')<>'') AS has_story,
+        json_extract(payload,'$.publish_at') AS publish_at,
         coalesce(json_extract(payload,'$.publish_priority'),0) AS priority FROM jobs WHERE key=?""",
         (task["key"],),
     ).fetchone()
     if existing:
-        # Refresh only queue priority, never frozen facts or an accepted/final draft.
+        if (task["family"] == "fa" and task.get("title") and task["facts"].get("series")
+                and all(group_key(task)) and not (existing["product"] and existing["lang"] and existing["has_story"])
+                and (existing["state"] in ("pending", "retry_wait")
+                     or (existing["state"], existing["reason"]) == ("failed", "insufficient_evidence"))):
+            restore_fb_facts(c, task)
+        # An intact snapshot and all accepted or finalized drafts stay frozen.
         priority = task.get("publish_priority", 0)
         due = task.get("publish_at")
         if existing["state"] in ("pending", "retry_wait") and (existing["publish_at"], existing["priority"]) != (due, priority):
@@ -193,6 +202,37 @@ def enqueue(c, task):
         ),
     )
     return True
+
+
+def restore_fb_facts(c, task):
+    row = c.execute(
+        "SELECT payload FROM jobs WHERE key=? AND draft IS NULL AND final IS NULL", (task["key"],)
+    ).fetchone()
+    if not row:
+        return
+    frozen = json.loads(row["payload"])
+    if not task.get("material_id") or any(
+        frozen.get(k) != task.get(k) for k in ("family", "content", "material_id", "template_version", "publish_batch")
+    ):
+        return
+    for field in ("product", "language", "title", "clip"):
+        if frozen.get(field) and task.get(field) and frozen[field] != task[field]:
+            return
+        if task.get(field) and not frozen.get(field):
+            frozen[field] = task[field]
+    series = task["facts"]["series"]
+    if frozen["facts"].get("series") and frozen["facts"]["series"] != series:
+        return
+    frozen["facts"]["series"] = series
+    # A corrected input can generate once again. Keep the original failed
+    # batches and retry history; repeated discovery sees a complete snapshot.
+    c.execute("""UPDATE jobs SET product=?,lang=?,payload=?,
+        batch=CASE WHEN state='failed' THEN NULL ELSE batch END,
+        reason=CASE WHEN state='failed' THEN '' ELSE reason END,
+        state=CASE WHEN state='failed' THEN 'pending' ELSE state END
+        WHERE key=? AND payload=? AND final IS NULL AND draft IS NULL
+        AND (state IN ('pending','retry_wait') OR (state='failed' AND reason='insufficient_evidence'))""",
+        (frozen["product"], frozen["language"], dump(frozen), task["key"], row["payload"]))
 
 
 def normal_claim_rows(c, now, prefer_imminent, reserved):
@@ -247,19 +287,29 @@ def claim(c, *, lane="shared", publish_order=None):
         c.commit()
         return None, []
     order = dump(publish_order or [])
-    head = None
+    ordered = []
+    prefix = []
     if publish_order:
-        head = c.execute("""
-            SELECT j.key,j.payload FROM json_each(?) q JOIN jobs j ON j.key=q.value
+        ordered = c.execute("""
+            SELECT j.key,j.payload,j.product,j.content,j.lang FROM json_each(?) q JOIN jobs j ON j.key=q.value
             LEFT JOIN retries r ON r.key=j.key
             WHERE j.endpoint='fb' AND j.final IS NULL AND
               (j.state='pending' OR (j.state='retry_wait' AND r.state='pending' AND r.retry_after<=?))
-            ORDER BY q.key LIMIT 1
-        """, (order, now)).fetchone()
-    if head is not None and (lane != "bulk" or gate):
-        rows, imminent = [head], True
+            ORDER BY q.key LIMIT ?
+        """, (order, now, FB_LOOKAHEAD)).fetchall()
+    if ordered:
+        # Keep the next model request in dispatch order and within one language/drama.
+        # Small lookahead batches let a worker recheck newly claimed videos promptly.
+        head = ordered[0]
+        for row in ordered:
+            if any(row[k] != head[k] for k in ("product", "content", "lang")):
+                break
+            prefix.append(row)
+    if ordered and (lane != "bulk" or gate):
+        rows = prefix[:1] if gate or lane == "priority" else prefix
+        imminent = True
     else:
-        if lane == "priority" and head is None and publish_order is not None and c.execute(
+        if lane == "priority" and not ordered and publish_order is not None and c.execute(
             """SELECT 1 FROM jobs WHERE endpoint='fb' AND state IN ('pending','retry_wait')
                AND json_extract(payload,'$.publish_at')<=? LIMIT 1""", (now + NEAR_PUBLISH_SECONDS,)
         ).fetchone():
@@ -271,12 +321,15 @@ def claim(c, *, lane="shared", publish_order=None):
             """SELECT 1 FROM cursors JOIN batches ON batches.id=cursors.value
             WHERE cursors.name='generation:imminent-batch' AND batches.finished IS NULL"""
         ).fetchone()
-        reserved = order if head is not None else "[]"
+        reserved = order if ordered else "[]"
         rows, imminent = normal_claim_rows(c, now, prefer_imminent, reserved)
-        if not rows and head is not None:
-            rows, imminent = [head], True
+        if not rows and ordered:
+            rows, imminent = prefix, True
         # Recheck the dispatch queue after one draft on the responsive worker.
-        rows = rows[:1 if gate or lane == "priority" else 100]
+        if gate or lane == "priority":
+            rows = rows[:1]
+        elif lane == "lookahead":
+            rows = rows[:FB_LOOKAHEAD]
     if not rows:
         c.commit()
         return None, []
