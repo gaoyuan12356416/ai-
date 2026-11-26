@@ -28,14 +28,19 @@
     return `x-auto-run-now:${id}:v${version}`;
   }
 
-  function manualRunIdempotencyKey(id, version) {
+  function pendingRunKey(id, version) {
     const storageKey = manualRunStorageKey(id, version);
     try {
       const existing = window.sessionStorage.getItem(storageKey);
       if (/^[A-Za-z0-9._:@-]{8,128}$/.test(existing || "")) return existing;
-    } catch (_) {
-      // Continue with an in-memory request key when storage is unavailable.
-    }
+    } catch (_) {}
+    return state.manualRunKeys?.get(storageKey) || "";
+  }
+
+  function manualRunIdempotencyKey(id, version, model) {
+    const storageKey = manualRunStorageKey(id, version);
+    const pending = pendingRunKey(id, version);
+    if (pending) return pending;
     let nonce = "";
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
       nonce = window.crypto.randomUUID();
@@ -46,7 +51,7 @@
     } else {
       nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
-    const value = `ui-${id}-v${version}-${nonce}`.slice(0, 128);
+    const value = `ui-${id}-v${version}-${model}-${nonce}`.slice(0, 128);
     try {
       window.sessionStorage.setItem(storageKey, value);
     } catch (_) {
@@ -96,24 +101,6 @@
     if (enabled) return "已启用";
     if (value === "archived") return "已归档";
     return "已停用";
-  }
-
-  function runStatusLabel(value) {
-    const labels = {
-      queued: "等待执行",
-      scheduled: "等待执行",
-      running: "执行中",
-      preparing: "准备中",
-      publishing: "发布中",
-      completed: "已完成",
-      published: "已发布",
-      failed: "失败",
-      partial_failed: "部分失败",
-      needs_review: "结果待确认",
-      canceled: "已取消",
-    };
-    const normalized = String(value || "").toLowerCase();
-    return labels[normalized] || value || "暂无运行";
   }
 
   function actionButton(label, action, id, kind) {
@@ -191,7 +178,8 @@
 
     const accountsCell = ui.element("td");
     accountsCell.appendChild(ui.element("strong", { text: `${accountCount(item)} 个账号` }));
-    accountsCell.appendChild(ui.element("div", { className: "secondary", text: "剧语言读取账户设置" }));
+    const profileModel = config.profile_model || item.profile_model;
+    accountsCell.appendChild(ui.element("div", { className: "secondary", text: profileModel === "growth" ? "成长画像" : "收入画像" }));
     row.appendChild(accountsCell);
 
     ui.appendTextCell(row, scheduleSummary(item));
@@ -204,11 +192,13 @@
     ui.appendTextCell(row, ui.formatTime(item.next_run_at || item.next_scheduled_at));
 
     const lastRun = ui.objectValue(item.last_run);
-    const lastStatus = item.last_run_status || lastRun.status;
+    const lastStatus = lastRun.display_status || item.last_run_status || lastRun.status;
     const lastCell = ui.element("td");
-    lastCell.appendChild(ui.statusBadge(runStatusLabel(lastStatus), ui.statusKind(lastStatus)));
+    lastCell.appendChild(ui.statusBadge(ui.runLabel(lastStatus), ui.statusKind(lastStatus)));
     const lastTime = item.last_run_at || lastRun.created_at || lastRun.triggered_at;
-    if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: ui.formatTime(lastTime) }));
+    if (lastRun.task_counts) lastCell.appendChild(ui.element("div", { text: ui.runSummary(lastRun) }));
+    if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: "触发 " + ui.formatTime(lastTime) }));
+    if (lastRun.last_progress_at_utc) lastCell.appendChild(ui.element("div", { className: "secondary", text: "进展 " + ui.formatTime(lastRun.last_progress_at_utc) }));
     row.appendChild(lastCell);
 
     ui.appendTextCell(row, item.operator_name || "—");
@@ -344,12 +334,28 @@
       delete: `确认删除“${item.name || id}”吗？删除后将从模板列表移除并停止新调度；已生成任务和历史发布记录保留。`,
       run: `确认立即执行“${item.name || id}”吗？系统会为模板内每个账号创建一次真实发布任务，视频准备完成后自动发布。`,
     };
+    let picker, pendingKey, pendingModel;
+    if (action === "run") {
+      pendingKey = pendingRunKey(id, version);
+      pendingModel = pendingKey.match(/^ui-\d+-v\d+-(growth|revenue)-/)?.[1];
+      picker = window.XPublishProfileModel.field(pendingModel || item.config?.profile_model || item.profile_model);
+      if (pendingKey) {
+        picker.select.disabled = true;
+        if (!pendingModel) {
+          picker.select.add(new Option("沿用上次提交", "legacy"));
+          picker.select.value = "legacy";
+        }
+        messages.run = "上一次提交的结果待确认。继续执行会使用同一操作编号核对结果。";
+      }
+      ui.byId("confirmMessage").after(picker.group);
+    }
     const confirmed = await ui.confirmAction({
       title: names[action],
       message: messages[action],
       confirmText: action === "run" ? "确认真实执行" : "确认",
       danger: action === "delete" || action === "run",
     });
+    picker?.group.remove();
     if (!confirmed) return;
     state.busyIds.add(id);
     renderTemplates();
@@ -357,7 +363,8 @@
       const body = { expected_version: version };
       if (action === "run") {
         body.confirmed = true;
-        body.idempotency_key = manualRunIdempotencyKey(id, version);
+        if (!pendingKey || pendingModel) body.profile_model = picker.select.value;
+        body.idempotency_key = manualRunIdempotencyKey(id, version, picker.select.value);
       }
       const payload = await ui.api(`${ui.API_BASE}/templates/${id}/${action === "run" ? "run-now" : action}`, {
         method: "POST",

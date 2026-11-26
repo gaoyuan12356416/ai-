@@ -8,6 +8,7 @@
   <title>FB Page 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/fb-auto-publish.css?v=hit-material-20261010-v1" />
+  <link rel="stylesheet" href="/fb-auto-publish-templates.css?v=20261120-layout3" />
 </head>
 <body>
   <div class="app">
@@ -43,14 +44,6 @@
       </section>
 
       <div id="pageRoot" class="hidden">
-        <section class="notice warning">
-          <div class="notice-mark">!</div>
-          <div>
-            <strong>这里只维护独立的 FB Page 自动发布模板，不会改动 TT、X 或现有发布队列。</strong>
-            手动执行会创建可追踪的异步计划；连接中断或已返回 Graph 对象 ID 时不会重发。
-          </div>
-        </section>
-
         <section class="stats" aria-label="Page 池统计">
           <article class="stat"><span>Page 池</span><strong id="groupCount">—</strong></article>
           <article class="stat"><span>Page 总数</span><strong id="pageCount">—</strong></article>
@@ -94,7 +87,7 @@
           </form>
 
           <div class="table-wrap">
-            <table>
+            <table class="template-list-table">
               <thead>
                 <tr>
                   <th>模板</th>
@@ -136,7 +129,7 @@
       <div class="dialog-head"><h2 id="materialDialogTitle">爆款素材发布</h2></div>
       <div class="dialog-body material-body">
         <p id="materialTemplateName"></p>
-        <p id="materialScope">先匹配语言，再按受众与题材画像优先分配；低样本、暂无收入或题材未标注的 Page 仍可参与。一条素材匹配一个 Page，每个 Page 本次只发一条。沿用模板的视频制作和文案配置。</p>
+        <p id="materialScope">先匹配语言，再按受众与题材画像优先分配；低样本、暂无收入或题材未标注的 Page 仍可参与。所有素材构成本轮候选池，每个 Page 最多一条，同一素材可供多个 Page 选用。其他规则按模板执行。</p>
         <div class="field">
           <label for="hitMaterialId" class="required">素材 ID</label>
           <textarea id="hitMaterialId" rows="5" maxlength="6400" autocomplete="off" placeholder="输入多条素材 ID，可用换行、逗号或空格分隔" required></textarea>
@@ -163,10 +156,10 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260915retired"></script>
+  <script src="/quick-nav.js?v=43969bd46e10"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-templates.js?v=20261120-original1"></script>
-  <script src="/hit-drama-publish.js?v=ab3103758c97"></script>
+  <script src="/fb-auto-publish-templates.js?v=20261124-run-history"></script>
+  <script src="/candidate-pool-publish.js?v=20261121-pool1"></script>
 <script defer src="/story-copy-settings.js?v=1.1" data-endpoint="fb"></script>
 </body>
 </html>
