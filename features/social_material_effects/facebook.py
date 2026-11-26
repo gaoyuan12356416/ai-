@@ -29,6 +29,8 @@ def identity(page, graph):
 
 def discover(path=FB_DB):
     auto = """SELECT t.page_id,t.graph_post_id,t.material_id,t.content_id,p.language,t.completed_at_utc published_at,
+             CASE WHEN t.long_url LIKE '%/2310/view?%' THEN '2310'
+                  WHEN t.long_url LIKE '%/2049/view?%' THEN '2049' ELSE '' END link_site,
              'auto_template' source,e.post_id native,e.media_views views,e.collected_at_utc metrics_at,
              json_extract(t.moboreels_json,'$.material.material_name') material_name,
              json_extract(t.moboreels_json,'$.material.drama_name') drama_name,
@@ -43,7 +45,7 @@ def discover(path=FB_DB):
          WHERE t.status='published' AND t.unknown_outcome=0 AND t.completed_at_utc<>''"""
     manual = """SELECT page_id,graph_post_id,material_id,content_id,
              COALESCE(json_extract(snapshot_json,'$.material.language'),json_extract(snapshot_json,'$.page.language')) language,
-             updated_at_utc published_at,source_kind source,NULL native,NULL views,NULL metrics_at,
+             updated_at_utc published_at,'2310' link_site,source_kind source,NULL native,NULL views,NULL metrics_at,
              json_extract(snapshot_json,'$.material.material_name') material_name,
              json_extract(snapshot_json,'$.material.drama_name') drama_name,
              json_extract(snapshot_json,'$.moboreels.koc_code') mobo_code,
@@ -69,7 +71,7 @@ def discover(path=FB_DB):
                 content_id=str(r['content_id']), material_name=r['material_name'] or '', drama_name=r['drama_name'] or '',
                 product='', catalog='moboreels' if r['mobo_code'] else 'dramawave', language=(r['language'] or '').lower(),
                 account_id=page, account_username='', published_at=r['published_at'], native=native, object_id=obj,
-                source=r['source'], owner=r['owner'] or '', tenant=r['tenant'] or '', views=r['views'],
+                source=r['source'], link_site=r['link_site'], owner=r['owner'] or '', tenant=r['tenant'] or '', views=r['views'],
                 metrics_at=r['metrics_at'], mobo_code=r['mobo_code'], revenue_through=None,
                 post_url=('https://www.facebook.com/' + page + '/posts/' + native.split('_')[-1] if native else
                           'https://www.facebook.com/watch/?v=' + obj))
@@ -116,18 +118,39 @@ def enrich(posts, reader, catalog_path=MATERIAL_CATALOG):
         apply(reader.query([sql],timeout=60))
 
 
+def revenue_sites(row):
+    if row['site_id']=='2049' and row['link_type']=='auto_template':
+        return ('2049','2310')
+    return (row['site_id'],)
+
+
 def revenue(posts, warehouse_root=WAREHOUSE):
     from features.social_analytics.warehouse_reader import current, connect
-    from features.social_analytics.report import campaign_index, resolve
+    from features.social_analytics.report import resolve
     meta, path = current(warehouse_root)
     end = min(meta['end'], (datetime.now(timezone.utc).date()-timedelta(days=1)).isoformat())
-    start = date.fromisoformat(meta['start'])
-    days = {(start + timedelta(days=i)).isoformat() for i in range((date.fromisoformat(end)-start).days+1)}
-    available = {s for s in ('2049','2310') if not (meta.get('catalog_errors') or {}).get('facebook:'+s)
-                 and days.issubset(meta['coverage'].get('facebook:'+s, []))}
     with closing(connect(path)) as db:
         catalog = [json.loads(r[0]) for r in db.execute("SELECT payload FROM catalog WHERE json_extract(payload,'$.platform')='facebook'")]
-        index = campaign_index(catalog)
+        # Each FB site has its own date of first use. Old 2049 templates can
+        # also generate 2310 links, so include their actual frozen link site.
+        site_start = {}
+        for site,day in [(r['site_id'],r['date']) for r in catalog] + [
+                (p.get('link_site'),p['published_at'][:10]) for p in posts.values()]:
+            if site and day:
+                site_start[site]=min(site_start.get(site,day),day)
+        missing = {}
+        for site in ('2049','2310'):
+            start = date.fromisoformat(site_start.get(site,end))
+            covered = set(meta['coverage'].get('facebook:'+site,()))
+            days = [(start+timedelta(days=i)).isoformat() for i in range((date.fromisoformat(end)-start).days+1)]
+            missing[site] = max((day for day in days if day not in covered),default='')
+            if (meta.get('catalog_errors') or {}).get('facebook:'+site):
+                missing[site] = end
+        index = defaultdict(list)
+        for row in catalog:
+            if row['key'][0]:
+                for site in revenue_sites(row):
+                    index[('facebook',site,row['key'][0])].append(row)
         mapped = {}
         for key, rows in index.items():
             row = resolve(rows)
@@ -150,8 +173,8 @@ def revenue(posts, warehouse_root=WAREHOUSE):
                 continue
             p.update(drama_name=p['drama_name'] or row.get('drama_label'), account_username=row.get('channel_label') or '',
                      owner=row['owner'], tenant=row['tenant'])
-            sites = {'2049','2310'} if row['site_id']=='2049' and row['link_type']=='auto_template' else {row['site_id']}
-            if first_day > end or not sites.issubset(available) or p.get('mobo_code'):
+            sites = revenue_sites(row)
+            if first_day > end or any(missing[site]>=first_day for site in sites) or p.get('mobo_code'):
                 continue
             mapped[key] = (p, first_day)
             p.update(revenue_cents=0, refund_cents=0, revenue_through=end)
@@ -173,4 +196,4 @@ def revenue(posts, warehouse_root=WAREHOUSE):
         raise ValueError('facebook_revenue_not_conserved')
     return dict(revenue_source_version=meta['version'],revenue_source_generated_at=meta['generated_at'],
                 revenue_through=end,assigned_revenue_cents=assigned,unassigned_revenue_cents=unassigned,
-                revenue_incomplete_sites=sorted({'2049','2310'}-available))
+                revenue_incomplete_sites=sorted(site for site,last_gap in missing.items() if last_gap))

@@ -1,8 +1,10 @@
 from contextlib import closing
 from decimal import Decimal
 import os
+import json
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -121,6 +123,32 @@ class ChannelEffectsTest(unittest.TestCase):
         self.assertIsNone(facebook.identity('12','14_13'))
         self.assertIsNone(facebook.identity('12','12_x_13'))
         self.assertEqual(extract({'reactions':{'summary':{'total_count':0}},'shares':{}}),{'likes':0})
+
+    def test_exact_fb_revenue_with_different_site_start_dates(self):
+        sites = (('2049','2026-11-19','7','101'),('2310','2026-11-20','8','102'))
+        posts = {}
+        warehouse = self.root/'warehouse.sqlite3'
+        with closing(sqlite3.connect(warehouse)) as db:
+            db.executescript('CREATE TABLE catalog(payload);CREATE TABLE effects(platform,dt,payload)')
+            for site,day,material,post in sites:
+                row=dict(platform='facebook',site_id=site,key=[post,'c'],date=day,owner='u',tenant='t',
+                         drama='D',language='en',channel='facebook:2',link_type='auto_template' if site=='2049' else 'manual',
+                         effect_source=dict(ad_id=material,adset_id='2'),
+                         publications=[dict(id='facebook:post:2:'+post,date=day,kind='post')])
+                posts['2_'+post]=dict(content_id='D',material_id=material,account_id='2',published_at=day,drama_name='',link_site=site)
+                db.execute('INSERT INTO catalog VALUES(?)',(json.dumps(row),))
+                for mid in [material,'999']:
+                    fact=dict(site_id=site,date=day,campaign_id=post,revenue_cents=120,refund_cents=20,ad_id=mid,adset_id='2')
+                    db.execute('INSERT INTO effects VALUES(?,?,?)',('facebook',day,json.dumps(fact)))
+            db.commit()
+        meta=dict(start='2026-11-17',end='2026-11-20',version='fixture',generated_at=data.utc(),
+                  coverage={'facebook:2049':['2026-11-19','2026-11-20'],'facebook:2310':['2026-11-20']})
+        reader=SimpleNamespace(current=lambda root:(meta,warehouse),connect=sqlite3.connect)
+        with patch.dict(sys.modules,{'features.social_analytics.warehouse_reader':reader}):
+            result=facebook.revenue(posts)
+        self.assertEqual(result['assigned_revenue_cents'],240)
+        self.assertEqual(result['unassigned_revenue_cents'],240)
+        self.assertEqual(result['revenue_incomplete_sites'],[])
 
 
 if __name__=='__main__':

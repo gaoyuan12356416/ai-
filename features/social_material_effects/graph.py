@@ -35,14 +35,26 @@ def sync(posts, cache, *, max_calls=160, max_posts=1500):
         due = [p for k,p in posts.items() if k not in saved or saved[k][4]<=now]
         due.sort(key=lambda p:(p['post_id'] in saved, (saved.get(p['post_id']) or (0,0,0,0,0))[4],
                                -datetime.fromisoformat(p['published_at'].replace('Z','+00:00')).timestamp()))
-        by_page = defaultdict(list)
-        for p in due[:max_posts]:
-            by_page[p['account_id']].append(p)
+        pending = defaultdict(list)
+        for p in due:
+            group = pending[p['account_id']]
+            if len(group)<25:
+                group.append(p)
+        by_page = {}
+        slots = max_posts
+        for page,group in pending.items():
+            by_page[page] = group[:slots]
+            slots -= len(by_page[page])
+            if not slots:
+                break
         status = ''
         try:
             reader = GatedReader(os.environ)
-            credentials = reader.credentials(list(by_page)) if by_page else {}
-            for page, group in by_page.items():
+            pages = list(by_page)
+            credentials = {}
+            for index,(page, group) in enumerate(by_page.items()):
+                if index % 40 == 0:
+                    credentials = reader.credentials(pages[index:index+40])
                 for i in range(0,len(group),25):
                     if graph.calls >= max_calls:
                         break
