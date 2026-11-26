@@ -138,7 +138,8 @@ class QATable(MySQLSink):
                 c.execute("INSERT INTO "+self.table+" ("+",".join(COLS)+") VALUES ("+
                           ",".join(["%s"]*len(COLS))+")",row)
                 conn.commit()
-            self._verify_owner(c)
+                c.execute("START TRANSACTION READ WRITE")
+            self._verify_owner(c,lock=True)
         save_manifest(self.manifest,{**self.identity,"state":"active"})
         return self
 

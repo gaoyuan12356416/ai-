@@ -174,12 +174,12 @@ flock 9
 for path in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3 \
     /usr/local/bin/python3.* /opt/rh/rh-python*/root/usr/bin/python3 /usr/bin/python3.*; do
     candidate=$(command -v "$path" || :)
-    if test -n "$candidate" && "$candidate" -c 'import sys; assert sys.version_info >= (3,7)' 2>/dev/null; then
+    if test -n "$candidate" && "$candidate" -c 'import sys; assert sys.version_info >= (3,6)' 2>/dev/null; then
         echo "$candidate" > interpreter
         break
     fi
 done
-test -s interpreter || { echo QA_ERROR_PYTHON_37_REQUIRED; exit 76; }
+test -s interpreter || { echo QA_ERROR_PYTHON_36_REQUIRED; exit 76; }
 if ! test -s private.pem; then
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out private.next 2>/dev/null
     mv -f private.next private.pem

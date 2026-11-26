@@ -138,7 +138,8 @@ class Client:
             return status, json.loads(await reader.readexactly(size))
         finally:
             writer.close()
-            await writer.wait_closed()
+            if hasattr(writer, "wait_closed"):
+                await writer.wait_closed()
 
     async def status(self):
         status, body = await asyncio.wait_for(self.http("GET", "/qa/status"), 8)
@@ -184,7 +185,7 @@ async def replay(client, plan, speed, duration, drain_timeout, report):
                     sample(current)
                 except Exception as exc:
                     errors["status_sample." + type(exc).__name__] += 1
-    watcher = asyncio.create_task(watch())
+    watcher = asyncio.ensure_future(watch())
 
     async def one(scheduled, payload):
         nonlocal matched, null, attempts
@@ -224,7 +225,7 @@ async def replay(client, plan, speed, duration, drain_timeout, report):
             delay = scheduled-time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
-            running.append(asyncio.create_task(one(scheduled,payload)))
+            running.append(asyncio.ensure_future(one(scheduled,payload)))
         await asyncio.gather(*running)
         responses_done = time.monotonic()
         # Preserve idle seconds at the end of the historical window, including an accelerated run.
@@ -290,12 +291,16 @@ def main():
     client = Client(args.origin,args.token_file.read_text(),args.expect_mysql_table)
     # Reserve the distinct report first, so a repeated invocation cannot destroy previous evidence.
     with args.output.open("x",encoding="utf8") as out:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            ok = asyncio.run(replay(client,plan,args.speed,trace_meta["seconds"],args.drain_timeout,report))
+            ok = loop.run_until_complete(replay(client,plan,args.speed,trace_meta["seconds"],args.drain_timeout,report))
         except Exception as exc:
             report.update(ok=False,aborted=type(exc).__name__,detail=str(exc)[:160])
             raise
         finally:
+            loop.close()
+            asyncio.set_event_loop(None)
             json.dump(report,out,ensure_ascii=False,indent=2)
     print(json.dumps({k:v for k,v in report.items() if k!="samples"},ensure_ascii=False))
     raise SystemExit(0 if ok else 2)
