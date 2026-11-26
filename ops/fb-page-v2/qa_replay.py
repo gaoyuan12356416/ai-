@@ -1,6 +1,4 @@
 """Replay observed arrivals from the publisher. The HTTP target must advertise an authenticated QA sink."""
-from __future__ import annotations
-
 import argparse
 import asyncio
 import base64
