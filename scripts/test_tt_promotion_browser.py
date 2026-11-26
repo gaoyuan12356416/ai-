@@ -460,6 +460,69 @@ def run(screens=None):
         expect(page.locator("#quickNav")).to_be_visible()
         page.locator("#nav-toggle").click()
         expect(page.locator("#quickNav")).not_to_be_visible()
+        # Fresh accounts do not require an old-page configuration. Only explicitly
+        # chosen and currently allowed audiences are saved, independently per account.
+        intake = browser.new_page(viewport={"width": 390, "height": 844})
+        intake.on("pageerror", lambda e: errors.append(str(e)))
+        fresh = [dict(account_id=str(i), nickname=f"新频道{i}", eligible=False, enabled=True,
+                      auth_eligible=True, policy_configured=False, drama_language="en") for i in (201,202,203)]
+        writes = []
+        def intake_api(route):
+            path = urlsplit(route.request.url).path
+            if path == API + "/channels":
+                return route.fulfill(json={"items": fresh + [channels[0]], "meta": {}})
+            if path.startswith(API + "/channels/") and path.endswith("/creator-info"):
+                aid = path.split("/")[-2]
+                choices = ["SELF_ONLY"] if aid=="203" else ["SELF_ONLY","MUTUAL_FOLLOW_FRIENDS"]
+                return route.fulfill(json={"creator_info":{"creator_nickname":f"新频道{aid}","privacy_level_options":choices}})
+            if path == API + "/channels/settings":
+                body = route.request.post_data_json
+                aid = body["account_ids"][0]
+                assert body["first_use"] and aid in {"201","202"} and len(body["account_ids"])==1
+                assert body["settings"]["publish_policy"]["privacy_level"] == "MUTUAL_FOLLOW_FRIENDS"
+                assert body["settings"]["publish_policy"]["allow_comment"] is False
+                if aid=="202" and not any(item == "failed" for item in writes):
+                    writes.append("failed")
+                    return route.fulfill(status=409,json={"message":"平台选项已变化"})
+                writes.append(aid)
+                next(c for c in fresh if c["account_id"]==aid).update(eligible=True,policy_configured=True)
+                return route.fulfill(json={"updated":1})
+            return handle(route)
+
+        intake.route("**/*",intake_api)
+        intake.goto(BASE + "/tt-promotion-channels.html")
+        intake.locator('[data-scope="first"]').click()
+        expect(intake.locator("#channels tr")).to_have_count(3)
+        assert intake.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        intake.locator("#select-mobile").check()
+        intake.locator("#first-for-selected").click()
+        dialog = intake.get_by_role("dialog",name="首次发布设置")
+        expect(dialog.locator("[data-row]")).to_have_count(3)
+        expect(dialog.locator("[data-save]")).to_be_disabled()
+        assert not writes
+        dialog.locator("[data-level]").select_option("MUTUAL_FOLLOW_FRIENDS")
+        dialog.locator("[data-apply]").click()
+        expect(dialog.locator('[data-row="2"]')).to_have_value("")
+        dialog.locator("[data-save]").click()
+        expect(dialog).to_contain_text("平台选项已变化")
+        expect(dialog).to_contain_text("已保存")
+        dialog.get_by_role("button",name="重试").click()
+        expect(dialog.locator("[data-save]")).to_be_enabled()
+        dialog.locator("[data-save]").click()
+        expect(dialog).to_contain_text("已确认 2 / 3")
+        dialog.get_by_role("button",name="关闭").click()
+        expect(intake.locator("#channels tr")).to_have_count(1)
+        assert sorted(writes)==["201","202","failed"]
+        intake.goto(BASE + "/tt-promotion-auto.html?accounts=203")
+        template = intake.locator("#edit-template")
+        template.locator("[name=name]").fill("保留编辑内容")
+        template.locator("[data-first-use]").click()
+        expect(intake.locator(".first-use-dialog [data-row]")).to_have_count(1)
+        expect(intake.locator(".first-use-dialog [data-save]")).to_be_disabled()
+        intake.locator(".first-use-dialog [data-close]").click()
+        expect(template.locator("[name=name]")).to_have_value("保留编辑内容")
+        assert len(writes)==3
+        intake.close()
         for state, expected_text in [
             ("anon", "请先登录"),
             ("expired", "登录已过期"),

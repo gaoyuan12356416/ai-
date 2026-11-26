@@ -94,6 +94,26 @@ class ChannelTests(unittest.TestCase):
             json.loads(channels._setting_rows(self.path, "A")["11"]["policy_json"]), self.policy
         )
 
+    def test_fresh_channel_inherits_basics_and_first_use_never_replaces_a_choice(self):
+        fresh = {"items": [{"source_account_id": "11", "publish_eligible": True}]}
+        args = {"account_ids": ["11"], "first_use": True, "settings": {"publish_policy": self.policy}}
+        with patch("features.tt_promotion.profiles.profiles_for_accounts", return_value={"meta": {}, "accounts": {}}):
+            def read(facts):
+                return channels.channel_data(self.actor, path=self.path, facts=facts, with_handoff=False)["items"][0]
+            new = read(fresh)
+            self.assertEqual((new["enabled"],new["drama_language"],new["eligible"],new["policy_source"]), (True,"en",False,"unset"))
+            self.assertEqual(channels._setting_rows(self.path,"A"), {})
+            legacy = {"items": [dict(fresh["items"][0], account_settings=dict(self.policy, configured=True, drama_language="es"))]}
+            inherited = read(legacy)
+            self.assertEqual((inherited["eligible"], inherited["drama_language"], inherited["policy_source"]), (True,"es","account"))
+            self.assertTrue(channels.save_settings(self.actor,args,legacy,self.path)["already_configured"])
+            with patch.object(channels,"creator_info",return_value=dict(privacy_level_options=["PUBLIC_TO_EVERYONE"],comment_disabled=False,duet_disabled=False,stitch_disabled=False)):
+                self.assertEqual(channels.save_settings(self.actor,args,fresh,self.path)["updated"],1)
+            retry = dict(args, settings={"publish_policy":dict(self.policy,privacy_level="SELF_ONLY")})
+            self.assertTrue(channels.save_settings(self.actor,retry,fresh,self.path)["already_configured"])
+            configured = read(fresh)
+            self.assertEqual((configured["eligible"],configured["policy_source"],configured["publish_policy"]["privacy_level"]), (True,"channel","PUBLIC_TO_EVERYONE"))
+
     def test_two_independent_permissions_and_old_item_containment(self):
         nav = json.loads(
             (Path(__file__).resolve().parents[1] / "static" / "navigation.json").read_text(encoding="utf8")

@@ -2,6 +2,7 @@
   "use strict";
   const {id,h,money,cents,time,badge,empty,notify,moduleRetry,get,post,modal,action,boot,byId,name,status}=window.TTPromotion;
   const selected=new Set();
+  let selectedScope="";
   let items=[],meta={},displayed=[],detailRequest=0,listRequest=0,canCreate=false,catalogReady=false;
   const sectionRequests={profile:0,handoff:0};
   const detailCache=new Map();
@@ -20,13 +21,27 @@
     if(row.legacy_inflight_count)facts.push("在途 "+row.legacy_inflight_count+" 项");
     return facts.join(" · ") || (legacyState(row)==="yes"?"有旧排期或在途":"无旧排期和在途");
   }
+  const needsFirst = window.TTFirstUse.needed;
+  function readiness(row){return row.eligible?"ready":needsFirst(row)?"first":"restricted";}
+  const pct=v=>Number.isInteger(v)?(v/100).toLocaleString("zh-CN",{maximumFractionDigits:2})+"%":"—";
+  function profileCells(row){
+    const mix=row.audience_mix||[],focus=mix.find(a=>a.name===topLabel(row.audience));
+    const audience=topLabel(row.audience);
+    const bars=mix.filter(a=>Number.isInteger(a.share_bp)&&a.share_bp>0).map(a=>{
+      const tone=["female","male","lgbtq","general"].includes(a.key)?a.key:"other";
+      return `<i class="mix-${tone}" style="flex-basis:${Math.min(100,a.share_bp/100)}%" title="${h(a.name)} ${h(pct(a.share_bp))}"></i>`;
+    }).join("");
+    const themes=(row.theme_mix?.length?row.theme_mix:(row.themes||[]).map(t=>({name:topLabel(t)})));
+    return `<td class="portrait"><span class="mobile-only">累计受众</span>${audience?`<button class="profile-link" data-detail="${h(byId(row))}" data-period-open="all">${h(audience)} <b>${focus?h(pct(focus.share_bp)):""}</b></button>`:h(row.has_profile==null?"画像待回传":mix.length?"受众未识别":"暂无受众画像")}${bars?`<span class="mix-bar">${bars}</span>`:""}</td>
+      <td class="themes"><span class="mobile-only">受众内优势题材</span>${themes.map(t=>`<div>${h(t.name)} <b>${t.share_bp==null?"":h(pct(t.share_bp))}</b></div>`).join("")||"—"}</td>`;
+  }
   function filtered(){
     const controls=filters.elements;
     const query=controls.search.value.trim().toLowerCase();
     const min=controls.min.value,max=controls.max.value;
     return items.filter(row=>{
       const amount=row.revenue_28d;
-      return (!query || [name(row),row.account_id].some(piece=>String(piece??"").toLowerCase().includes(query)))
+      return (!selectedScope || readiness(row)===selectedScope) && (!query || [name(row),row.username,row.account_id].some(piece=>String(piece??"").toLowerCase().includes(query)))
         && (!controls.language.value || row.drama_language===controls.language.value)
         && (!controls.eligible.value || !!row.eligible===(controls.eligible.value==="yes"))
         && (!controls.participating.value || row.enabled===(controls.participating.value==="yes"))
@@ -54,6 +69,9 @@
     id("bulk").textContent=selected.size ? `批量设置（${selected.size}）` : "批量设置";
     id("new-for-selected").hidden=!canCreate;
     id("new-for-selected").disabled=selected.size===0;
+    const need=items.filter(r=>selected.has(byId(r))&&needsFirst(r)).length;
+    id("first-for-selected").hidden=!need;
+    id("first-for-selected").textContent=`确认观看范围（${need}）`;
     id("selected-strip").hidden=!selected.size;
     id("selected-summary").textContent=selectionLabel(visible);
   }
@@ -66,23 +84,29 @@
     displayed=filtered();
     const labels=[`${displayed.length} / ${items.length} 个频道`];
     if(meta.end) labels.push(`截至 ${meta.end} UTC`);
-    if(meta.stale) labels.push("画像更新延迟");
+    if(meta.stale) labels.push("沿用上次完整画像");
     id("list-meta").textContent=labels.join(" · ");
-    id("channel-summary").textContent=`当前结果：参与 ${displayed.filter(r=>r.enabled).length} · 可发布 ${displayed.filter(r=>r.eligible).length} · 旧排期或在途 ${meta.module_errors?.handoff?"待核验":displayed.filter(r=>legacyState(r)==="yes").length}`;
+    for(const b of id("directory-overview").querySelectorAll("button")){
+      b.querySelector("strong").textContent=b.dataset.scope?items.filter(r=>readiness(r)===b.dataset.scope).length:items.length;
+      b.setAttribute("aria-pressed",String(b.dataset.scope===selectedScope));
+    }
+    id("channel-summary").textContent=`当前结果 · 参与 ${displayed.filter(r=>r.enabled).length} · 旧排期或在途 ${meta.module_errors?.handoff?"待核验":displayed.filter(r=>legacyState(r)==="yes").length}`;
     id("channels").innerHTML=displayed.map(row=>{
-      const account=h(byId(row));
-      const themes=(row.themes||[]).map(topLabel).filter(Boolean).slice(0,3).join("、");
+      const account=h(byId(row)),state=readiness(row);
+      const username=row.username&&row.username!==row.account_id?"@"+String(row.username).replace(/^@/,"")+" · ":"";
       return `<tr><td class="check"><input type="checkbox" data-select="${account}" aria-label="${h("选择 "+name(row))}" ${selected.has(byId(row))?"checked":""}></td>
-      <td class="identity"><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">${account}</small></td>
-      <td class="wide-only">${h(row.drama_language||"未配置")}</td><td class="readiness">${badge(row.eligible?"可发布":"受限",row.eligible?"positive":"warning")} ${badge(row.enabled?"已参与":"已暂停")}<small class="secondary wide-only">${h([row.reason,row.policy_configured===false||row.publish_policy?.configured===false?"待设置发布策略":""].filter(Boolean).join(" · "))}</small></td>
-      <td class="wide-only">${h(legacyLabel(row))}</td><td class="wide-only">${h(time(row.last_published_at))}</td>
-      <td class="progress"><span class="mobile-only">今日已发 / 应发</span>${h(row.today_published??"—")} / ${h(row.today_expected??"—")}</td>
-      <td class="income"><span class="mobile-only">28 天收入</span>${h(money(row.revenue_28d))}</td>
-      <td class="wide-only">${h(topLabel(row.audience)||"—")}<small class="secondary">${h(themes)}</small></td></tr>`;
-    }).join("") || empty(9,items.length?"当前条件下没有频道":"暂无可见频道");
+      <td class="identity"><button class="row-link" data-detail="${account}">${h(name(row))}</button><small class="secondary">${h(username)}#${account} · ${h(row.drama_language||"未配置")}</small></td>
+      <td class="progress"><span class="metric-label">今日已发 / 应发</span><strong>${h(row.today_published??"—")} / ${h(row.today_expected??"—")}</strong><small class="secondary">最近 ${h(time(row.last_published_at))}</small></td>
+      <td class="income"><span class="mobile-only">28 天收入</span><strong>${h(money(row.revenue_28d))}</strong></td>
+      ${profileCells(row)}
+      <td class="wide-only">${h(legacyLabel(row))}</td>
+      <td class="readiness">${badge(state==="ready"?"可发布":state==="first"?"待选观看范围":"账号受限",state==="ready"?"positive":"warning")}
+      ${!row.enabled?badge("已暂停"):""}${state==="first"?`<button class="row-link first-action" data-first="${account}">首次确认</button>`:""}
+      ${state==="restricted"?`<small class="secondary">${h(row.reason||"请查看账号授权状态")}</small>`:""}</td></tr>`;
+    }).join("") || empty(8,items.length?"当前条件下没有频道":"暂无可见频道");
     selectionState();
   }
-  const profileKeys=["revenue_28d","audience","themes","has_profile"];
+  const profileKeys=["revenue_28d","audience","themes","has_profile","audience_mix","theme_mix"];
   const planKeys=["today_expected","today_published","last_published_at","legacy_scheduled","legacy_template_count","legacy_inflight_count","legacy_conflict"];
   function mergeChannel(row,prior,section){
     if(!prior || !section)return row;
@@ -107,7 +131,7 @@
     items=result.items.map(row=>{
       const prior=old.get(byId(row));
       row=mergeChannel(row,prior,section);
-      if(prior && errors.profile)row={...row,revenue_28d:prior.revenue_28d,audience:prior.audience,themes:prior.themes};
+      if(prior && errors.profile)row={...row,...Object.fromEntries(profileKeys.map(k=>[k,prior[k]]))};
       if(prior && errors.handoff)row={...row,today_expected:prior.today_expected,today_published:prior.today_published,last_published_at:prior.last_published_at};
       return row;
     });
@@ -243,7 +267,7 @@
     modal(name(channel),`<div class="group"><div class="inline">${badge(channel.eligible?"可发布":"受限",channel.eligible?"positive":"warning")} ${badge(channel.enabled?"新版已参与":"新版已暂停")} ${h(channel.drama_language||"未配置剧语言")} · ID ${h(accountId)}</div><p class="muted">${h(channel.reason||"")} 最近成功发布 ${h(time(channel.last_published_at))} · 今日已发 / 应发 ${h(channel.today_published??"—")} / ${h(channel.today_expected??"—")}</p></div>
     <div class="group"><div class="heading"><h3>收入画像</h3><div id="periods" class="periods">${Object.entries(periodNames).map(([v,label])=>`<button class="tab" data-period="${v}">${label}</button>`).join("")}</div></div><div id="detail-profile-error" class="module-error" hidden></div><div id="window"></div></div>
     <div class="group"><h3>模板与交接</h3><div id="detail-handoff-error" class="module-error" hidden></div>${plan?handoff(plan):""}</div>
-    <div class="group"><div class="heading"><h3>新版发布策略</h3><button id="edit-policy" class="button" type="button">编辑发布策略</button></div><p class="muted">${h(policySummary(channel))}</p></div>`);
+    <div class="group"><div class="heading"><h3>新版发布策略</h3><button id="edit-policy" class="button" type="button">编辑发布策略</button></div><p class="muted">${h(policySummary(channel))}${channel.policy_source==="account"?" · 已沿用该账号的设置":channel.policy_source==="channel"?" · 已保存于新版":""}</p></div>`);
     action(id("edit-policy"),"click",()=>policyEditor(channel));
     function change(period){
       const w=profile.windows?.[period];
@@ -306,15 +330,18 @@
     });
   }
   filters.addEventListener("input",render);
-  filters.addEventListener("reset",()=>setTimeout(render,0));
+  filters.addEventListener("reset",()=>{selectedScope="";setTimeout(render,0);});
+  id("directory-overview").onclick=e=>{const b=e.target.closest("[data-scope]");if(b){selectedScope=b.dataset.scope;render();}};
+  async function setupFirst(rows){if(await window.TTFirstUse.open(rows))await refresh();}
+  action(id("first-for-selected"),"click",()=>setupFirst(items.filter(r=>selected.has(byId(r)))));
   for(const node of [id("select-all"),id("select-mobile")])node.onchange=e=>{for(const row of displayed){if(e.target.checked)selected.add(byId(row));else selected.delete(byId(row));}render();};
   id("channels").onchange=e=>{if(e.target.dataset.select){if(e.target.checked)selected.add(e.target.dataset.select);else selected.delete(e.target.dataset.select);selectionState();}};
-  action(id("channels"),"click",async ev=>{const button=ev.target.closest("[data-detail]");if(button)await openDetail(button.dataset.detail);});
+  action(id("channels"),"click",async ev=>{const first=ev.target.closest("[data-first]");if(first){await setupFirst(items.filter(r=>byId(r)===first.dataset.first));return;}const button=ev.target.closest("[data-detail]");if(button)await openDetail(button.dataset.detail,button.dataset.periodOpen||"28d");});
   id("bulk").onclick=bulk;
   id("new-for-selected").onclick=()=>displayed.filter(row=>selected.has(byId(row))).length<selected.size?review():startTemplate();
   id("review-selection").onclick=review;
   id("clear-selection").onclick=()=>{selected.clear();render();};
-  id("filter-toggle").onclick=e=>e.currentTarget.setAttribute("aria-expanded",String(e.currentTarget.getAttribute("aria-expanded")!=="true"));
+  id("filter-toggle").onclick=e=>{const expanded=e.currentTarget.getAttribute("aria-expanded")!=="true";e.currentTarget.setAttribute("aria-expanded",String(expanded));id("advanced-filters").hidden=!expanded;};
   boot("ttPromotionChannels",async user=>{
     canCreate=user.role==="admin" || user.permissions?.tt_promotion_auto===true;
     try {
@@ -326,7 +353,7 @@
       if(!items.length){
         id("list-meta").textContent="等待取得频道清单";
         id("channel-summary").textContent="";
-        id("channels").innerHTML=empty(9,"重试后将在这里显示频道。");
+        id("channels").innerHTML=empty(8,"重试后将在这里显示频道。");
       }
     }
   });

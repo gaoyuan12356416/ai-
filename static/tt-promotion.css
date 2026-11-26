@@ -141,3 +141,39 @@ dialog::backdrop { background: rgba(13,31,54,.52); }
   .channel-table td .mobile-only { font-size:11px; color:#596c85; font-weight:400; }
   .channel-table .empty { grid-column:1/-1; }
 }
+.tt-directory .main { max-width:1920px; }
+.directory-overview { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px; }
+.directory-overview button { display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:68px;padding:12px 18px;border:1px solid #d6e1ee;border-radius:10px;background:#fff;color:#405873;text-align:left;cursor:pointer; }
+.directory-overview button[aria-pressed=true] { border-color:#7a9cf0;background:#eef4ff;color:#174aa9; }
+.directory-overview button strong { font-size:25px;line-height:1.2;font-variant-numeric:tabular-nums; }
+.tt-directory .channel-filters { grid-template-columns:minmax(190px,320px) minmax(124px,154px) minmax(140px,166px) auto auto;justify-content:start;align-items:end;background:#fff; }
+.tt-directory .channel-filters #advanced-filters { grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px; }
+.tt-directory .channel-search input { width:100%; }
+.tt-directory .channel-filters>.row-link { align-self:end;min-height:37px; }
+.tt-directory .channel-summary { background:#f7f9fc;border-block:1px solid #e2e8f0;color:#50647a; }
+.channel-table th small,.metric-label { display:block;color:#67788a;font-size:11px;font-weight:400; }
+.tt-directory .channel-table td { vertical-align:middle; }
+.channel-table .income strong,.channel-table .progress strong { color:#243b56;font-variant-numeric:tabular-nums; }
+.channel-table .first-action { display:block;font-size:12px; }
+.profile-link { border:0;background:none;color:#24425f;padding:0;cursor:pointer;font:inherit; }
+.profile-link:hover { text-decoration:underline; }
+.profile-link b,.themes b { color:#506880;font-weight:500;font-variant-numeric:tabular-nums; }
+.themes div { display:flex;justify-content:space-between;gap:8px;max-width:170px; }
+.mix-bar { display:flex;max-width:148px;height:5px;margin:6px 0;background:#e7edf4;border-radius:3px;overflow:hidden; }
+.mix-bar i { display:block;flex-grow:0; }
+.mix-female { background:#9576bf; }.mix-male { background:#5489bd; }.mix-lgbtq { background:#bc874d; }.mix-general { background:#598b77; }.mix-other { background:#a7afbc; }
+.first-use-body { padding:0 20px 16px; }
+.first-use-body [data-rows] { margin:14px 0; }
+.first-use-row { display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #e2e8f0; }
+.first-use-row select { width:100%; }.first-use-row button { margin-left:8px; }
+@media(max-width:740px) {
+  .directory-overview { grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:8px; }
+  .directory-overview button { min-height:40px;padding:6px 10px; }.directory-overview button strong { font-size:18px; }
+  .tt-directory .channel-filters { grid-template-columns:repeat(2,minmax(0,1fr));gap:6px; }
+  .tt-directory .channel-filters .channel-search { grid-column:1/-1; }
+  .tt-directory .channel-filters #advanced-filters { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .tt-directory .channel-table tbody tr { grid-template-areas:"check identity readiness" ". progress income" ". portrait themes"; }
+  .tt-directory .channel-table .portrait { grid-area:portrait; }.tt-directory .channel-table .themes { grid-area:themes;text-align:right; }
+  .tt-directory .channel-table .progress small { display:none; }.themes div { font-size:12px;line-height:1.4; }
+  .first-use-body { padding:0 12px 12px; }
+}

@@ -2,6 +2,7 @@
   "use strict";
   const {id,h,money,time,badge,empty,notify,get:read,post:write,modal,confirmAction,action,boot,byId,name,status,statusBadge}=window.TTPromotion;
   const modeNames={template:"按模板选材",drama:"指定爆款剧",material:"指定素材",pool:"素材池分配",serial:"短剧连载"};
+  let canSetChannels=false;
   let templates=[],channels=[],actorId="",currentView="templates",requestToken=0;
   let stats=new Map(),historyPage=1,detailEpoch=0,importedAccounts=[],allowClose=null;
   let accessDenied=false,importHandled=false;
@@ -85,7 +86,7 @@
   }
   function picker(){
     return `<fieldset class="group" data-picker><legend>目标频道</legend><div class="picker-filters"><label>昵称或 ID<input type="search" data-search></label><label>剧语言<select data-pick="language"></select></label><label>主要受众<select data-pick="audience"></select></label><label>发布资格<select data-pick="eligible"><option value="">全部资格</option><option value="yes">可发布</option><option value="no">受限</option></select></label><label>旧排期<select data-pick="conflict"><option value="">全部排期</option><option value="yes">有旧排期或冲突</option><option value="no">未见旧排期或冲突</option><option value="unknown">待核验</option></select></label><label>28 天收入下限（USD）<input type="number" data-pick="min" min="0" step="0.01" placeholder="不限"></label><label>收入上限（USD）<input type="number" data-pick="max" min="0" step="0.01" placeholder="不限"></label><label>排序<select data-pick="order"><option value="default">频道顺序</option><option value="desc">收入降序</option><option value="asc">收入升序</option></select></label></div>
-      <div class="inline"><button type="button" class="row-link" data-add>选当前结果</button><button type="button" class="row-link" data-clear>清空已选</button><span class="muted" data-count></span></div><div class="check-list" data-accounts></div></fieldset>`;
+      <div class="inline"><button type="button" class="row-link" data-add>选当前结果</button><button type="button" class="row-link" data-clear>清空已选</button><span class="muted" data-count></span><button type="button" class="row-link" data-first-use hidden>确认所选新频道观看范围</button></div><div class="check-list" data-accounts></div></fieldset>`;
   }
   function setupPicker(form,rows,initial,onChange=()=>{}){
     const wrapper=form.querySelector("[data-picker]"),list=wrapper.querySelector("[data-accounts]"),selected=new Set(initial.map(String));
@@ -99,13 +100,23 @@
       const term=search.value.trim().toLowerCase(),val=k=>getControl(k).value;
       visible=rows.filter(c=>(!term||[name(c),byId(c),c.drama_language].some(v=>String(v||"").toLowerCase().includes(term)))&&(!val("language")||c.drama_language===val("language"))&&(!val("audience")||audience(c)===val("audience"))&&(!val("eligible")||(c.eligible?"yes":"no")===val("eligible"))&&(!val("conflict")||conflicts(c)===val("conflict"))&&(!val("min")||(c.revenue_28d!=null&&c.revenue_28d>=Number(val("min"))))&&(!val("max")||(c.revenue_28d!=null&&c.revenue_28d<=Number(val("max")))));
       if(val("order")!=="default")visible.sort((a,b)=>a.revenue_28d==null&&b.revenue_28d!=null?1:b.revenue_28d==null&&a.revenue_28d!=null?-1:((a.revenue_28d??0)-(b.revenue_28d??0))*(val("order")==="asc"?1:-1));
-      list.innerHTML=visible.map(c=>`<label><input type="checkbox" value="${h(byId(c))}" ${selected.has(byId(c))?"checked":""}><span>${h(name(c))} · #${h(byId(c))}<small class="secondary">${h([c.drama_language,audience(c),c.revenue_28d==null?"收入待回传":money(c.revenue_28d),c.eligible?"可发布":"受限",({yes:"有旧排期/冲突",no:"",unknown:"旧排期待核验"})[conflicts(c)]].filter(Boolean).join(" · "))}</small></span></label>`).join("")||'<span class="muted">无匹配频道</span>';
+      list.innerHTML=visible.map(c=>`<label><input type="checkbox" value="${h(byId(c))}" ${selected.has(byId(c))?"checked":""}><span>${h(name(c))} · #${h(byId(c))}<small class="secondary">${h([c.drama_language,audience(c),c.revenue_28d==null?"收入待回传":money(c.revenue_28d),c.eligible?"可发布":window.TTFirstUse.needed(c)?"首次发布待选观看范围":"受限",({yes:"有旧排期/冲突",no:"",unknown:"旧排期待核验"})[conflicts(c)]].filter(Boolean).join(" · "))}</small></span></label>`).join("")||'<span class="muted">无匹配频道</span>';
+      wrapper.querySelector("[data-first-use]").hidden=!canSetChannels || !rows.some(c=>selected.has(byId(c))&&window.TTFirstUse.needed(c));
       wrapper.querySelector("[data-count]").textContent=`已选 ${selected.size} 个 · 当前结果 ${visible.length} 个`;
     }
     wrapper.querySelector(".picker-filters").addEventListener("input",draw);
     list.onchange=e=>{if(e.target.checked)selected.add(e.target.value);else selected.delete(e.target.value);draw();onChange();};
     wrapper.querySelector("[data-add]").onclick=()=>{visible.forEach(c=>selected.add(byId(c)));draw();onChange();};
     wrapper.querySelector("[data-clear]").onclick=()=>{selected.clear();draw();onChange();};
+    action(wrapper.querySelector("[data-first-use]"),"click",async()=>{
+      const changed=await window.TTFirstUse.open(rows.filter(c=>selected.has(byId(c))));
+      if(!changed)return;
+      const current=await get("/channels");
+      channels=current.items;
+      const byAccount=new Map(channels.map(c=>[byId(c),c]));
+      rows=rows.map(c=>byAccount.get(byId(c))||{...c,eligible:false,auth_eligible:false,reason:"账号当前不可用"});
+      draw();onChange();
+    });
     draw();return ()=>rows.map(byId).filter(x=>selected.has(x));
   }
   function guardClose(changed){
@@ -603,6 +614,7 @@
     }
   }
   boot("ttPromotionAuto",async user=>{
+    canSetChannels=user.role==="admin" || user.permissions?.tt_promotion_channels===true;
     actorId=user.id||user.user_id||user.email||user.name;accessDenied=false;
     sourceReady.channels=false;sourceReady.templates=false;
     const sources=await Promise.allSettled([loadSource("channels"),loadSource("templates")]);

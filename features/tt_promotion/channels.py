@@ -361,7 +361,7 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
         eligible = auth_eligible and configured
         reason = account.get("eligibility_reason") or ""
         if auth_eligible and not configured:
-            reason = "请在频道详情中设置观看范围、互动和推广披露"
+            reason = "首次发布前请选择观看范围"
         profile = profile_set["accounts"].get(aid) or {"status": "unavailable", "windows": {}}
         windows = profile.get("windows", {})
         amount = windows.get("28d", {}).get("revenue_cents")
@@ -388,6 +388,11 @@ def channel_data(actor, *, detail=None, path=None, facts=None, with_handoff=True
             auth_eligible=auth_eligible,
             reason=reason,
             policy_configured=configured,
+            policy_source=("channel" if override.get("policy_json") else "account") if configured else "unset",
+            audience_mix=[{"name": a.get("name"), "key": a.get("key"), "share_bp": a.get("share_bp")}
+                          for a in audiences if (a.get("revenue_cents") or 0) > 0],
+            theme_mix=[{"name": t.get("name"), "share_bp": t.get("share_bp")}
+                       for t in first.get("children", []) if (t.get("revenue_cents") or 0) > 0][:3],
             publish_policy=policy,
             revenue_28d=None if amount is None else amount / 100,
             has_profile=None if profile.get("status") == "unavailable" else bool(first),
@@ -454,7 +459,10 @@ def save_settings(actor, payload, facts=None, path=None):
     ids = set(map(str, account_ids))
     if not ids <= visible:
         raise ChannelError(404, "所选频道不可见")
+    first_use = payload.get("first_use") is True
     policies = {}
+    if first_use and set(values) != {"publish_policy"}:
+        raise ChannelError(400, "首次确认只能保存发布偏好")
     if "publish_policy" in values:
         if (
             len(ids) != 1
@@ -463,6 +471,10 @@ def save_settings(actor, payload, facts=None, path=None):
         ):
             raise ChannelError(400, "请完成单个频道的发布设置")
         aid = next(iter(ids))
+        if first_use:
+            account = next((row for row in facts["items"] if str(row.get("source_account_id") or row.get("account_id")) == aid), {})
+            if (account.get("account_settings") or {}).get("configured") or existing.get(aid, {}).get("policy_json"):
+                return {"updated": 0, "already_configured": True}
         raw = values["publish_policy"]
         setting = TTPostAccountSettings.from_mapping(raw)
         if setting.brand_content_toggle and setting.privacy_level == "SELF_ONLY":
@@ -482,6 +494,10 @@ def save_settings(actor, payload, facts=None, path=None):
             )
     now = datetime.now(timezone.utc).isoformat()
     with closing(sqlite3.connect(path, timeout=10)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        if first_use and db.execute("SELECT 1 FROM promotion_channel_setting WHERE tenant=? AND account_id=? AND policy_json IS NOT NULL",
+                                    (actor["tenant_key"], next(iter(ids)))).fetchone():
+            return {"updated": 0, "already_configured": True}
         for aid in sorted(ids):
             policy = policies.get(aid)
             db.execute(
