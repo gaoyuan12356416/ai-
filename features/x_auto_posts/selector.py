@@ -698,6 +698,7 @@ def _drama_snapshot(item: DramaCandidate) -> Dict[str, Any]:
 def _material_snapshot(item: MaterialCandidate) -> Dict[str, Any]:
     result = {
         "material_id": item.source.material_id,
+        "product": item.source.product,
         "content_id": item.source.content_id,
         "language": item.source.language,
         "video_duration": format(item.source.video_duration, "f"),

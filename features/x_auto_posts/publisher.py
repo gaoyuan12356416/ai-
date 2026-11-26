@@ -23,7 +23,7 @@ from features.x_accounts.language import same_drama_language
 from features.x_posts import duration_policy
 
 from .client import safe_public_message
-from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
+from .core import PREP_RUN_PREFIX, TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
 from .dispatch_reader import read_dispatch_state
 from .operator_retry import execution_key
 from .selector import (
@@ -992,7 +992,9 @@ class AutoPostExecutor:
                 event_type="task_x_reconcile_retry",
             )
         waiting = phase == "selection" and isinstance(exc, MoboUpcomingWait)
-        if status >= 500 or waiting:
+        preview_miss = (isinstance(exc, NoEligibleMaterial) and phase == "selection"
+                        and self.store.get_run(task.run_id).run_key.startswith(PREP_RUN_PREFIX))
+        if status >= 500 or waiting or preview_miss:
             return self.store.transition_task(
                 task.id,
                 "retry_wait",
@@ -1003,7 +1005,8 @@ class AutoPostExecutor:
                     "claim_worker": "",
                     "claim_token": "",
                     "lease_expires_at_utc": "",
-                    "next_attempt_at_utc": exc.retry_at if waiting else self._now() + timedelta(minutes=5),
+                    "next_attempt_at_utc": (task.scheduled_at_utc if preview_miss else
+                                            exc.retry_at if waiting else self._now() + timedelta(minutes=5)),
                     "error_code": code,
                     "error_message": message,
                 },
@@ -1180,6 +1183,11 @@ class AutoPostExecutor:
                 prepared_now = False
                 if phase == "selection":
                     task = self._select(task, claim_token)
+                    if run.run_key.startswith(PREP_RUN_PREFIX):
+                        # The reserved task is already visible to the caption worker.
+                        # The canonical publisher must not see it until the slot opens.
+                        task = self.store.release_task_claim(task.id, claim_token, message="caption prepared ahead of slot")
+                        return {"ok": True, "claimed": True, "task": task.as_dict(), "gates": self.gates.as_dict()}
                     self.store.renew_task_claim(task.id, claim_token,
                                                lease_seconds=min(self.lease_seconds, 900), now=self._now())
                     phase = "prepare"

@@ -110,6 +110,10 @@ TERMINAL_TASK_STATUSES = frozenset(
         "skipped",
     }
 )
+# A preparation run owns only selection and provisional material reservations.
+# Its normal slot key is assigned by the scheduler at the original release time.
+PREP_RUN_PREFIX = "x-auto:prep:"
+CAPTION_LOOKAHEAD = timedelta(minutes=45)
 TRIGGER_TYPES = frozenset({"auto", "manual"})
 PUBLISH_LOG_STATUS_GROUPS = frozenset(
     {
@@ -1755,6 +1759,47 @@ class XAutoPostStore:
             raise XAutoPostStoreError("x_auto_run_not_found", "run was not found", 404)
         return _run_from_row(row)
 
+    def open_caption_slot(self, preview_key, slot_key, now):
+        with self._transaction() as conn:
+            conn.execute("""
+                UPDATE x_auto_run SET run_key=?
+                WHERE run_key=? AND scheduled_at_utc<=? AND status<>'canceled'
+                  AND NOT EXISTS (SELECT 1 FROM x_auto_run WHERE run_key=?)
+                  AND EXISTS (SELECT 1 FROM x_auto_template t
+                      WHERE t.id=x_auto_run.template_id AND t.enabled=1
+                      AND t.current_version=x_auto_run.template_version
+                      AND t.enabled_at_utc<=x_auto_run.scheduled_at_utc)
+            """, (slot_key, preview_key, _utc_iso(now), slot_key))
+
+    def retire_caption_previews(self, oldest_slot):
+        # No downstream run may be created under a preview key. Leave active
+        # claims to finish, and never release a confirmed or ambiguous binding.
+        with self._transaction() as conn:
+            rows = conn.execute("""
+                SELECT r.id FROM x_auto_run r JOIN x_auto_template t ON t.id=r.template_id
+                WHERE r.run_key GLOB 'x-auto:prep:*' AND r.status<>'canceled'
+                AND (t.enabled=0 OR t.current_version<>r.template_version OR
+                     t.enabled_at_utc>r.scheduled_at_utc OR substr(r.run_key,-length(t.enabled_at_utc))<>t.enabled_at_utc
+                     OR r.scheduled_at_utc<?)
+                AND NOT EXISTS (SELECT 1 FROM x_auto_task j WHERE j.run_id=r.id AND
+                     (j.claim_token<>'' OR j.execution_run_id IS NOT NULL OR
+                      j.execution_queue_id IS NOT NULL OR j.execution_log_id IS NOT NULL OR
+                      j.publish_id<>'' OR j.unknown_outcome<>0))
+                AND NOT EXISTS (SELECT 1 FROM x_auto_material_ledger l
+                     JOIN x_auto_task j ON j.id=l.task_id WHERE j.run_id=r.id AND
+                     (l.canonical_queue_id IS NOT NULL OR l.confirmed_at_utc<>''))
+            """, (_utc_iso(oldest_slot),)).fetchall()
+            for row in rows:
+                rid = row["id"]
+                now = self._now_iso()
+                conn.execute("""DELETE FROM x_auto_material_ledger WHERE task_id IN
+                    (SELECT id FROM x_auto_task WHERE run_id=?)""", (rid,))
+                conn.execute("""UPDATE x_auto_task SET status='canceled',updated_at=?
+                    WHERE run_id=? AND status IN ('pending','reserved','retry_wait','selecting')""", (now, rid))
+                conn.execute("UPDATE x_auto_run SET status='canceled',finished_at_utc=?,updated_at=? WHERE id=?",
+                             (now, now, rid))
+                self._event(conn, run_id=rid, event_type="caption_preview_retired", created_at=now)
+
     def get_run_by_key(self, run_key: Any) -> Optional[RunRecord]:
         clean_key = _bounded_text(run_key, "run key", 255)
         with self._reader() as conn:
@@ -2444,8 +2489,10 @@ class XAutoPostStore:
                 candidates = conn.execute(
                     """
                 SELECT * FROM x_auto_task
-                WHERE
-                    (status='pending' AND scheduled_at_utc<=?)
+                WHERE (
+                    (status='pending' AND (scheduled_at_utc<=? OR run_id IN
+                        (SELECT id FROM x_auto_run WHERE run_key GLOB 'x-auto:prep:*'
+                         AND status IN ('queued','running') AND scheduled_at_utc<=?)))
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
                         status='reserved'
@@ -2462,8 +2509,12 @@ class XAutoPostStore:
                         status IN ('publishing','reconciling','unknown')
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
+                ) AND (run_id NOT IN (SELECT id FROM x_auto_run WHERE run_key GLOB 'x-auto:prep:*')
+                       OR status IN ('pending','selecting') OR
+                       (status='retry_wait' AND claim_phase='selection' AND scheduled_at_utc>?))
                 ORDER BY
                     {fairness_order}
+                    CASE WHEN status='pending' AND scheduled_at_utc>? THEN 1 ELSE 0 END,
                     CASE
                         WHEN status IN ('publishing','reconciling','unknown') THEN 0
                         WHEN status='ready' THEN 1
@@ -2476,7 +2527,7 @@ class XAutoPostStore:
                     template_id ASC,
                     id ASC
                 """.format(fairness_order=fairness_order),
-                    (current, current, current, current, current, current, current, current, current),
+                    (current, _utc_iso(current_dt + CAPTION_LOOKAHEAD), current, current, current, current, current, current, current, current, current, current),
                 )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:

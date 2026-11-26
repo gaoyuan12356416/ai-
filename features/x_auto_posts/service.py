@@ -26,7 +26,7 @@ from features.x_accounts.language import canonical_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
 from . import run_outcomes
-from .core import AuditActor, XAutoPostStore
+from .core import AuditActor, XAutoPostStore, CAPTION_LOOKAHEAD, PREP_RUN_PREFIX
 from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
 from .repositories import BEIJING_TZ, MetricWindowRepository, ReadOnlyMySQLRepository
 from .selector import ResolverMaterialValidator, SelectionRequest, TwoStageSelector
@@ -671,6 +671,9 @@ class XAutoPostService:
                     account_snapshot_version=2,
                 )
             except Exception as exc:
+                if run.run_key.startswith(PREP_RUN_PREFIX):
+                    # Slot admission checks this account again at the planned time.
+                    continue
                 restricted = not bool(getattr(exc, "unknown_outcome", False)) and int(getattr(exc, "status", 500) or 500) == 409 and str(
                     getattr(exc, "code", "")
                 ) in {
@@ -860,47 +863,50 @@ class XAutoPostService:
         try:
             now = self._now()
             shanghai = now.astimezone(BEIJING_TZ)
-            day = shanghai.date().isoformat()
             created = []
+            self.store.retire_caption_previews(now - timedelta(seconds=self.schedule_grace_seconds))
+            horizon = (now + CAPTION_LOOKAHEAD).astimezone(BEIJING_TZ)
+            oldest = (now - timedelta(seconds=self.schedule_grace_seconds)).astimezone(BEIJING_TZ)
+            days = [oldest, shanghai] if oldest.date() != shanghai.date() else [shanghai]
+            if horizon.date() != shanghai.date():
+                days.append(horizon)
+            # Due releases get first access to the scheduler, including at midnight.
+            slots = []
             for template in self.store.list_templates(enabled=True):
-                for publish_time in self._schedule_times(template, day):
-                    hour, minute = (int(value) for value in publish_time.split(":"))
-                    slot = shanghai.replace(
-                        hour=hour, minute=minute, second=0, microsecond=0
-                    ).astimezone(UTC)
-                    try:
-                        enabled_at = datetime.fromisoformat(
-                            str(template.enabled_at_utc).replace("Z", "+00:00")
-                        ).astimezone(UTC)
-                    except (TypeError, ValueError, OverflowError):
-                        raise AutoPostServiceError(
-                            "x_auto_template_timestamp_invalid",
-                            "template enabled timestamp is invalid",
-                            500,
-                        ) from None
-                    age = (now - slot).total_seconds()
-                    if slot < enabled_at or age < 0 or age > self.schedule_grace_seconds:
-                        continue
-                    try:
-                        run, was_created = self._create_run(
-                            template,
-                            trigger_type="auto",
-                            scheduled_at=slot,
-                            publish_time=publish_time,
-                            run_key=(
-                                f"x-auto:auto:v1:{template.id}:"
-                                f"{day}:{publish_time.replace(':', '')}"
-                            ),
-                        )
-                    except Exception as exc:
-                        if str(getattr(exc, "code", "")) in {
-                            "x_auto_template_not_enabled_for_slot",
-                            "x_auto_template_version_conflict",
-                        }:
+                enabled_at = datetime.fromisoformat(template.enabled_at_utc.replace("Z", "+00:00"))
+                for day in days:
+                    date_key = day.date().isoformat()
+                    for publish_time in self._schedule_times(template, date_key):
+                        hour, minute = map(int, publish_time.split(":"))
+                        slot = day.replace(hour=hour, minute=minute, second=0, microsecond=0).astimezone(UTC)
+                        if slot < enabled_at or not now - timedelta(seconds=self.schedule_grace_seconds) <= slot <= horizon:
                             continue
-                        raise
-                    if was_created:
-                        created.append(run.id)
+                        slots.append((slot, template.id, date_key, publish_time, template))
+            for slot, _, date_key, publish_time, template in sorted(slots, key=lambda s: (s[0], s[1])):
+                slot_key = f"x-auto:auto:v1:{template.id}:{date_key}:{publish_time.replace(':', '')}"
+                preview_key = f"{PREP_RUN_PREFIX}{slot_key}:{template.version}:{template.enabled_at_utc}"
+                ahead = slot > now
+                preview = self.store.get_run_by_key(preview_key)
+                if preview and (ahead or preview.status == "canceled"):
+                    continue
+                if not ahead:
+                    admitted = self.store.get_run_by_key(slot_key)
+                    if admitted and admitted.template_version != template.version:
+                        # This slot was already admitted under its previous frozen version.
+                        continue
+                    if preview and not admitted:
+                        self.store.open_caption_slot(preview_key, slot_key, now)
+                try:
+                    run, was_created = self._create_run(
+                        template, trigger_type="auto", scheduled_at=slot,
+                        publish_time=publish_time, run_key=preview_key if ahead else slot_key,
+                    )
+                except Exception as exc:
+                    if getattr(exc, "code", "") in {"x_auto_template_not_enabled_for_slot", "x_auto_template_version_conflict"}:
+                        continue
+                    raise
+                if was_created:
+                    created.append(run.id)
             return {
                 "ok": True,
                 "created_runs": sorted(set(created)),
