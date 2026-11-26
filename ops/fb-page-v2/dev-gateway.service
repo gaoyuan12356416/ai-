@@ -1,0 +1,20 @@
+[Unit]
+Description=Encrypted forwarding for the Page V2 developer HTTPS endpoint
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/ssh -NT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=5 -o UserKnownHostsFile=/mnt/data-disk/fb-page-v2/dev-gateway/ssh/known_hosts -i /mnt/data-disk/fb-page-v2/dev-gateway/ssh/id_ed25519 -L 127.0.0.1:19845:10.89.0.125:8944 root@43.154.250.89
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

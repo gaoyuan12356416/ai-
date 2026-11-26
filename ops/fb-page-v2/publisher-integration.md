@@ -2,6 +2,8 @@
 
 发布机通过内网发送 `POST http://10.89.0.125:8944/api/integrations/v2/drama-page-assignments`，使用现有画像分配接口的 Bearer 和 `Content-Type: application/json`。可从发布机用 `GET http://10.89.0.125:8944/healthz` 检查连接。选页接口只计算并记录 Page 决定。
 
+开发电脑本地调试可使用 `POST https://ai.yingliangads.com/api/integrations/v2/drama-page-assignments`，请求和回执规则相同。HTTPS 健康检查、Postman / cURL / PowerShell 示例及调试入口错误处理见 [本地联调说明](developer-integration.md)。
+
 ## 业务请求
 
 在发布任务和素材关系已提交后调用。每个请求对应一个产品、一个实际授权 Page 池和一个稳定的业务子批。单批接受 1 至 100 个剧 ID，保留输入次序与重复项。超过 100 个时，按稳定顺序分批，在重试时沿用相同的子批号、池和剧 ID 顺序。
