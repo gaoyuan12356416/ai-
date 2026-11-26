@@ -54,7 +54,7 @@ MAX_DRAMA_WINDOW_DAYS = 3650
 MAX_COOLDOWN_DAYS = 3650
 MAX_SOURCE_DURATION_SECONDS = Decimal(4 * 60 * 60)
 _ACCOUNT_ID = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
-_SORT_FIELDS = frozenset({"spend", "d0_roas"})
+_SORT_FIELDS = frozenset({"spend", "d0_roas", "x_views", "x_likes", "x_comments", "x_shares", "x_revenue"})
 _SORT_DIRECTIONS = frozenset({"asc", "desc"})
 _VALIDATED_PUBLIC_TEXT_LIMITS = {
     "description": 4096,
@@ -101,6 +101,10 @@ class NoEligibleMaterial(SelectionError):
             "x_mobo_upcoming_daily_full": "该账号今日模板次数已用完",
             "x_mobo_upcoming_paused": "模板已停用，结束此自动时隙",
         }
+        for level, subject in (("drama", "剧目"), ("material", "素材")):
+            for metric, label in (("views", "播放量"), ("likes", "点赞量"),
+                                  ("comments", "评论量"), ("shares", "分享量"), ("revenue", "收入")):
+                labels[level+"_x_"+metric] = subject+label+"不满足筛选条件或数据尚不完整"
         summary = "；".join(
             "%s %s" % (labels.get(key, key), count)
             for key, count in sorted(self.rejection_counts.items())
@@ -233,6 +237,7 @@ class DramaFilterRule:
     spend: DecimalRange = field(default_factory=DecimalRange)
     d0_roas: DecimalRange = field(default_factory=DecimalRange)
     sort: SortRule = field(default_factory=SortRule)
+    x_effect: Mapping[str, DecimalRange] = field(default_factory=dict)
     resource_types: Tuple[str, ...] = ()
     launch_window_days: Any = 0
     cooldown_days: int = 0
@@ -260,6 +265,7 @@ class DramaFilterRule:
             "d0_roas",
             "sort",
             "resource_types",
+            "x_effect",
             "launch_window_days",
             "cooldown_days",
         }
@@ -272,6 +278,7 @@ class DramaFilterRule:
             spend=DecimalRange.from_mapping(raw.get("spend"), "drama spend"),
             d0_roas=DecimalRange.from_mapping(raw.get("d0_roas"), "drama D0 ROAS"),
             sort=SortRule.from_mapping(raw.get("sort")),
+            x_effect={key: DecimalRange.from_mapping(value, "X " + key) for key, value in (raw.get("x_effect") or {}).items()},
             resource_types=tuple(str(value).strip() for value in resource_types),
             launch_window_days=launch_window(raw.get("launch_window_days", 0)),
             cooldown_days=_nonnegative_int(
@@ -288,13 +295,14 @@ class MaterialFilterRule:
     d0_roas: DecimalRange = field(default_factory=DecimalRange)
     duration_seconds: DecimalRange = field(default_factory=DecimalRange)
     sort: SortRule = field(default_factory=SortRule)
+    x_effect: Mapping[str, DecimalRange] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "MaterialFilterRule":
         raw = {} if raw in (None, "") else raw
         if not isinstance(raw, Mapping):
             raise ValueError("material rule must be an object")
-        allowed = {"spend", "d0_roas", "duration_seconds", "sort"}
+        allowed = {"spend", "d0_roas", "duration_seconds", "sort", "x_effect"}
         if set(raw).difference(allowed):
             raise ValueError("material rule has unknown fields")
         return cls(
@@ -305,6 +313,7 @@ class MaterialFilterRule:
                 "material duration",
             ),
             sort=SortRule.from_mapping(raw.get("sort")),
+            x_effect={key: DecimalRange.from_mapping(value, "X " + key) for key, value in (raw.get("x_effect") or {}).items()},
         )
 
 
@@ -315,10 +324,14 @@ class SelectionRules:
     drama: DramaFilterRule = field(default_factory=DramaFilterRule)
     material: MaterialFilterRule = field(default_factory=MaterialFilterRule)
     material_products: Tuple[str, ...] = (DEFAULT_PRODUCT,)
+    material_window_days: Optional[int] = None
 
     def __post_init__(self) -> None:
         from features.material_products import normalize
         object.__setattr__(self, "material_products", normalize(self.material_products))
+        if self.material_window_days is not None:
+            from features.x_material_effects.window import days
+            days(self.material_window_days)
         if isinstance(self.metric_window_days, bool):
             raise ValueError("metric_window_days is invalid")
         if int(self.metric_window_days) < 1 or int(self.metric_window_days) > 30:
@@ -330,7 +343,7 @@ class SelectionRules:
     def from_mapping(cls, raw: Any) -> "SelectionRules":
         if not isinstance(raw, Mapping):
             raise ValueError("selection rules must be an object")
-        allowed = {"metric_window_days", "platform", "drama", "material", "material_products"}
+        allowed = {"metric_window_days", "platform", "drama", "material", "material_products", "material_window_days"}
         if set(raw).difference(allowed):
             raise ValueError("selection rules have unknown fields")
         raw_days = raw.get("metric_window_days")
@@ -349,6 +362,7 @@ class SelectionRules:
         )
         return cls(
             metric_window_days=days,
+            material_window_days=raw.get("material_window_days"),
             material_products=raw.get("material_products", (DEFAULT_PRODUCT,)),
             platform=platform,
             drama=DramaFilterRule.from_mapping(raw.get("drama")),
@@ -358,9 +372,11 @@ class SelectionRules:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "metric_window_days": int(self.metric_window_days),
+            **({"material_window_days": self.material_window_days} if self.material_window_days is not None else {}),
             "material_products": list(self.material_products),
             "platform": int(self.platform),
             "drama": {
+                "x_effect": {k: v.as_dict() for k, v in self.drama.x_effect.items()},
                 "spend": self.drama.spend.as_dict(),
                 "d0_roas": self.drama.d0_roas.as_dict(),
                 "sort": {
@@ -372,6 +388,7 @@ class SelectionRules:
                 "cooldown_days": int(self.drama.cooldown_days),
             },
             "material": {
+                "x_effect": {k: v.as_dict() for k, v in self.material.x_effect.items()},
                 "spend": self.material.spend.as_dict(),
                 "d0_roas": self.material.d0_roas.as_dict(),
                 "duration_seconds": self.material.duration_seconds.as_dict(),
@@ -395,6 +412,7 @@ class SelectionRequest:
     now: datetime
     claim_token: str = ""
     preview_upcoming: Optional[Mapping[str, Any]] = None
+    candidate_pool: Optional[Mapping[str, Any]] = None
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -570,6 +588,8 @@ def _stable_metric_sort(
     rule: SortRule,
     tie_key: Callable[[Any], Any],
 ) -> List[Any]:
+    if rule.field.startswith("x_"):
+        return sorted(items, key=tie_key)
     defined = [item for item in items if _metric_value(item, rule.field) is not None]
     missing = [item for item in items if _metric_value(item, rule.field) is None]
     # Stable sorts preserve the explicit ascending identity tie-breaker even
@@ -810,6 +830,10 @@ class TwoStageSelector:
                 else:
                     kept.append(candidate)
             candidates = kept
+        from features.x_material_effects.selection import apply
+        candidates = apply(candidates, request.rules.drama, "drama", rejection_counts)
+        if request.rules.drama.sort.field.startswith("x_"):
+            return candidates
         return _stable_metric_sort(
             candidates,
             request.rules.drama.sort,
@@ -880,8 +904,16 @@ class TwoStageSelector:
         if not prepared:
             return []
         ids = [item.source.material_id for item in prepared]
-        history_seen = {str(value) for value in self.history.seen_material_ids(ids)}
-        auto_seen = {str(value) for value in self.store.reserved_material_ids(ids)}
+        from features.x_material_effects.selection import enabled
+        if enabled(request.rules) or request.candidate_pool or request.rules.material_window_days is not None:
+            from features.x_material_effects.reuse import client, lane
+            history_seen = set(client('check', lane=lane(), task_id=request.task_id,
+                account_id=request.account_id, material_ids=ids, candidate_pool=bool(request.candidate_pool),
+                material_window_days=request.rules.material_window_days)['blocked'])
+            auto_seen = set()
+        else:
+            history_seen = {str(value) for value in self.history.seen_material_ids(ids)}
+            auto_seen = {str(value) for value in self.store.reserved_material_ids(ids)}
         eligible: List[MaterialCandidate] = []
         for item in prepared:
             material_id = item.source.material_id
@@ -891,6 +923,10 @@ class TwoStageSelector:
                 self._reject(rejection_counts, "material_auto_seen")
             else:
                 eligible.append(item)
+        from features.x_material_effects.selection import apply
+        eligible = apply(eligible, rule, "material", rejection_counts)
+        if rule.sort.field.startswith("x_"):
+            return eligible
         return _stable_metric_sort(
             eligible,
             rule.sort,
@@ -924,12 +960,12 @@ class TwoStageSelector:
         public_fields = _validated_public_snapshot(validated, required=True)
         return MaterialCandidate(material.source, material.metrics, public_fields)
 
-    def _select(
-        self,
-        request: SelectionRequest,
-        *,
-        reserve: bool,
-    ) -> ReservedSelection:
+    def _select(self, request: SelectionRequest, *, reserve: bool) -> ReservedSelection:
+        from features.x_material_effects.selection import scope
+        with scope(request):
+            return self._select_with_effects(request, reserve=reserve)
+
+    def _select_with_effects(self, request: SelectionRequest, *, reserve: bool) -> ReservedSelection:
         existing = (
             self.store.get_task_reservation(int(request.task_id))
             if reserve
@@ -1029,16 +1065,21 @@ class TwoStageSelector:
                 if drama.catalog != "moboreels" and drama.content_id in final_blacklist.material_data_source_ids:
                     self._reject(rejection_counts, "material_blacklist_final")
                     break
-                if material.source.material_id in {
-                    str(value)
-                    for value in self.history.seen_material_ids(
-                        [material.source.material_id]
-                    )
-                }:
+                from features.x_material_effects.selection import enabled
+                if enabled(request.rules) or request.candidate_pool or request.rules.material_window_days is not None:
+                    from features.x_material_effects.reuse import client, lane
+                    seen = client('check', lane=lane(), task_id=request.task_id, account_id=request.account_id,
+                        material_ids=[material.source.material_id], candidate_pool=bool(request.candidate_pool),
+                        material_window_days=request.rules.material_window_days)['blocked']
+                else:
+                    seen = self.history.seen_material_ids([material.source.material_id])
+                if material.source.material_id in {str(value) for value in seen}:
                     self._reject(rejection_counts, "material_history_seen_final")
                     continue
 
+                from features.x_material_effects.selection import audit
                 snapshot = {
+                    "x_effect": audit(drama, validated),
                     "rules": request.rules.as_dict(),
                     "metric_dates": list(metric_dates),
                     "drama": _drama_snapshot(drama),
@@ -1050,11 +1091,17 @@ class TwoStageSelector:
                         "final_loaded_at_utc": final_blacklist.loaded_at_utc,
                     },
                 }
+                if request.rules.material_window_days is not None:
+                    from features.x_material_effects.window import POLICY as WINDOW_POLICY
+                    snapshot['material_window'] = dict(policy=WINDOW_POLICY, days=request.rules.material_window_days)
+                if request.candidate_pool:
+                    from features.publish_candidate_pool import POLICY
+                    snapshot["candidate_pool"] = dict(policy=POLICY, run_id=request.run_id)
                 if is_range(window) and drama.deploy_time > now_epoch:
                     snapshot["hit_publish_timing"] = release_timing(drama.deploy_time, now_utc)
                 if not reserve:
                     return ReservedSelection(
-                        reservation={},
+                        reservation={"selection_snapshot": snapshot} if snapshot["x_effect"] or snapshot.get('material_window') else {},
                         drama=drama,
                         material=validated,
                         metric_dates=metric_dates,

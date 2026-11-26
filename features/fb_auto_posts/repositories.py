@@ -47,6 +47,12 @@ class PageTarget:
     eligible_token_count: int
     page_name: str = ""
 
+    def __post_init__(self):
+        # An unset Page language means English. Material/drama language remains
+        # strict, and an explicitly supplied invalid Page language is not guessed.
+        if not str(self.language or "").strip():
+            object.__setattr__(self, "language", "en")
+
 
 @dataclass(frozen=True)
 class PageCredential:
@@ -602,6 +608,8 @@ class MaterialRepository:
 
         def add_rows(rows: Sequence[Mapping[str, Any]], *, expected_content_ids: set[str] | None = None) -> None:
             nonlocal profile_error
+            if hit.get("material_ids") is not None:
+                rows = [row for row in rows if str(row.get("material_id")) in hit["material_ids"]]
             if expected_content_ids is not None:
                 rows = [row for row in rows if str(row.get("content_id") or "").strip() in expected_content_ids]
             content_ids = tuple(dict.fromkeys(str(row.get("content_id") or "").strip() for row in rows if str(row.get("content_id") or "").strip()))
@@ -735,6 +743,9 @@ class MaterialRepository:
         target = config.get('hit_drama_publish')
         complete_content_scan = inherit_language or bool(target) or profile_mode
         scan_content_ids = target_content_ids(target, language) if target else priority_content_ids
+        if (target or {}).get("candidate_pool"):
+            from features.publish_candidate_pool import allowed_content
+            scan_content_ids = allowed_content(target["candidate_pool"], language, target.get("catalog", "dramawave"))
         if complete_content_scan and not target:
             eligible = self.mysql.select(f"""
                 SELECT /*+ MAX_EXECUTION_TIME(45000) */ DISTINCT TRIM(d.content_id) content_id

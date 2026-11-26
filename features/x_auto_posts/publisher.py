@@ -159,8 +159,10 @@ def selector_rules(
         {
             "material_products": selected(config),
             "metric_window_days": config.get("metric_window_days", 7),
+            "material_window_days": config.get("material_window_days"),
             "platform": config.get("platform", 0),
             "drama": {
+                "x_effect": {m: {"min": drama.get("x_"+m+"_min"), "max": drama.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
                 "spend": {
                     "min": drama.get("spend_min"),
                     "max": drama.get("spend_max"),
@@ -171,7 +173,7 @@ def selector_rules(
                 },
                 "sort": {
                     "field": (
-                        "d0_roas" if drama.get("sort_by") == "roas" else "spend"
+                        "d0_roas" if drama.get("sort_by") == "roas" else drama.get("sort_by", "spend")
                     ),
                     "direction": drama.get("sort_direction", "desc"),
                 },
@@ -180,6 +182,7 @@ def selector_rules(
                 "cooldown_days": config.get("cooldown_days", 0),
             },
             "material": {
+                "x_effect": {m: {"min": material.get("x_"+m+"_min"), "max": material.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
                 "spend": {
                     "min": material.get("spend_min"),
                     "max": material.get("spend_max"),
@@ -190,7 +193,7 @@ def selector_rules(
                 },
                 "sort": {
                     "field": (
-                        "d0_roas" if material.get("sort_by") == "roas" else "spend"
+                        "d0_roas" if material.get("sort_by") == "roas" else material.get("sort_by", "spend")
                     ),
                     "direction": material.get("sort_direction", "desc"),
                 },
@@ -478,8 +481,8 @@ class AutoPostExecutor:
         return normalized
 
     def _create_run(self, task: TaskRecord, body_template: str, random_template_enabled: bool = False) -> Dict[str, Any]:
-        if self._selection_material(task).get("source_provider") == "moboreels":
-            body_template = body_template.replace("{{url}}", "{{m_url}}")
+        from .execution_body import execution_body
+        body_template = execution_body(body_template, self._selection_material(task))
         payload = {
             "duration_policy_version": self.store.get_run(task.run_id).duration_policy_version,
             "external_task_key": execution_key(self.store, task),
@@ -491,6 +494,9 @@ class AutoPostExecutor:
             "random_template_enabled": random_template_enabled,
             "actor": "x_auto_post_service",
         }
+        if (task.selection.get('x_effect') or {}).get('policy') or task.selection.get('candidate_pool') or task.selection.get('material_window'):
+            from features.x_material_effects.reuse import lane
+            payload['reuse_task'] = dict(lane=lane(), task_id=task.id)
         try:
             raw = self.bridge.create_run(payload)
         except XPostBridgeError as exc:

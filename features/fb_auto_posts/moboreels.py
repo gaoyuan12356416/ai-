@@ -43,6 +43,10 @@ def ensure_link(store, task):
         if current.get("lease_owner") and (row["lease_owner"] != current["lease_owner"] or row["lease_expires_at_utc"] != current["lease_expires_at_utc"]):
             raise moboreels.MoboreelsFBError("任务租约已改变，未调用平台")
         conn.execute("UPDATE fb_auto_task SET moboreels_json=?,message_text=?,short_url=?,long_url=? WHERE id=?",(json.dumps(frozen,ensure_ascii=False),message,link["short_url"],link["target_url"],current["id"]))
+        if row["status"] == "running":
+            from features.story_copy.bridge import fb_final
+            linked = conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (current["id"],)).fetchone()
+            fb_final(conn, "fa", linked)
         conn.commit()
         return dict(conn.execute("SELECT * FROM fb_auto_task WHERE id=?",(current["id"],)).fetchone())
 
@@ -93,6 +97,11 @@ def candidate_snapshot(repo, config):
     if hit or review is not None:
         from features.hit_drama_target import content_ids
         target_ids = tuple(content_ids(hit, language)) if hit else tuple(review.ready)
+        if hit.get('candidate_pool'):
+            from features.publish_candidate_pool import allowed_content
+            target_ids = tuple(allowed_content(hit['candidate_pool'], language, 'moboreels'))
+            if review is not None:
+                target_ids = tuple(cid for cid in target_ids if cid in review.ready)
         if not target_ids:
             return CandidateSnapshot((), (), ())
         # Give the source index an explicit ID range as well as scoping the provider catalog.
@@ -100,7 +109,7 @@ def candidate_snapshot(repo, config):
         slots = ','.join('%s' for _ in target_ids)
         target_sql = f' AND s.data_source_id IN ({slots}) AND d.story_id IN ({slots})'
         target_params = target_ids + target_ids
-    elif config.get('drama_launch_window_days'):
+    if config.get('drama_launch_window_days') and (not hit or hit.get('candidate_pool')) and review is None:
         from features.drama_launch_window import bounds, is_range
         from features.moboreels_hit import MOBO_APP_ID
 
@@ -141,6 +150,9 @@ def candidate_snapshot(repo, config):
         source_product_sql="LOWER(s.product)='dramawavesource' AND " if filter_products else ""
         source_language_sql="("+source_language_sql+" OR ("+source_product_sql+"TRIM(COALESCE(s.language,''))='' AND d.lang_id=%s))"
         language_params.append(language_ids.get(language,-1))
+    if hit.get("material_ids") is not None:
+        target_sql += " AND s.id IN (" + ",".join("%s" for _ in hit["material_ids"]) + ")"
+        target_params += tuple(hit["material_ids"])
     page_size,cursor,page_count=1000,0,0
     limit=max(1,min(int(config.get("_candidate_limit",getattr(repo,"candidate_limit",5000))),getattr(repo,"candidate_limit",5000)))
     deadline=repo.monotonic_fn()+repo.catalog_deadline_seconds

@@ -587,11 +587,14 @@ class FBAutoPostStore:
     def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None, hit_drama: Mapping[str, Any] | None = None, upcoming_claim: upcoming.Claim | None = None) -> Dict[str, Any]:
         if trigger_type not in {"auto", "manual"} or not slot_key or len(slot_key) > 120:
             raise StoreError("invalid_request", "运行触发参数无效", 400)
+        if upcoming_claim and not hit_drama:
+            hit_drama = _loads(upcoming_claim.run['config_json'], {}).get('hit_drama_publish')
+        submitted_pool = (hit_drama or {}).get("candidate_pool")
         if hit_drama:
             from .hit_drama import receipt
             with self.connect() as conn:
                 self._template_row(conn, template_id, actor)
-                existing_hit = receipt(conn, template_id, slot_key, hit_drama['request'])
+                existing_hit = None if upcoming_claim else receipt(conn, template_id, slot_key, hit_drama['request'])
                 if existing_hit:
                     return existing_hit
         with self.connect() as conn:
@@ -679,14 +682,18 @@ class FBAutoPostStore:
             max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in source_pages),default=0)
             caption_snapshot=page_caption.load(conn,template['created_by'],[p.page_id for p in source_pages])
         candidate_limit=min(5000,max(1000 if config.get("drama_cooldown_hours") else 500,max_reserved+100))
-        profile_supported = not hit_drama and str(config.get('app_id')) == '1479'
+        profile_supported = (not hit_drama or bool(submitted_pool)) and str(config.get('app_id')) == '1479'
         profile_snapshot = load_profiles([p.page_id for p in page_rows]) if profile_supported else ({'pages': {}}, {})
         profile_identity = [template_id, int(template['current_version']), slot_key]
         profile_enabled = profile_supported and any(not Decision(p.page_id, profile_identity, profile_snapshot).reason for p in page_rows)
         caption_languages={page.page_id:page_language(page.language) for page in page_rows}
         mobo_plan = upcoming_claim.plan if upcoming_claim else None
-        if mobo_plan is None and not hit_drama and upcoming.enabled(config):
+        if mobo_plan is None and (not hit_drama or submitted_pool) and upcoming.enabled(config):
             mobo_plan = upcoming.discover(materials,config,self.now_fn())
+        if mobo_plan is not None and submitted_pool:
+            from features.publish_candidate_pool import allowed_content
+            allowed_stories = set(allowed_content(submitted_pool, catalog='moboreels'))
+            mobo_plan = dict(mobo_plan, stories={key: value for key, value in mobo_plan['stories'].items() if key in allowed_stories})
         page_reviews = upcoming.reviews(materials,mobo_plan,[page_language(p.language) for p in source_pages],self.now_fn())
         source_config = dict(config, _mobo_reviews=page_reviews) if mobo_plan is not None else config
         catalog_seconds = 3300
@@ -739,7 +746,7 @@ class FBAutoPostStore:
                     expected_due_lease_owner=expected_due_lease_owner,
                     expected_due_lease_expires_at_utc=expected_due_lease_expires_at_utc,
                 )
-            if existing and hit_drama:
+            if existing and hit_drama and not upcoming_claim:
                 result = receipt(conn, template_id, slot_key, hit_drama['request'])
                 conn.commit()
                 return result
@@ -810,13 +817,16 @@ class FBAutoPostStore:
                     page_snapshot = candidate_snapshots[page.page_id]
                     decision = Decision(page.page_id, profile_identity, profile_snapshot)
                     candidate_pool = page_snapshot.candidates
-                    if not hit_drama and (decision.reason or page_snapshot.profile_error or not profile_supported):
+                    if (not hit_drama or submitted_pool) and (decision.reason or page_snapshot.profile_error or not profile_supported):
                         candidate_pool = diverse_candidates(candidate_pool, candidate_limit,
                             20 if int(config.get('drama_cooldown_hours', 0)) else 0)
                     scoped_candidates = [item for item in candidate_pool if (allowed is None or item.content_id in allowed)
                         and page_caption.material_eligible(config,page.page_id,item,caption_snapshot)]
+                    if submitted_pool:
+                        from features.publish_candidate_pool import allows
+                        scoped_candidates = [item for item in scoped_candidates if allows(submitted_pool, item.content_id, language, hit_drama.get("catalog", "dramawave"), item.material_id)]
                     candidates = [item for item in scoped_candidates if item.content_id not in blocked_content]
-                    if hit_drama:
+                    if hit_drama and not submitted_pool:
                         material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
                     else:
                         material, selection = choose_profile_material(candidates, excluded,
@@ -827,7 +837,7 @@ class FBAutoPostStore:
                             pre_reason = "fb_auto_no_video_after_drama_cooldown"
                         elif all(item.material_id in excluded for item in candidates):
                             pre_reason = "fb_auto_no_video_after_material_cooldown"
-                if material is not None and not hit_drama and material.deploy_time > int(now_dt.timestamp()):
+                if material is not None and (not hit_drama or submitted_pool) and material.deploy_time > int(now_dt.timestamp()):
                     from features.drama_launch_window import release_timing
                     selection["hit_publish_timing"] = release_timing(material.deploy_time, now_dt)
                     task_publish_at = selection["hit_publish_timing"]["publish_at_utc"]
