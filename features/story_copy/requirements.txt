@@ -1,0 +1,2 @@
+regex==2026.1.15
+twitter-text-parser==3.0.0

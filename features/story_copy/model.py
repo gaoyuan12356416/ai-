@@ -228,7 +228,7 @@ def one_line(value, maximum, field="text"):
 
     if not isinstance(value, str):
         fail(f"expected text, got {type(value).__name__}")
-    if len(value) > maximum:
+    if maximum is not None and len(value) > maximum:
         fail(f"length {len(value)} exceeds {maximum}")
     for index, char in enumerate(value):
         # Degree sign, letterlike units (℃/℉/℥), and CJK square units (㎏/㎞)
@@ -278,7 +278,7 @@ def validate(task, item, options=None):
         raise ValueError("invalid_tags")
     output = {
         k: one_line(item.get(k), limit, k)
-        for k, limit in (("opening", 640), ("turn", 440), ("angle", 90))
+        for k, limit in (("opening", None), ("turn", None), ("angle", 90))
     }
     if not normalized(output["opening"]) or not normalized(output["turn"]):
         raise ValueError("empty_plot")
@@ -294,12 +294,7 @@ def validate(task, item, options=None):
         ):
             raise ValueError("episode_evidence_missing")
     output.update(tags=clean, refs=refs, icon=ICONS.get(str(item.get("motif")), "✦"))
-    limits = body_length_target(task)
-    size = len(output["opening"]) + len(output["turn"])
-    if not limits["min"] <= size <= limits["max"]:
-        raise ValueError(f"body_length_out_of_range: got {size}, target {limits['target']} "
-                         f"({limits['min']}-{limits['max']})")
-    output["body_chars"] = limits
+    output["body_chars"] = body_length_target(task)
     return output
 
 
@@ -330,6 +325,5 @@ def render(task, draft, url):
             " ".join("#" + t for t in draft["tags"]),
         )
     )
-    if task["endpoint"].startswith("x_") and weight(text) > 280:
-        raise ValueError("x_copy_too_long")
-    return text
+    from .publish_length import fit_caption
+    return fit_caption(task, text, url)
