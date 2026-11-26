@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for newly verified Page portrait versions
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=2min
+AccuracySec=5s
+Unit=fb-page-v2-catalog-export.service
+
+[Install]
+WantedBy=timers.target

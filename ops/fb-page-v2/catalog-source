@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd /opt/fb-page-assignment-v2/current
+export PYTHONDONTWRITEBYTECODE=1
+exec /usr/bin/python3 -m features.fb_page_assignment_v2.catalog_transport serve

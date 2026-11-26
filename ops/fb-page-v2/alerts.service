@@ -1,0 +1,17 @@
+[Unit]
+Description=Hong Kong Page V2 independent incident relay and private Feishu delivery
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fb-page-assignment-v2/current
+EnvironmentFile=/etc/fb-page-assignment.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m features.fb_page_assignment_v2.alerts_server --root /mnt/data-disk/fb-page-assignment-v2/alerts --port 19844
+Restart=on-failure
+RestartSec=3
+UMask=0077
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

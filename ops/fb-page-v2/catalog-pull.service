@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Hong Kong V2 portraits and publishing machine inventory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fb-page-assignment-v2/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3.9 -m features.fb_page_assignment_v2.catalog_transport pull
+UMask=0077
+Nice=10
