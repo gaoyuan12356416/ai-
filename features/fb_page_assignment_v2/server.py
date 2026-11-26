@@ -151,7 +151,7 @@ class Endpoint:
                 else:
                     deadline = started + SERVER_BUDGET
                     try:
-                        status, body = await asyncio.wait_for(self.service.submit(payload, deadline),
+                        status, body = await asyncio.wait_for(self.service.submit(payload, deadline, request_id=request_id),
                                                              max(0., deadline-time.monotonic()))
                     except asyncio.TimeoutError:
                         self.service.notify("timeout", code="response_deadline", event_id=request_id)

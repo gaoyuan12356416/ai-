@@ -5,6 +5,7 @@ import multiprocessing
 from pathlib import Path
 import os
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -63,6 +64,27 @@ class BudgetTests(unittest.TestCase):
         self.t=tempfile.TemporaryDirectory()
         self.addCleanup(self.t.cleanup)
         self.ledger=Ledger(self.t.name)
+
+    def test_writer_contention_uses_caller_deadline_and_status_remains_read_only(self):
+        blocker = sqlite3.connect(str(self.ledger.path), isolation_level=None)
+        self.addCleanup(blocker.close)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            self.assertEqual(self.ledger.status()["available"], 30)
+            short = time.monotonic()
+            with self.assertRaisesRegex(BudgetError, "hk_sql_budget_timeout"):
+                self.ledger.reserve("read", short + 0.10)
+            self.assertLess(time.monotonic() - short, 1)
+            with ThreadPoolExecutor(1) as workers:
+                wait = workers.submit(self.ledger.reserve, "read", time.monotonic() + 6)
+                time.sleep(2.2)  # Regression: the previous local timeout was two seconds.
+                self.assertFalse(wait.done())
+                blocker.rollback()
+                token = wait.result(timeout=2)
+        finally:
+            blocker.rollback()
+        self.ledger.end(token, True)
+        self.assertEqual((self.ledger.status()["queued"], self.ledger.status()["in_use"]), (0, 0))
 
     def test_30th_grant_shared_by_threads_and_processes_then_31_waits(self):
         ctx=multiprocessing.get_context("spawn")

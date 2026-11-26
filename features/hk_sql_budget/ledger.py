@@ -62,16 +62,28 @@ class Ledger:
                     server_uuid TEXT, connection_id INTEGER, account TEXT);
             """)
 
-    def _connect(self):
-        db = sqlite3.connect(str(self.path), timeout=2, isolation_level=None)
+    def _connect(self, timeout=2.0):
+        db = sqlite3.connect(str(self.path), timeout=timeout, isolation_level=None)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA synchronous=FULL")
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            db.close()
+            raise
         return db
 
     @contextmanager
-    def _transaction(self):
-        with closing(self._connect()) as db:
-            db.execute("BEGIN IMMEDIATE")
+    def _transaction(self, *, read_only=False, deadline=None):
+        # Admission already has a caller deadline. A temporarily busy WAL writer
+        # must not reject a new request at the unrelated maintenance timeout.
+        timeout = 2.0 if deadline is None else max(0.0, deadline - time.monotonic())
+        with closing(self._connect(timeout)) as db:
+            try:
+                db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if deadline is not None and str(exc) in ("database is locked", "database table is locked"):
+                    raise BudgetError("hk_sql_budget_timeout") from exc
+                raise
             try:
                 yield db
                 db.commit()
@@ -89,7 +101,8 @@ class Ledger:
             db.execute("UPDATE config SET capacity=?,legacy_reserved=? WHERE id=1", (cap, old))
 
     def status(self):
-        with self._transaction() as db:
+        # One consistent WAL snapshot; monitoring has no reason to own the writer.
+        with self._transaction(read_only=True) as db:
             config = dict(db.execute("SELECT capacity,legacy_reserved FROM config").fetchone())
             states = dict(db.execute("SELECT state,COUNT(*) FROM lease GROUP BY state"))
             roles = dict(db.execute("SELECT role,COUNT(*) FROM lease GROUP BY role"))
@@ -109,7 +122,7 @@ class Ledger:
         next_cleanup = time.monotonic()
         try:
             while time.monotonic() < deadline:
-                with self._transaction() as db:
+                with self._transaction(deadline=deadline) as db:
                     cap, legacy = db.execute("SELECT capacity,legacy_reserved FROM config").fetchone()
                     occupied = db.execute("SELECT COUNT(*) FROM lease").fetchone()[0]
                     room = cap - legacy - occupied
@@ -140,29 +153,29 @@ class Ledger:
                 with self._transaction() as db:
                     db.execute("DELETE FROM waiter WHERE token=?", (token,))
 
-    def opening(self, token):
-        with self._transaction() as db:
+    def opening(self, token, deadline=None):
+        with self._transaction(deadline=deadline) as db:
             changed = db.execute("UPDATE lease SET state='opening' WHERE token=? AND state='reserved'", (token,))
             if changed.rowcount != 1:
                 raise BudgetError("hk_sql_lease_missing")
 
-    def bind(self, token, identity):
-        with self._transaction() as db:
+    def bind(self, token, identity, deadline=None):
+        with self._transaction(deadline=deadline) as db:
             changed = db.execute("""UPDATE lease SET state='bound',server_uuid=?,connection_id=?,account=?
                 WHERE token=? AND state='opening'""", (*identity,token))
             if changed.rowcount != 1:
                 raise BudgetError("hk_sql_lease_missing")
 
-    def end(self, token, confirmed):
-        with self._transaction() as db:
+    def end(self, token, confirmed, deadline=None):
+        with self._transaction(deadline=deadline) as db:
             if confirmed:
                 db.execute("DELETE FROM lease WHERE token=?", (token,))
             else:
                 db.execute("UPDATE lease SET state='unknown' WHERE token=?", (token,))
 
-    def inspect_abandoned(self):
+    def inspect_abandoned(self, deadline=None):
         """Only an owner that clearly died prior to an attempted DB open is released here."""
-        with self._transaction() as db:
+        with self._transaction(deadline=deadline) as db:
             for row in db.execute("SELECT token,pid,owner,state FROM lease WHERE state <> 'unknown'").fetchall():
                 if owner_finished(row):
                     if row["state"] == "reserved":
@@ -172,16 +185,16 @@ class Ledger:
             return [dict(r) for r in db.execute("""SELECT token,role,server_uuid,connection_id,account,created
                 FROM lease WHERE state='unknown' ORDER BY created""")]
 
-    def periodic_candidates(self, role):
+    def periodic_candidates(self, role, deadline=None):
         # Scan process ownership at most once/second per worker and role.
         with self._check_lock:
             now = time.monotonic()
             if self._next_check.get(role, 0) > now:
                 return ()
             self._next_check[role] = now+1
-        return self.inspect_abandoned()
+        return self.inspect_abandoned(deadline)
 
-    def verify_absence(self, connection, identity, candidates):
+    def verify_absence(self, connection, identity, candidates, deadline=None):
         """Use an already admitted observer on the same instance and effective account."""
         server_id, observer_id, account = identity
         same = [r for r in candidates if r["server_uuid"] == server_id and r["account"] == account
@@ -196,7 +209,7 @@ class Ledger:
         if observer_id not in visible:
             return 0
         recovered = 0
-        with self._transaction() as db:
+        with self._transaction(deadline=deadline) as db:
             for row in same:
                 if row["connection_id"] not in visible:
                     recovered += db.execute("""DELETE FROM lease WHERE token=? AND state='unknown'

@@ -49,6 +49,25 @@ class Maps:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_dependency_log_identifies_failed_step_without_driver_message(self):
+        from unittest.mock import Mock
+        catalog = Mock()
+        catalog.current.return_value = ({"sha256":"test"}, data())
+
+        def connection(**kwargs):
+            raise RuntimeError("private driver detail")
+
+        selector = Selector(catalog, connection)
+        req = dict(external_task_id="cross:10:qa", request_id="http-trace", page_group_id=24, drama_ids=["A"])
+        with patch("features.fb_page_assignment_v2.selection.log") as log:
+            error, = selector.select_batch([req], time.monotonic()+1)
+        self.assertEqual((error.status, error.code), (503, "selection_dependency_unavailable"))
+        event, = log.call_args.args
+        self.assertEqual(event, "v2_selection_dependency_failure")
+        self.assertEqual(log.call_args.kwargs["step"], "open_read_connection")
+        self.assertEqual(log.call_args.kwargs["request_ids"], ["http-trace"])
+        self.assertNotIn("private driver detail", str(log.call_args))
+
     def test_only_positive_language_then_blank_with_local_load_counter(self):
         profiles = {k: _profile(v) for k,v in {
             "2": page(), "3":page(), "4":page(), "5":page("other"),

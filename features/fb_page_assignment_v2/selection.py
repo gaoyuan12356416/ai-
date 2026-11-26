@@ -4,8 +4,11 @@ from __future__ import annotations
 from collections import Counter, defaultdict, OrderedDict
 from heapq import nsmallest
 import hashlib
+import sqlite3
 import time
+import traceback
 
+from features.fb_page_assignment.runtime import log
 from features.fb_page_assignment.selector import KNOWN_AUDIENCES, _load_order, _match, _number, _profile
 from .catalog import Reads, SelectionError, TABLE, page_states, permissions, source_dramas, task_ref
 from .snapshot import Catalog, canon, topics
@@ -13,6 +16,21 @@ from .snapshot import Catalog, canon, topics
 POLICY = "positive-profile-v2.1"
 STATES = ("page_id", "language", "status", "forbidden_status", "is_permission",
           "active_ad_count", "fan_ccount", "updated_at")
+
+
+def log_dependency_failure(step, exc, requests):
+    # Never log a driver message, SQL, request body or frame locals.
+    stack = []
+    for frame, lineno in traceback.walk_tb(exc.__traceback__):
+        module = frame.f_globals.get("__name__", "")
+        if module.startswith(("features.fb_page_assignment_v2.", "features.hk_sql_budget.", "pymysql.")):
+            stack.append(f"{module}.{frame.f_code.co_name}:{lineno}")
+    cause = exc.__cause__ or exc
+    code = cause.args[0] if cause.args and type(cause.args[0]) is int else None
+    busy = isinstance(cause, sqlite3.OperationalError) and str(cause) in ("database is locked", "database table is locked")
+    log("v2_selection_dependency_failure", step=step, category=type(cause).__name__,
+        driver_code=code, sqlite_busy=busy, frames=stack,
+        request_ids=[r["request_id"] for r in requests if r.get("request_id")])
 
 
 def eligible_pages(raw, profiles):
@@ -164,10 +182,13 @@ class Selector:
                 refs[i] = ref
         if not refs:
             return errors
+        step = "load_catalog"
         try:
             head, data = self.preload()
+            step = "open_read_connection"
             with self.connection(role="read", deadline=deadline) as conn, conn.cursor() as cur:
                 reader = Reads(cur, deadline)
+                step = "read_task_permissions"
                 grants, materials = permissions(reader, set(refs.values()))
                 viable = set()
                 for i, ref in refs.items():
@@ -180,6 +201,7 @@ class Selector:
                         viable.add(i)
                 if not viable:
                     return errors
+                step = "read_page_states"
                 pools = page_states(reader, {requests[i]["page_group_id"] for i in viable})
                 for i in list(viable):
                     if requests[i]["page_group_id"] not in pools:
@@ -189,13 +211,18 @@ class Selector:
                 valid_inputs = defaultdict(set)
                 for i in viable:
                     valid_inputs[refs[i]].update(requests[i]["drama_ids"])
+                step = "read_source_dramas"
                 facts = source_dramas(reader, known_refs, materials, valid_inputs)
+                step = "close_read_connection"
+            step = "prepare_candidates"
             groups = {}
             for group, raw in pools.items():
                 frozen = self.freeze(raw)
                 groups[group] = (eligible_pages(raw, self.profiles), frozen,
                                  getattr(frozen, "digest", None) or hashlib.sha256(canon(raw)).hexdigest(), {})
+            step = "resolve_drama_profiles"
             self.hydrate(data, facts, groups, refs, requests, viable, deadline)
+            step = "rank_pages"
             for i in viable:
                 req, ref = requests[i], refs[i]
                 ids, gid = req["drama_ids"], req["page_group_id"]
@@ -211,6 +238,8 @@ class Selector:
                     candidates=candidates, dramas=dramas))
         except Exception as exc:
             code = exc.code if isinstance(exc, SelectionError) else "selection_dependency_unavailable"
+            if not isinstance(exc, SelectionError):
+                log_dependency_failure(step, exc, requests)
             for i in refs:
                 if errors[i] is None:
                     errors[i] = SelectionError(503, code)

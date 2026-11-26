@@ -223,12 +223,14 @@ class Assignment:
         task.add_done_callback(self.notifications.discard)
         return task
 
-    async def submit(self, payload, deadline):
+    async def submit(self, payload, deadline, *, request_id=None):
         try:
             request, fingerprint = normalize(payload)
         except InvalidRequest as exc:
             self.notify("contract", code=str(exc))
             return private_error(400, str(exc))
+        if request_id is not None:
+            request["request_id"] = request_id
         key, group = request["external_task_id"], request["page_group_id"]
         observed = ([(kind,keys[key]) for kind,keys in self.keyed_incidents.items() if key in keys]
                     if self.keyed_incidents else None)

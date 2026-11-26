@@ -26,7 +26,7 @@ class _Session:
         self.authentication_started = False
 
     def before_authentication(self):
-        self.ledger.opening(self.key)
+        self.ledger.opening(self.key, self.deadline)
         self.authentication_started = True
 
     def remaining(self):
@@ -166,13 +166,13 @@ def session_connection(role, deadline, *, database=None, statement_timeout_ms=80
             server, cid, account, tx_ro, server_ro = _values(cur.fetchone(),
                 ("server_uuid","connection_id","account","tx_ro","server_ro"))
             identity = (str(server),int(cid),str(account))
-        ledger.bind(token, identity)
+        ledger.bind(token, identity, deadline)
         if int(tx_ro) != int(role == "read") or (role == "write" and int(server_ro) != 0):
             raise BudgetError("database_role_verification_failed")
         # Only inspect the processlist when a recorded session needs reconciliation.
-        pending = ledger.periodic_candidates(role)
+        pending = ledger.periodic_candidates(role, deadline)
         if pending:
-            ledger.verify_absence(conn, identity, pending)
+            ledger.verify_absence(conn, identity, pending, deadline)
         session.business = True
         session.remaining()
         yield conn
@@ -191,7 +191,8 @@ def session_connection(role, deadline, *, database=None, statement_timeout_ms=80
         finally:
             if raw is not None:
                 raw.close()
-            ledger.end(token, confirmed)
+            # Preserve the existing cleanup allowance even after a request expires.
+            ledger.end(token, confirmed, max(deadline, time.monotonic() + 2.0))
 
 
 def budget_connection(role="read", deadline=None):
