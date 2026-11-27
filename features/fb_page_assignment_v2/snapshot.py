@@ -63,6 +63,24 @@ def topics(rows, aliases, themes):
     return out
 
 
+def extend_hotdrama_catalog(resources, infos, directions, warm, aliases, themes):
+    from features.fb_page_portrait.same_drama import verified_hotdrama_links, matching_resources
+    for (_, cid, lang), link in verified_hotdrama_links(infos).items():
+        donor = directions.get('1479', {}).get(cid)
+        if donor and lang in donor[1]:
+            entry = directions.setdefault('3302', {}).setdefault(cid, [donor[0], []])
+            if entry[0] == donor[0] and lang not in entry[1]:
+                entry[1].append(lang)
+                entry[1].sort()
+        target = warm.setdefault('3302', {}).setdefault(cid, {})
+        own = [r for r in resources.get(('3302', cid), []) if language(r['language']) == lang]
+        if not any(r.get('labels') not in (None, '', '[]', []) for r in own):
+            source = [r for r in resources.get(('1479', cid), []) if language(r['language']) == lang]
+            source = matching_resources(source, link['series_code'])
+            if source and (not own or matching_resources(own, link['series_code'])):
+                target[lang] = topics(source, aliases, themes).get(lang, [])
+
+
 def atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
@@ -198,8 +216,20 @@ def export(out, current, projection, audience, shared_root):
     if folder is None:
         raise ValueError("matching_collection_not_ready")
     resources = defaultdict(list)
+    infos = []
     ids = set()
-    for f in folder.glob("*.json"):
+    files = list(folder.glob("*.json"))
+    # A classification-only rebuild retains the confirmed financial collection
+    # and freezes its additional identity/label reads alongside the new version.
+    extra = meta.get('classification_input_file')
+    if extra:
+        if extra != version + '.classification-inputs.json':
+            raise ValueError('invalid_classification_input_path')
+        extra_path = root / extra
+        if sha(extra_path.read_bytes()) != meta['classification_input_sha256']:
+            raise ValueError('classification_input_hash_mismatch')
+        files.append(extra_path)
+    for f in files:
         if f.name in ("manifest.json", "social-input.json"):
             continue
         rows = json.loads(f.read_bytes()).get("rows", [])
@@ -212,11 +242,14 @@ def export(out, current, projection, audience, shared_root):
             ids.add(key)
             if "labels" in row:
                 resources[key].append(row)
+            elif "resource_type" in row:
+                infos.append(row)
     if not ids or not resources:
         raise ValueError("matching_collection_empty")
     warm = {}
     for app, cid in sorted(ids):
         warm.setdefault(app, {})[cid] = topics(resources[(app, cid)], ALIASES, TAG_THEME)
+    extend_hotdrama_catalog(resources, infos, directions, warm, ALIASES, TAG_THEME)
     data = dict(format=1, version=version, pages=pages, directions=directions, warm=warm,
                 aliases=ALIASES, themes=TAG_THEME, tag_version=tags_version, page_scope=scope)
     raw = canon(data)

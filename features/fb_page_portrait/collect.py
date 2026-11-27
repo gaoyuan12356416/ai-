@@ -206,7 +206,11 @@ def collect(env_path, config_path=CONFIG_DB, warehouse=WAREHOUSE):
                               ('ads_drama_info','ac',['content_id','app_id','language','series_code','resource_type','name'],'infos')]:
         rows = []
         for app_id in PRODUCTS:
-            ids = sorted({str(r['content_id']) for kind in ('paid','social') for r in raw[kind] if r.get('content_id') and r.get('app_id',1479)==app_id})
+            # HotDrama can share classification only after the builder verifies
+            # its exact content/language/series identity against DramaWave.
+            products = {1479, 3302} if app_id == 1479 else {app_id}
+            ids = sorted({str(r['content_id']) for kind in ('paid','social') for r in raw[kind]
+                          if r.get('content_id') and r.get('app_id',1479) in products})
             rows.extend(catalog(reader,table,index,columns,app_id,ids,cache))
         raw[key] = rows
     # This snapshot has an explicit frozen scope. Mid-run pool additions enter
