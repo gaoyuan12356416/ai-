@@ -56,6 +56,20 @@ class Cloud:
 
 
 class NetworkTests(unittest.TestCase):
+    def test_explicit_web_caller_is_scoped_to_cloud_identity_address_and_live_vpc(self):
+        web = dict(InstanceId="ins-q12mp898", InstanceName="ads web", InstanceState="RUNNING",
+                   VirtualPrivateCloud={"VpcId": inventory.VPC}, SecurityGroupIds=["sg-web"],
+                   PrivateIpAddresses=["10.89.0.9", "10.89.0.10"])
+        other = {**web, "InstanceId": "ins-other-web"}
+        def scan(rows):
+            return inventory.inventory(lambda offset: {"InstanceSet": rows, "TotalCount": len(rows)})
+        result = scan([web, other])
+        self.assertEqual(result["addresses"], ["10.89.0.9"])
+        self.assertEqual(set(result["instances"]), {"ins-q12mp898"})
+        for change in ({"InstanceState": "STOPPED"}, {"VirtualPrivateCloud": {"VpcId": "vpc-other"}},
+                       {"PrivateIpAddresses": ["10.89.0.10"]}):
+            self.assertEqual(scan([{**web, **change}])["addresses"], [])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

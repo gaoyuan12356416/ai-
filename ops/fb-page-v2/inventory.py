@@ -16,6 +16,9 @@ REGION = "ap-hongkong"
 VPC = "vpc-lg5p8p82"
 SOURCE_GROUP = "sg-lqtd1q1l"
 PUBLISHER_GROUPS = {SOURCE_GROUP, "sg-pgzi0n4v"}
+# The operator also authorizes this production web caller. Pin its cloud
+# identity and address instead of admitting the web security group's peers.
+EXPLICIT_CALLERS = {"ins-q12mp898": {"10.89.0.9"}}
 NON_PROD = re.compile(r"(?:测试|临时|预发|沙箱|(?:^|[\s_-])(?:test|testing|staging|temp|sandbox)(?:[\s_-]|\d|$))",re.I)
 PRIVATE_V4 = tuple(ipaddress.ip_network(v) for v in ("10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"))
 
@@ -64,16 +67,20 @@ def inventory(describer):
         for row in page["InstanceSet"]:
             net = row.get("VirtualPrivateCloud", {})
             name = row.get("InstanceName","")
-            if (net.get("VpcId") != VPC or
-                    row.get("InstanceState") != "RUNNING" or not PUBLISHER_GROUPS.intersection(row.get("SecurityGroupIds", [])) or
-                    not name.startswith("ads发布调控") or NON_PROD.search(name)):
+            explicit = EXPLICIT_CALLERS.get(row["InstanceId"], set())
+            publisher = (PUBLISHER_GROUPS.intersection(row.get("SecurityGroupIds", []))
+                         and name.startswith("ads发布调控") and not NON_PROD.search(name))
+            if (net.get("VpcId") != VPC or row.get("InstanceState") != "RUNNING"
+                    or not (publisher or explicit)):
                 continue
             addresses = []
             for value in row["PrivateIpAddresses"]:
                 ip = ipaddress.ip_address(value)
-                if ip.version == 4 and any(ip in network for network in PRIVATE_V4):
+                if (ip.version == 4 and any(ip in network for network in PRIVATE_V4)
+                        and (publisher or str(ip) in explicit)):
                     addresses.append(str(ip))
-            instances[row["InstanceId"]] = {"name":name,"addresses":addresses}
+            if addresses:
+                instances[row["InstanceId"]] = {"name":name,"addresses":addresses}
         offset += len(page["InstanceSet"])
         if offset >= page["TotalCount"]:
             break
