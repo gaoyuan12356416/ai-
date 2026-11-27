@@ -118,13 +118,13 @@ else:
         name = channel['channel']
         rows = channel.get('rows', [])
         available = not channel.get('error') and all(row.get('data_available', True) for row in rows)
-        if name in ('TT', 'X') and not available:
+        if name in ('TT', 'FB', 'X') and not available:
             raise RuntimeError(name + '_collector_still_unavailable')
         summary[name] = {
             'data_available': available,
-            'expected': sum(row['expected'] for row in rows) if all(row.get('expected') is not None for row in rows) else None,
-            'confirmed': sum(row.get('published', 0) + row.get('late', 0) for row in rows),
-            'policy_skipped': sum(row.get('policy_skipped', 0) for row in rows),
+            'expected': sum(row['expected'] for row in rows) if available and all(row.get('expected') is not None for row in rows) else None,
+            'confirmed': sum(row.get('published', 0) + row.get('late', 0) for row in rows) if available else None,
+            'policy_skipped': sum(row.get('policy_skipped', 0) for row in rows) if available else None,
             'warnings': channel.get('warnings', []),
         }
         if summary[name]['expected'] is not None:
