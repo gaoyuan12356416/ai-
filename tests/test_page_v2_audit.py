@@ -8,7 +8,7 @@ import tempfile
 import threading
 import unittest
 
-from features.fb_page_assignment_v2.alerts import AlertHub, Relay, ROUTE, validate
+from features.fb_page_assignment_v2.alerts import AlertHub, Relay, ROUTE, text_for, validate
 from features.fb_page_assignment_v2.alerts_server import deliver, handler
 from features.fb_page_assignment_v2.audit import Workers, prepare
 from features.fb_page_assignment_v2.audit_sandbox import SQLiteAuditSink, isolated_mysql_sink
@@ -133,6 +133,31 @@ class Incidents(unittest.TestCase):
     def ev(self, k, external="s1", action="fault"):
         return {"id":k,"kind":"connection","action":action,"external_task_id":external,
                 "page_group_id":62,"detail":"connect_timeout","at":self.now}
+
+    def test_existing_conflict_summary_is_rendered_in_chinese_without_changing_receipt(self):
+        payload = dict(at=self.now, kind="request_conflict", reason="idempotency_conflict",
+                       mode="summary", affected=2, new_occurrences=1, since_last=1,
+                       examples=[dict(external_task_id="3092716", page_group_id=24,
+                                      detail="idempotency_conflict")])
+        text = text_for(payload)
+        self.assertIn("请求内容一致性校验", text)
+        self.assertEqual(text.count("同一子批标识已用于不同的 Page 池或剧目列表"), 2)
+        self.assertIn("子批 3092716，Page 池 24", text)
+        self.assertIn("本次新增异常 1 次，新增受影响子批 1 个", text)
+        self.assertIn("拆分后的不同子批", text)
+        self.assertNotIn("idempotency_conflict", text)
+        self.assertEqual(payload["reason"], "idempotency_conflict")
+        payload["mode"] = "recovered"
+        self.assertIn("已恢复", text_for(payload))
+        self.assertNotIn("处理建议", text_for(payload))
+
+    def test_new_reason_has_chinese_fallback_and_database_number_is_preserved(self):
+        payload = dict(at=self.now, kind="audit_sync", reason="OperationalError.2013",
+                       mode="first", affected=1,
+                       examples=[dict(external_task_id="s1", page_group_id=24, detail="new_failure")])
+        text = text_for(payload)
+        self.assertIn("数据库操作失败（错误码 2013）", text)
+        self.assertIn("未识别的异常，请核查服务日志（代码：new_failure）", text)
 
     def test_first_summary_recovery_retry_and_independent_subbatches(self):
         first = self.ev("a")

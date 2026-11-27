@@ -18,6 +18,76 @@ from .ledger import encoded, safe_code
 
 ROUTE = "/api/integrations/v2/drama-page-alerts"
 
+KIND_ZH = {
+    "request_conflict": "请求内容一致性校验",
+    "pool_authorization": "Page 池校验",
+    "auth": "接口身份认证",
+    "contract": "请求参数校验",
+    "timeout": "请求处理超时",
+    "persistence": "本地回执读写",
+    "saturation": "请求队列容量",
+    "page_source": "选页基础数据读取",
+    "worker_pool": "选页工作进程",
+    "request_transport": "请求传输",
+    "request_internal": "接口内部处理",
+    "audit_sync": "审计记录同步",
+    "audit_store": "本地审计账本",
+    "connection": "接口连接",
+}
+REASON_ZH = {
+    "idempotency_conflict": "同一子批标识已用于不同的 Page 池或剧目列表（包括顺序、数量）",
+    "unauthorized": "接口身份认证未通过",
+    "body_too_large": "请求正文超过大小限制",
+    "invalid_json": "请求正文不是有效的 JSON",
+    "body_must_be_object": "请求正文必须是对象",
+    "external_task_id_required_1_to_128_characters": "缺少有效子批标识，长度需为 1 至 128 个字符",
+    "drama_ids_required_1_to_100_items": "剧目列表需包含 1 至 100 个条目",
+    "drama_id_must_be_nonblank_string_at_most_128_characters": "剧目 ID 需为非空字符串，且不超过 128 个字符",
+    "request_identifier_encoding_invalid": "请求标识包含无效字符编码",
+    "page_group_id_required": "缺少有效的 Page 池 ID",
+    "publication_pool_unavailable": "Page 池不存在、已停用或不属于支持的产品",
+    "publication_pool_not_authorized": "Page 池与发布任务允许的范围不一致",
+    "publication_task_unverifiable": "无法核实发布任务",
+    "receipt_lookup_failed": "读取已保存的选页回执失败",
+    "receipt_save_failed": "保存选页回执失败",
+    "queue_full": "选页请求队列已满",
+    "process_pool_broken": "选页工作进程异常退出",
+    "request_deadline": "选页请求处理超时",
+    "response_deadline": "接口响应等待超时",
+    "selection_deadline": "选页计算或数据读取超时",
+    "selection_unavailable": "选页计算暂时不可用",
+    "selection_dependency_unavailable": "选页依赖的数据或服务暂时不可用",
+    "drama_theme_lookup_failed": "读取剧目画像标签失败",
+    "resource_row_limit": "基础数据数量超过单次读取上限",
+    "handler_failure": "接口处理发生内部异常",
+    "connect_timeout": "连接选页接口超时",
+    "connection_refused": "选页接口拒绝连接",
+    "peer_disconnected": "对端提前断开连接",
+    "TimeoutError": "等待操作完成超时",
+    "ConnectionError": "连接异常中断",
+    "ConnectionResetError": "连接被对端重置",
+    "BrokenPipeError": "连接已断开，无法继续传输",
+    "RemoteProtocolError": "收到不符合协议的请求或响应",
+    "LocalProtocolError": "本地请求或响应协议处理异常",
+    "OperationalError": "数据库操作失败",
+    "InterfaceError": "数据库连接异常",
+    "IntegrityError": "数据库记录完整性校验失败",
+    "ReadbackMismatch": "审计回读结果与原始回执不一致",
+    "OSError": "系统读写或网络操作失败",
+    "unspecified": "未提供具体原因，需核查服务日志",
+}
+
+
+def chinese_code(value, labels, fallback):
+    code = safe_code(value)
+    if code in labels:
+        return labels[code]
+    # Database errors carry a numeric suffix; preserve it for diagnosis.
+    prefix, _, number = code.rpartition(".")
+    if prefix in labels and number.isdecimal():
+        return "%s（错误码 %s）" % (labels[prefix], number)
+    return "%s（代码：%s）" % (fallback, code)
+
 
 class _NoRedirect(http.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -216,13 +286,19 @@ def text_for(payload):
     phase = {"first": "异常", "summary": "异常汇总", "recovered": "已恢复",
              "late_recovered": "已恢复（延迟到达的异常）"}[payload["mode"]]
     lines = ["香港 Page 画像 V2 " + phase, "北京时间 " + bj,
-             "故障环节 %s，原因 %s" % (payload["kind"], payload["reason"]),
+             "故障环节：%s；原因：%s" % (
+                 chinese_code(payload["kind"], KIND_ZH, "未识别的故障环节"),
+                 chinese_code(payload["reason"], REASON_ZH, "未识别的异常，请核查服务日志")),
              "累计影响 %s 个子批或未识别调用" % payload["affected"]]
     if payload["mode"] == "summary":
         lines.append("本次新增异常 %s 次，新增受影响子批 %s 个" % (payload["new_occurrences"], payload["since_last"]))
     for example in payload["examples"]:
         external = "".join(ch for ch in example["external_task_id"] if ch.isprintable()) or "未知"
-        lines.append("子批 %s，Page 池 %s，原因 %s" % (external, example["page_group_id"] or "未知", example["detail"]))
+        lines.append("子批 %s，Page 池 %s，原因：%s" % (
+            external, example["page_group_id"] or "未知",
+            chinese_code(example["detail"], REASON_ZH, "未识别的异常，请核查服务日志")))
+    if payload["reason"] == "idempotency_conflict" and payload["mode"] in ("first", "summary"):
+        lines.append("处理建议：同一子批重试时保持 Page 池和剧目列表完全一致；拆分后的不同子批使用各自固定且唯一的请求标识。")
     return "\n".join(lines)
 
 
