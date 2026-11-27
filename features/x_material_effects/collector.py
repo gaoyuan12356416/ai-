@@ -108,7 +108,9 @@ def revenue(posts,warehouse_root,*,daily=False):
     if meta.get('catalog_errors',{}).get('x:2116'):raise ValueError('x_revenue_catalog_unavailable')
     days=(datetime.fromisoformat(end)-datetime.fromisoformat(meta['start'])).days+1
     covered=set(meta.get('coverage',{}).get('x:2116',[]))
-    if any((datetime.fromisoformat(meta['start'])+timedelta(days=n)).date().isoformat() not in covered for n in range(days)):
+    missing=[(datetime.fromisoformat(meta['start'])+timedelta(days=n)).date().isoformat() for n in range(days)
+             if (datetime.fromisoformat(meta['start'])+timedelta(days=n)).date().isoformat() not in covered]
+    if missing and not daily:
         raise ValueError('x_revenue_coverage_incomplete')
     with closing(connect(path)) as db:
         catalog=[json.loads(r[0]) for r in db.execute("SELECT payload FROM catalog WHERE json_extract(payload,'$.platform')='x'")]
@@ -128,7 +130,7 @@ def revenue(posts,warehouse_root,*,daily=False):
         p.update(revenue_cents=0,refund_cents=0,revenue_status='matched')
         if daily:
             start=max(meta['start'],(datetime.fromisoformat(end)-timedelta(days=31)).date().isoformat())
-            p['_window_income']=dict(start=start,end=end,missing=[],daily={})
+            p['_window_income']=dict(start=start,end=end,missing=[d for d in missing if d>=start],daily={})
     seen=set()
     for effect in effects:
         campaign=str(effect['campaign_id']);key=('x',str(effect['site_id']),campaign)

@@ -2,7 +2,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 import os
 import sqlite3
+import json
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -96,6 +99,27 @@ class WindowTest(unittest.TestCase):
         row=self.load(1)['1']
         self.assertEqual(row['views'],10)
         self.assertIsNone(row['likes'])
+
+    def test_x_daily_income_retains_exact_mapping_and_marks_gaps(self):
+        from features.x_material_effects import collector
+        path=self.root/'warehouse.sqlite3'
+        with sqlite3.connect(path) as db:
+            db.executescript('CREATE TABLE catalog(payload);CREATE TABLE effects(platform,dt,payload)')
+            catalog=dict(platform='x',site_id='2116',key=['Campaign',''],owner='u',tenant='t',
+                         drama='D',language='en',channel='x:2',link_type='auto_template',
+                         publications=[dict(id='x:post:2:1',date='2026-11-25')])
+            db.execute('INSERT INTO catalog VALUES(?)',(json.dumps(catalog),))
+            for day,amount in [('2026-11-25',100),('2026-11-26',40)]:
+                db.execute('INSERT INTO effects VALUES(?,?,?)',('x',day,json.dumps(dict(date=day,site_id='2116',campaign_id='Campaign',revenue_cents=amount,refund_cents=0))))
+        meta=dict(version='v',generated_at='2026-11-27T00:00:00Z',start='2026-11-25',end='2026-11-26',coverage={'x:2116':['2026-11-25']})
+        modules={'features.social_analytics.warehouse_reader':SimpleNamespace(current=lambda r:(meta,path),connect=sqlite3.connect),
+                 'features.social_analytics.backend_scope':SimpleNamespace(eligible=lambda r,d:True)}
+        rows=[dict(post(),campaign_ids=['Campaign'])]
+        with patch.dict(sys.modules,modules):
+            with self.assertRaises(ValueError):collector.revenue(rows,'unused')
+            collector.revenue(rows,'unused',daily=True)
+        self.assertEqual(rows[0]['_window_income']['daily'],{'2026-11-25':100,'2026-11-26':40})
+        self.assertEqual(rows[0]['_window_income']['missing'],['2026-11-26'])
 
 
 if __name__=='__main__':
