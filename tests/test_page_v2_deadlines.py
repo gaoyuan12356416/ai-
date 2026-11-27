@@ -33,28 +33,14 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(service.close)
         return service
 
-    async def test_lookup_deadline_returns_before_a_blocked_cache_hit(self):
-        release, finished = threading.Event(), threading.Event()
-        def lookup(*args):
-            try:
-                release.wait(2)
-                return 200, {"task_id": "already-committed", "results": []}
-            finally:
-                finished.set()
-
+    async def test_expired_request_is_not_selected_or_recorded(self):
         async def unused(*args):
-            self.fail("expired lookup cannot schedule selection")
+            self.fail("expired request cannot schedule selection")
         service = await self.app(unused)
-        with patch.object(self.store, "lookup", lookup):
-            try:
-                result = await asyncio.wait_for(service.submit(request(), time.monotonic() + .05), .4)
-                self.assertEqual(result[1]["error"], "request_deadline")
-                self.assertFalse(finished.is_set())
-                self.assertFalse(service.pending)
-                self.assertFalse(service.admissions)
-            finally:
-                release.set()
-                await asyncio.to_thread(finished.wait, 1)
+        result = await service.submit(request(), time.monotonic() - .01)
+        self.assertEqual(result[1]["error"], "request_deadline")
+        self.assertFalse(service.pending)
+        self.assertEqual(self.store.status()["pending"],0)
 
     async def test_short_waiter_does_not_limit_its_sibling_batch(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -77,7 +63,7 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await long)[0], 200)
         self.assertEqual(observed, [(2, now+1.5)])
 
-    async def test_later_identical_waiter_recalculates_only_when_original_read_expires(self):
+    async def test_identical_retry_runs_independently_while_original_is_waiting(self):
         entered, release = asyncio.Event(), asyncio.Event()
         requests = []
         async def compute(reqs, deadline):
@@ -93,18 +79,18 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(entered.wait(), .5)
         later = asyncio.create_task(service.submit(request(), time.monotonic()+2))
         try:
+            accepted = await asyncio.wait_for(later,.5)
+            self.assertEqual(accepted[0],200)
             self.assertEqual((await early)[1]["error"], "request_deadline")
         finally:
             release.set()
-        accepted = await later
-        self.assertEqual(accepted[0], 200)
-        self.assertEqual(await service.submit(request(), time.monotonic()+.5), accepted)
-        self.assertEqual((await service.submit(request(group=24), time.monotonic()+.5))[0], 409)
-        self.assertEqual(len(requests), 2)
+        third=await service.submit(request(), time.monotonic()+.5)
+        self.assertNotEqual(third[1]["task_id"],accepted[1]["task_id"])
+        self.assertEqual(len(requests), 3)
 
-    async def test_save_after_http_timeout_is_finished_once_and_replayed(self):
+    async def test_record_after_http_timeout_finishes_and_retry_gets_its_own_receipt(self):
         entered, release = threading.Event(), threading.Event()
-        original = self.store.save
+        original = self.store.record
         calls = []
         def slow_save(*args):
             calls.append(args[0])
@@ -115,7 +101,7 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
             return select_ok(reqs, deadline)
 
         service = await self.app(calculate)
-        with patch.object(self.store, "save", slow_save):
+        with patch.object(self.store, "record", slow_save):
             early = asyncio.create_task(service.submit(request(), time.monotonic()+.15))
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, .6))
@@ -125,9 +111,11 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
                 release.set()
             receipt = await later
             self.assertEqual(receipt[0], 200)
-            self.assertEqual(await service.submit(request(), time.monotonic()+.5), receipt)
-        self.assertEqual(len(calls),1)
-        self.assertTrue(calls[0].startswith("cross:1:a:chunk:"))
+            third=await service.submit(request(), time.monotonic()+.5)
+            self.assertNotEqual(third[1]["task_id"],receipt[1]["task_id"])
+        self.assertEqual(calls,["cross:1:a"]*3)
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM assignment").fetchone()[0],3)
 
     async def test_malformed_worker_result_affects_only_one_request(self):
         async def compute(reqs, deadline):

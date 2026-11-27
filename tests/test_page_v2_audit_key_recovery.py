@@ -50,7 +50,7 @@ class KeyRecovery(unittest.IsolatedAsyncioTestCase):
         return await self.app.submit(p,time.monotonic()+4)
     def events(self,kind):
         return [(e["action"],e["external_task_id"]) for e in self.store.alert_events() if e["kind"]==kind]
-    async def test_cached_retry_only_closes_its_own_key_then_once_after_restart(self):
+    async def test_successful_retry_only_closes_its_own_key_then_once_after_restart(self):
         for key in ("a","b","unrelated"):
             self.assertEqual((await self.post(request(key)))[0],200)
         for key in ("a","b"):

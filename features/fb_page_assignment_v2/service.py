@@ -1,11 +1,10 @@
-"""Synchronous-to-caller assignment with bounded coalescing and durable idempotency."""
+"""Run every selection request independently, with bounded batching and audit receipts."""
 from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
 import hashlib
@@ -33,16 +32,6 @@ def normalize(payload):
         raise InvalidRequest("page_group_id_required")
     content = json.dumps([pool, dramas], ensure_ascii=False, separators=(",", ":")).encode()
     return {"external_task_id": external, "page_group_id": pool, "drama_ids": dramas}, hashlib.sha256(content).hexdigest()
-
-
-def batch_shard(request, fingerprint):
-    """Name immutable HTTP receipts; business dedup is queue_drama(queue_id,drama_id)."""
-    external = request["external_task_id"]
-    receipt_key = external + ":chunk:" + fingerprint
-    if len(receipt_key) > 128:
-        receipt_key = "queue-chunk:" + hashlib.sha256(
-            json.dumps([external, fingerprint], ensure_ascii=False).encode()).hexdigest()
-    return dict(request, external_batch_id=external, external_task_id=receipt_key)
 
 
 _selector = None
@@ -101,7 +90,6 @@ class Assignment:
         self.queue_limit = queue_limit
         self.compute = compute
         self.pending = {}
-        self.admissions = {}
         self.incoming = asyncio.Queue()
         self.active = 0
         self.closed = False
@@ -167,44 +155,6 @@ class Assignment:
                     self.notify("worker_pool", code="process_pool_broken")
                 if attempt or time.monotonic() >= deadline:
                     raise
-
-    async def _select_pairs(self, requests, deadline):
-        """Select only unseen queue + drama pairs; preserve the caller's result positions."""
-        prepared, positions, cached = [], [], {}
-        answers = [None] * len(requests)
-        for i, req in enumerate(requests):
-            queue = req.get("external_batch_id")
-            if not queue:
-                prepared.append(req);positions.append(i)
-                continue
-            rows = await asyncio.to_thread(self.store.queue_rows,queue,req["drama_ids"])
-            if any(value["pool"] != req["page_group_id"] for value in rows.values()):
-                answers[i] = (409,"queue_drama_pool_conflict")
-                continue
-            cached[i] = rows
-            missing = [drama for drama in dict.fromkeys(req["drama_ids"]) if drama not in rows]
-            if missing:
-                prepared.append(dict(req,drama_ids=missing));positions.append(i)
-            else:
-                answers[i] = (200,{"rows":[],"snapshot":{"policy":"queue-drama-reuse-v1","candidates":[]}})
-        if prepared:
-            selected = await self._select(prepared,deadline)
-            if len(selected) != len(prepared):
-                raise RuntimeError("selection_count_mismatch")
-            for i, answer in zip(positions,selected):
-                answers[i] = answer
-        for i, pairs in cached.items():
-            try:
-                status, answer = answers[i]
-                if status != 200:
-                    continue
-                rows = {drama:dict(value["row"],reused_from_task_id=value["task_id"]) for drama,value in pairs.items()}
-                for row in answer["rows"]:
-                    rows.setdefault(row["drama_id"],row)
-                answers[i] = (200,dict(answer,rows=[rows[drama] for drama in requests[i]["drama_ids"]]))
-            except (TypeError, KeyError, ValueError):
-                answers[i] = (503,"selection_unavailable")
-        return answers
 
     def busy(self):
         return bool(self.active or self.pending)
@@ -277,15 +227,9 @@ class Assignment:
         except InvalidRequest as exc:
             self.notify("contract", code=str(exc))
             return private_error(400, str(exc))
-        request = batch_shard(request, fingerprint)
-        if request_id is not None:
-            request["request_id"] = request_id
+        request["request_id"] = request_id or uuid.uuid4().hex
         key, group = request["external_task_id"], request["page_group_id"]
-        tracked = [key]
-        if request.get("external_batch_id"):
-            tracked.append(request["external_batch_id"])
-        observed = {tracked_key: [(kind, keys[tracked_key]) for kind, keys in self.keyed_incidents.items()
-                                  if tracked_key in keys] for tracked_key in tracked}
+        observed = [(kind, keys[key]) for kind, keys in self.keyed_incidents.items() if key in keys]
         self.active += 1
         try:
             remaining = deadline - time.monotonic()
@@ -293,79 +237,28 @@ class Assignment:
                 try:
                     response = await asyncio.wait_for(self._submit(request, fingerprint, deadline), remaining)
                     if time.monotonic() < deadline:
-                        if response[0] == 200:
-                            for tracked_key, markers in observed.items():
-                                # Re-reading the old first slice does not prove the rejected next slice recovered.
-                                if request.get("legacy_receipt") and tracked_key == request.get("external_batch_id"):
-                                    continue
-                                if markers:
-                                    await self._recover_success(tracked_key,markers,deadline)
+                        if observed and response[0] == 200:
+                            await self._recover_success(key, observed, deadline)
                         return response
                 except asyncio.TimeoutError:
                     pass
-            dedup = hashlib.sha256((key + "\0" + fingerprint).encode()).hexdigest()
-            self.notify("timeout", key, group, "request_deadline", event_id="timeout-" + dedup)
+            self.notify("timeout", key, group, "request_deadline", event_id="timeout-" + request["request_id"])
             return private_error(503, "request_deadline")
         finally:
             self.active -= 1
 
-    @asynccontextmanager
-    async def _admission(self, key):
-        # Serialize lookup-to-enqueue for this key; other keys can perform I/O concurrently.
-        entry = self.admissions.get(key)
-        if entry is None:
-            entry = self.admissions[key] = [asyncio.Lock(), 0]
-        entry[1] += 1
-        try:
-            async with entry[0]:
-                yield
-        finally:
-            entry[1] -= 1
-            if not entry[1]:
-                del self.admissions[key]
-
     async def _submit(self, request, fingerprint, deadline):
         key, group = request["external_task_id"], request["page_group_id"]
-        async with self._admission(key):
-            if request.get("external_batch_id"):
-                try:
-                    legacy = await asyncio.to_thread(self.store.lookup, request["external_batch_id"], fingerprint)
-                except Exception as exc:
-                    self.notify("persistence", key, group, "receipt_lookup_failed")
-                    log("v2_lookup_failed", category=type(exc).__name__)
-                    return private_error(503, "receipt_unavailable")
-                if legacy is not None and legacy[0] == 200:
-                    request["legacy_receipt"] = True
-                    return legacy
-            job = self.pending.get(key)
-            if job is not None:
-                if job.fingerprint != fingerprint:
-                    notice = self.notify("request_conflict", key, group, "idempotency_conflict")
-                    await self._wait_key_notices([notice],deadline)
-                    return private_error(409, "idempotency_conflict")
-                job.deadline = max(job.deadline, deadline)
-            else:
-                try:
-                    cached = await asyncio.to_thread(self.store.lookup, key, fingerprint)
-                except Exception as exc:
-                    self.notify("persistence", key, group, "receipt_lookup_failed")
-                    log("v2_lookup_failed", category=type(exc).__name__)
-                    return private_error(503, "receipt_unavailable")
-                if cached is not None:
-                    if cached[0] == 409:
-                        notice = self.notify("request_conflict", key, group, "idempotency_conflict")
-                        await self._wait_key_notices([notice],deadline)
-                    return cached
-                if time.monotonic() >= deadline:
-                    return private_error(503, "request_deadline")
-                if self.closed or len(self.pending) >= self.queue_limit:
-                    self.notify("saturation", key, group, "queue_full")
-                    return private_error(503, "queue_full")
-                future = asyncio.get_running_loop().create_future()
-                job = Request(request, fingerprint, deadline, future)
-                self.pending[key] = job
-                self.incoming.put_nowait(job)
-        # A timed out caller cannot cancel another caller or an in-flight durable save.
+        if time.monotonic() >= deadline:
+            return private_error(503, "request_deadline")
+        if self.closed or len(self.pending) >= self.queue_limit:
+            self.notify("saturation", key, group, "queue_full")
+            return private_error(503, "queue_full")
+        future = asyncio.get_running_loop().create_future()
+        job = Request(request, fingerprint, deadline, future)
+        self.pending[id(job)] = job
+        self.incoming.put_nowait(job)
+        # Finish an accepted computation or audit write even if its caller disconnects.
         return await asyncio.shield(job.future)
 
     async def _dispatch(self):
@@ -396,9 +289,7 @@ class Assignment:
     def _done(self, job, result):
         if not job.future.done():
             job.future.set_result(result)
-        key = job.payload["external_task_id"]
-        if self.pending.get(key) is job:
-            self.pending.pop(key)
+        self.pending.pop(id(job), None)
 
     async def _group(self, jobs):
         try:
@@ -415,10 +306,10 @@ class Assignment:
                     return
                 payloads = [job.payload for job in fresh]
                 deadline = max(job.deadline for job in fresh)
-                answers = await self._select_pairs(payloads, deadline)
+                answers = await self._select(payloads, deadline)
                 if len(answers) != len(fresh):
                     raise RuntimeError("selection_count_mismatch")
-            results = await asyncio.gather(*(self._finish(job, result, deadline)
+            results = await asyncio.gather(*(self._finish(job, result)
                                              for job, result in zip(fresh, answers)),
                                            return_exceptions=True)
             for job, result in zip(fresh, results):
@@ -435,7 +326,7 @@ class Assignment:
                         "selection_unavailable")
             self._done(job, private_error(503, "selection_unavailable"))
 
-    async def _finish(self, job, answer, compute_deadline):
+    async def _finish(self, job, answer):
         status, selection = answer
         key, group = job.payload["external_task_id"], job.payload["page_group_id"]
         now = time.monotonic()
@@ -444,41 +335,26 @@ class Assignment:
             self._done(job, private_error(503, "request_deadline"))
             return
         if status != 200:
-            if (not self.closed and status == 503 and job.deadline > compute_deadline
-                    and (now >= compute_deadline or selection == "selection_deadline")):
-                # A same-key retry extended the budget after the read-only worker
-                # started. No save was attempted; one new calculation serves all waiters.
-                self.incoming.put_nowait(job)
-                return
-            if status == 403 or (status == 409 and selection == "queue_drama_pool_conflict"):
-                notice = self.notify("pool_authorization", job.payload.get("external_batch_id",key), group, str(selection))
+            if status == 403:
+                notice = self.notify("pool_authorization", key, group, str(selection))
                 await self._wait_key_notices([notice],job.deadline)
             else:
                 self.notify("page_source", key, group, str(selection))
             self._done(job, private_error(status, str(selection)))
             return
         try:
-            if job.payload.get("external_batch_id"):
-                selection = dict(selection, snapshot=dict(selection["snapshot"],
-                                  external_batch_id=job.payload["external_batch_id"]))
-            status_body = await asyncio.to_thread(self.store.save, key, job.fingerprint, group,
-                                                  job.payload["drama_ids"], selection,
-                                                  job.payload.get("external_batch_id"))
+            selection = dict(selection, snapshot=dict(selection["snapshot"], request_id=job.payload["request_id"]))
+            status_body = await asyncio.to_thread(self.store.record, key, job.fingerprint, group,
+                                                  job.payload["drama_ids"], selection)
         except Exception as exc:
             log("v2_receipt_failure", category=type(exc).__name__)
             self.notify("persistence", key, group, "receipt_save_failed")
             self._done(job, private_error(503, "receipt_unavailable"))
             return
         if status_body[0] == 200:
-            if job.payload.get("external_batch_id"):
-                log("v2_batch_shard_saved", external_task_id=job.payload["external_batch_id"],
-                    subbatch_key=key, task_id=status_body[1].get("task_id"))
+            log("v2_selection_recorded", external_task_id=key, request_id=job.payload["request_id"],
+                task_id=status_body[1].get("task_id"))
             self.recover("page_source", "persistence", "timeout", "saturation")
-        elif status_body[0] == 409:
-            code = status_body[1].get("error","idempotency_conflict")
-            kind = "pool_authorization" if code == "queue_drama_pool_conflict" else "request_conflict"
-            notice = self.notify(kind, job.payload.get("external_batch_id",key), group, code)
-            await self._wait_key_notices([notice],job.deadline)
         self._done(job, status_body)
 
     async def close(self):

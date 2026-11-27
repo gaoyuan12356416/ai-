@@ -102,7 +102,7 @@ class NamedQA(unittest.TestCase):
         qa.budget_status=lambda:{"roles":{"read":4,"write":1},"in_use":5}
         qa.foreground_busy=lambda:True
         state=Store(self.root/"state")
-        state.save("native:91::qa.test","abc",62,["d"],{"snapshot":{"candidates":[["1"]]},
+        state.record("native:91::qa.test","abc",62,["d"],{"snapshot":{"candidates":[["1"]]},
                    "rows":[{"drama_id":"d","page_id":"1","selection_stage":"language_profile"}]})
         Workers(state,sink=qa).flush(state.claim())
         self.assertEqual(state.status()["pending"],0)
@@ -143,7 +143,7 @@ class NamedQA(unittest.TestCase):
         qa=QATable(self.root,name,base.connection).prepare()
         try:
             state=Store(self.root/"state")
-            state.save("native:11::qa.real","valid",24,["d"],{"snapshot":{},
+            state.record("native:11::qa.real","valid",24,["d"],{"snapshot":{},
                        "rows":[{"drama_id":"d","page_id":None,"error_code":"drama_profile_missing"}]})
             Workers(state,sink=qa).flush(state.claim())
             self.assertEqual(state.status()["pending"],0)

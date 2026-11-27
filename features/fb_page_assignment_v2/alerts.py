@@ -298,8 +298,8 @@ def text_for(payload):
         lines.append("子批 %s，Page 池 %s，原因：%s" % (
             external, example["page_group_id"] or "未知",
             chinese_code(example["detail"], REASON_ZH, "未识别的异常，请核查服务日志")))
-    if payload["reason"] == "idempotency_conflict" and payload["mode"] in ("first", "summary"):
-        lines.append("处理建议：核对原队列 ID 和 Page 池；当前接口按队列 ID＋剧 ID 排重，同一队列的分片和重试沿用原队列 ID，已保存的 Page 决定会复用。历史告警需以实际成功重试核对恢复。")
+    if payload["reason"] in ("idempotency_conflict", "queue_drama_pool_conflict") and payload["mode"] in ("first", "summary"):
+        lines.append("处理说明：当前接口已取消任务查重，每次请求都会重新筛选 Page；此类历史冲突保留供核对，后续以实际执行结果判断恢复。")
     return "\n".join(lines)
 
 

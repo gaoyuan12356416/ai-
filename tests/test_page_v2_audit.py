@@ -1,4 +1,5 @@
 import concurrent.futures
+import json
 from contextlib import closing
 from http.server import ThreadingHTTPServer
 import os
@@ -28,18 +29,23 @@ class Receipts(unittest.TestCase):
                                 {"drama_id": "abc", "page_id": None, "error_code": "no_profile_match"}]}
 
     def save(self, key="s1", fp="f1"):
-        return self.store.save(key, fp, 62, ["abc", "abc"], self.select)
+        return self.store.record(key, fp, 62, ["abc", "abc"], self.select)
 
-    def test_parallel_retry_conflict_and_order(self):
+    def read_receipt(self, answer, store=None):
+        with (store or self.store).db() as db:
+            return 200,json.loads(db.execute("SELECT response FROM assignment WHERE task_id=?",
+                                             (answer[1]["task_id"],)).fetchone()[0])
+
+    def test_parallel_calls_append_independent_receipts_and_preserve_order(self):
         with concurrent.futures.ThreadPoolExecutor(10) as e:
             observations = list(e.map(lambda _: self.save(), range(30)))
-        self.assertEqual(len({o[1]["task_id"] for o in observations}), 1)
+        self.assertEqual(len({o[1]["task_id"] for o in observations}), 30)
         response = observations[0][1]
         self.assertEqual(response["results"], [{"drama_id": "abc", "page_id": "9"},
                                                {"drama_id": "abc", "page_id": None}])
-        self.assertEqual(self.store.status()["pending"], 1)
-        self.assertEqual(self.save(fp="changed")[0], 409)
-        self.assertEqual(Store(self.root / "hk").lookup("s1", "f1"), observations[0])
+        self.assertEqual(self.store.status()["pending"], 30)
+        self.assertEqual(self.save(fp="changed")[0], 200)
+        self.assertEqual(self.read_receipt(observations[0],Store(self.root / "hk")), observations[0])
 
     def test_batch_and_shared_snapshot_confirm_and_retire(self):
         for k in range(4):
@@ -60,28 +66,27 @@ class Receipts(unittest.TestCase):
             self.assertEqual(r.execute("SELECT count(*) FROM audit").fetchone()[0], 16)
         self.assertEqual(self.store.status()["pending"], 0)
 
-    def test_queue_drama_unique_decisions_survive_concurrent_saves_and_audit_cleanup(self):
+    def test_each_execution_is_audited_with_original_queue_after_cleanup(self):
         def save_slice(n):
             selection={"snapshot":{},"rows":[{"drama_id":"abc","page_id":str(n)},
                                                {"drama_id":"abc","page_id":str(n+100)},
                                                {"drama_id":"null","page_id":None}]}
-            return self.store.save("slice-"+str(n),str(n),62,["abc","abc","null"],selection,"queue-1")
+            return self.store.record("queue-1",str(n),62,["abc","abc","null"],selection)
         with concurrent.futures.ThreadPoolExecutor(8) as e:
             responses=list(e.map(save_slice,range(12)))
         self.assertTrue(all(status==200 for status,_ in responses))
         pages={r["page_id"] for _,body in responses for r in body["results"] if r["drama_id"]=="abc"}
-        self.assertEqual(len(pages),1)
+        self.assertEqual(len(pages),24)
         Workers(self.store,sink=self.sink).flush(self.store.claim())
         self.assertEqual(self.store.status()["pending"],0)
         reopened=Store(self.root/"hk")
-        pairs=reopened.queue_rows("queue-1",["abc","null"])
-        self.assertEqual({pairs["abc"]["row"]["page_id"]},pages)
-        self.assertIsNone(pairs["null"]["row"]["page_id"])
         with reopened.db() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM queue_drama").fetchone()[0],2)
             self.assertEqual(db.execute("SELECT count(details) FROM assignment").fetchone()[0],0)
-        other=self.store.save("another","other",62,["abc","abc"],self.select,"queue-2")
-        self.assertEqual([r["page_id"] for r in other[1]["results"]],["9","9"])
+        with closing(sqlite3.connect(self.sink.db)) as db:
+            headers=db.execute("SELECT diagnostics_json FROM audit WHERE selection_stage='v2_request'").fetchall()
+            self.assertEqual(len(headers),12)
+            self.assertEqual({json.loads(r[0])["snapshot"]["external_task_id"] for r in headers},{"queue-1"})
+        self.assertEqual(self.read_receipt(responses[0],reopened),responses[0])
 
     def test_persisted_incidents_can_recover_after_restart(self):
         self.store.incident("page_source", "t", 62, "lookup_failed")
@@ -100,7 +105,7 @@ class Receipts(unittest.TestCase):
                 raise ConnectionError("lost ack")
         Workers(self.store, sink=Lost()).flush(self.store.claim())
         self.assertEqual(self.store.status()["failed"], 1)
-        self.assertEqual(self.store.lookup("s1", "f1"), result)
+        self.assertEqual(self.read_receipt(result), result)
         with self.store.db(True) as c:
             self.assertIsNotNone(c.execute("SELECT details FROM assignment").fetchone()[0])
             self.assertIsNotNone(c.execute("SELECT packed FROM candidate_snapshot").fetchone()[0])
@@ -124,7 +129,7 @@ class Receipts(unittest.TestCase):
         with self.store.db() as c:
             marks = dict(c.execute("SELECT task_id,receipt IS NOT NULL FROM assignment"))
             self.assertEqual(marks,{a[1]["task_id"]:0,b[1]["task_id"]:1})
-        self.assertEqual(self.store.lookup("two", "f1"), b)
+        self.assertEqual(self.read_receipt(b), b)
 
     def test_disk_failure_can_notify_the_independent_receiver(self):
         class BrokenStore:
@@ -143,7 +148,7 @@ class Receipts(unittest.TestCase):
         result=self.save()
         Workers(self.store,sink=sink).flush(self.store.claim())
         self.assertEqual(self.store.status()["pending"],0)
-        self.assertEqual(self.store.lookup("s1","f1"),result)
+        self.assertEqual(self.read_receipt(result),result)
 
 
 class Incidents(unittest.TestCase):
@@ -167,7 +172,7 @@ class Incidents(unittest.TestCase):
         self.assertEqual(text.count("同一子批标识已用于不同的 Page 池或剧目列表"), 2)
         self.assertIn("子批 3092716，Page 池 24", text)
         self.assertIn("本次新增异常 1 次，新增受影响子批 1 个", text)
-        self.assertIn("按队列 ID＋剧 ID 排重", text)
+        self.assertIn("取消任务查重", text)
         self.assertNotIn("idempotency_conflict", text)
         self.assertEqual(payload["reason"], "idempotency_conflict")
         payload["mode"] = "recovered"
