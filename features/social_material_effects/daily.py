@@ -5,6 +5,7 @@ Publication dates only establish when a counter can start at zero; they are not
 the report's date filter. A material with no evidence on a day is not a data row.
 """
 from datetime import date, datetime, timedelta, timezone
+import json
 from . import data, window
 
 COUNTERS = (*window.COUNTERS, 'reposts', 'quotes', 'bookmarks')
@@ -40,6 +41,15 @@ def source(db, channel, conditions, args, start, end, details):
         return dict(available=False, first=None, last=None)
     first_counter, last_counter = db.execute(f'SELECT MIN(day),MAX(day) FROM {channel}.counter_day').fetchone()
     first_income, last_income = db.execute(f'SELECT MIN(start),MAX(end) FROM {channel}.income_scope').fetchone()
+    meta = json.loads(db.execute(f'SELECT value FROM {channel}.metadata').fetchone()[0])
+    generated = window.instant(meta.get('generated_at'))
+    retained_from = (generated.astimezone(window.BJ).date()-timedelta(days=32)).isoformat() if generated else None
+    # The sparse rows are pruned on projection publication. A stale upstream
+    # income scope must not turn pruned history into verified zero income.
+    if first_income and retained_from:
+        first_income = max(first_income, retained_from)
+    if first_income and first_income > last_income:
+        first_income = last_income = None
     firsts, lasts = [s for s in (first_counter, first_income) if s], [s for s in (last_counter, last_income) if s]
     info = dict(available=True, first=min(firsts) if firsts else None, last=max(lasts) if lasts else None)
     if not firsts or max(start, info['first']) > min(end, info['last']):
@@ -60,7 +70,7 @@ def source(db, channel, conditions, args, start, end, details):
                'WHERE j.value BETWEEN ? AND ?', (first, last))
     db.execute('CREATE INDEX income_gap_key ON income_gaps(post_id,day)')
     # Sparse income rows mean zero only inside the verified coverage scope.
-    income_known = 's.start<=d.data_date AND s.end>=d.data_date AND g.post_id IS NULL'
+    income_known = 's.start<=d.data_date AND s.end>=d.data_date AND d.income_first<=d.data_date AND g.post_id IS NULL'
     facts = [f"'{channel}' AS channel", 'd.data_date']
     facts += ['a.metrics_at AS metrics_at' if f == 'metrics_at' else 'p.'+f for f in data.FIELDS]
     facts += ['p.account_ids', '(a.post_id IS NOT NULL OR i.post_id IS NOT NULL OR ('+income_known+')) AS has_data']
@@ -72,7 +82,7 @@ def source(db, channel, conditions, args, start, end, details):
             facts.append(f'CASE WHEN {income_known} THEN COALESCE(i.revenue_cents,0) END AS revenue_cents')
         else:
             facts.append('NULL AS '+metric)
-    daily = ('WITH d AS (SELECT ? AS data_date,? AS previous_date), facts AS (SELECT '+','.join(facts)+
+    daily = ('WITH d AS (SELECT ? AS data_date,? AS previous_date,? AS income_first), facts AS (SELECT '+','.join(facts)+
              ' FROM selected_posts p CROSS JOIN d LEFT JOIN samples a ON a.post_id=p.post_id AND a.day=d.data_date '
              'LEFT JOIN samples b ON b.post_id=p.post_id AND b.day=d.previous_date '
              f'LEFT JOIN {channel}.income_scope s ON s.post_id=p.post_id '
@@ -97,7 +107,7 @@ def source(db, channel, conditions, args, start, end, details):
     current = date.fromisoformat(first)
     while current.isoformat() <= last:
         db.execute('INSERT INTO daily_result('+','.join(names)+') '+daily+result,
-                   (current.isoformat(), (current-timedelta(days=1)).isoformat()))
+                   (current.isoformat(), (current-timedelta(days=1)).isoformat(), retained_from))
         current += timedelta(days=1)
     for table in ('income_gaps', 'samples', 'selected_posts'):
         db.execute('DROP TABLE '+table)

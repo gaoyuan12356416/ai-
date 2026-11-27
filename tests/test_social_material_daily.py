@@ -141,6 +141,15 @@ class DailyReportTest(unittest.TestCase):
         self.assertFalse(result['meta']['dates']['availability']['x']['available'])
         self.assertEqual((result['total'],result['summary']['views']),(1,20))
 
+    def test_retention_does_not_turn_pruned_income_into_zero(self):
+        self.publish('2026-11-26',[post(_window_income=dict(start='2026-10-01',end='2026-11-26',missing=[],
+                                    daily={'2026-10-01':9000,'2026-11-26':100}))])
+        old = self.query(start='2026-10-01',end='2026-10-01')
+        self.assertEqual(old['total'],0)
+        self.assertIsNone(old['summary']['revenue_cents'])
+        current = self.query(start='2026-11-26')
+        self.assertEqual(current['summary']['revenue_cents'],100)
+
 
 if __name__ == '__main__':
     unittest.main()
