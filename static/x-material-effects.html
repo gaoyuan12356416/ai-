@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/youtube-publish.css?v=20260917-player-badges-v1">
   <link rel="stylesheet" href="/ui-topbar.css?v=20260903-1">
   <link rel="stylesheet" href="/social-analytics.css?v=20261020-facebook-v2">
-  <link rel="stylesheet" href="/x-material-effects.css?v=70f9da826db2">
+  <link rel="stylesheet" href="/x-material-effects.css?v=20261127-daily1">
 </head>
 <body>
   <div class="app">
@@ -17,7 +17,7 @@
     </aside>
     <main class="main analytics-main">
       <header class="topbar">
-        <div><h1>社媒素材效果</h1><p>按渠道查看 X 和 Facebook 的素材表现，点击素材查看帖子明细。</p></div>
+        <div><h1>社媒素材效果</h1><p>按数据日期查看 X 和 Facebook 的素材每日表现，点击素材查看当天帖子明细。</p></div>
         <div class="toolbar">
           <div class="user-card" id="userCard"></div>
           <button type="button" class="btn btn-secondary" id="authButton">登录</button>
@@ -31,12 +31,17 @@
         <label>产品<input name="product" placeholder="全部产品" size="14"></label>
         <label>语言<input name="language" placeholder="全部语言" size="10"></label>
         <label>账号 ID<input name="account_id" placeholder="全部账号" size="12"></label>
-        <label>发布开始日期<input type="date" name="start"></label>
-        <label>发布结束日期<input type="date" name="end"></label>
+        <label>数据开始日期<input type="date" name="start" required></label>
+        <label>数据结束日期<input type="date" name="end" required></label>
+        <div class="date-presets" aria-label="数据日期快捷选择">
+          <button class="btn btn-secondary btn-sm" type="button" data-days="1">昨日</button>
+          <button class="btn btn-secondary btn-sm" type="button" data-days="7">近 7 天</button>
+          <button class="btn btn-secondary btn-sm" type="button" data-days="30">近 30 天</button>
+        </div>
         <button class="btn btn-primary" type="submit">查询</button>
         <button class="btn btn-secondary" type="reset">重置</button>
       </form>
-      <p class="scope-strip">按北京时间筛选帖子发布日期。指标为所选帖子的最新累计值。X 浏览为曝光，分享为转发加引用。Facebook 浏览为媒体浏览，分享取自帖子。收入按完整 UTC 日期的可归因金额统计。</p>
+      <p class="scope-strip">按数据日期筛选，每行是某天、某渠道、某素材的新增数据，包含旧帖子在当天的表现。浏览与互动按北京时间的每日最后一次采样差额计算，采样时点会影响精度；收入沿用来源的 UTC 数据日期。缺少相邻日期快照的互动显示“—”，不会用累计值代替。X 浏览为曝光，Facebook 浏览为媒体浏览。</p>
       <div id="notice" class="analytics-message warning hidden" role="status" aria-live="polite"></div>
       <div class="kpi-grid effects-summary" id="summary"></div>
       <section class="analytics-panel" aria-label="素材效果明细">
@@ -44,17 +49,18 @@
         <div class="analytics-table-scroll" tabindex="0" aria-label="素材效果表格">
           <table class="analytics-table">
             <thead><tr>
+              <th scope="col" aria-sort="descending"><button type="button" data-sort="data_date" class="sorted">数据日期</button></th>
               <th scope="col" class="plain-heading">渠道</th>
               <th scope="col" class="plain-heading">素材／剧目</th>
-              <th scope="col"><button type="button" data-sort="post_count">发布数</button></th>
+              <th scope="col"><button type="button" data-sort="post_count">关联帖子数</button></th>
               <th scope="col"><button type="button" data-sort="account_count">账号数</button></th>
-              <th scope="col" aria-sort="descending"><button type="button" data-sort="views" class="sorted">浏览量</button></th>
+              <th scope="col"><button type="button" data-sort="views">新增浏览量</button></th>
               <th scope="col"><button type="button" data-sort="likes">点赞</button></th>
               <th scope="col"><button type="button" data-sort="comments">评论</button></th>
               <th scope="col"><button type="button" data-sort="shares">分享</button></th>
               <th scope="col"><button type="button" data-sort="bookmarks">收藏</button></th>
               <th scope="col"><button type="button" data-sort="revenue_cents">收入 USD</button></th>
-              <th scope="col" class="plain-heading">采集时间</th>
+              <th scope="col" class="plain-heading">当日互动采样</th>
             </tr></thead>
             <tbody id="rows"></tbody>
           </table>
@@ -72,6 +78,6 @@
   </div>
   <script src="/quick-nav.js?v=20261126-material-channels"></script>
   <script src="/ui-topbar.js?v=db2d3427364e"></script>
-  <script src="/x-material-effects.js?v=20261126-channels1"></script>
+  <script src="/x-material-effects.js?v=20261127-daily1"></script>
 </body>
 </html>

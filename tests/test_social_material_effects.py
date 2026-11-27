@@ -33,22 +33,26 @@ class ChannelEffectsTest(unittest.TestCase):
                     published_at='2026-11-19T16:00:00Z',metrics_at='2026-11-25T15:00:00Z',
                     _window_income=dict(start='2026-11-19',end='2026-11-25',missing=[],daily={'2026-11-25':50}),
                     views=0,revenue_cents=50,owner='u',tenant='t')
+        for ch in ('x','facebook'):
+            data.publish(self.root,ch,[dict(post,views=0,metrics_at='2026-11-24T15:00:00Z')],meta)
         data.publish(self.root,'x',[dict(post,account_ids=['2','4'],views=3)],meta)
         data.publish(self.root,'facebook',[dict(post,views=110),dict(post,post_id='3',views=None,owner='v'),
                      dict(post,post_id='2',material_id='8',content_id='D2',views=1),
                      dict(post,post_id='4',material_id='11',product='Other',views=1000)],meta)
 
     def test_report_separates_same_material_and_post_ids(self):
-        result = report.query({'q':['7']},self.admin,self.root)
+        dates = {'start':['2026-11-25'],'end':['2026-11-25']}
+        result = report.query(dict(dates,q=['7'],sort=['views']),self.admin,self.root)
         self.assertEqual((result['post_count'],result['total'],result['summary']['views']),(3,2,113))
         fb,x = result['items']
         self.assertEqual((fb['channel'],fb['views'],fb['known']['views'],fb['coverage']['views']),('facebook',None,110,1))
         self.assertEqual((x['channel'],x['account_count']),('x',2))
-        self.assertEqual(report.query({'channel':['x'],'account_id':['4']},self.admin,self.root)['post_count'],1)
-        self.assertEqual(report.query({'channel':['facebook'],'q':['7'],'end':['2026-11-19']},self.admin,self.root)['total'],0)
+        self.assertEqual(report.query(dict(dates,channel=['x'],account_id=['4']),self.admin,self.root)['post_count'],1)
+        self.assertEqual(report.query({'channel':['facebook'],'q':['7'],'end':['2026-11-18']},self.admin,self.root)['total'],0)
 
     def test_facebook_details_owner_tenant_paging(self):
-        params={'view':['posts'],'channel':['facebook'],'material_id':['7'],'page_size':['1']}
+        params={'view':['posts'],'channel':['facebook'],'material_id':['7'],'page_size':['1'],
+                'start':['2026-11-25'],'end':['2026-11-25']}
         user={'role':'user','user_id':'u','tenant_key':'t'}
         rows=report.query(params,user,self.root)
         self.assertEqual(rows['total'],1)
@@ -115,7 +119,7 @@ class ChannelEffectsTest(unittest.TestCase):
 
     def test_one_missing_channel_leaves_other_report_available(self):
         (self.root/'facebook.sqlite3').unlink()
-        result=report.query({},self.admin,self.root)
+        result=report.query({'start':['2026-11-25'],'end':['2026-11-25']},self.admin,self.root)
         self.assertEqual(result['meta']['unavailable_channels'],['facebook'])
         self.assertEqual(result['post_count'],1)
         with self.assertRaises(OSError):

@@ -46,7 +46,7 @@ def prepare(db, previous, generated_at):
 
 
 def record(db, post, cutoff):
-    for metric in COUNTERS:
+    for metric in (*COUNTERS, 'reposts', 'quotes', 'bookmarks'):
         value = post.get(metric)
         stamp = (post.get('_metric_times') or {}).get(metric, post.get('metrics_at'))
         seen = instant(stamp)
