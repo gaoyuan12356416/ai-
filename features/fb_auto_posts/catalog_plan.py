@@ -327,7 +327,7 @@ def snapshots(repo, config, scopes):
         limit = min(repo.candidate_limit, config.get('_candidate_limit', repo.candidate_limit))
         per_drama = min(limit, 20) if config.get('drama_cooldown_hours') else limit
         from features.social_material_effects.selection import facebook_rules
-        social_by_lang = {lang:facebook_rules(config,lang) for lang in cat.languages}
+        social_by_lang = {lang:facebook_rules(config,lang,now=now) for lang in cat.languages}
         social_material_sort = rule['sort_by'].startswith('x_')
         scores = {None:(True,0) if social_material_sort else rank(zero,rule)}
         eligible_zero = matches(zero, rule)

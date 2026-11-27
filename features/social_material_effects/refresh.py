@@ -4,14 +4,26 @@ from contextlib import closing
 import fcntl
 import json
 import os
+import sqlite3
 from . import data, facebook
 
 
 def project_x(root):
-    from features.x_material_effects import store
+    from features.x_material_effects import store, collector
     meta, path = store.current()
     with closing(store.connect(path)) as db:
-        posts = (json.loads(row[0]) for row in db.execute('SELECT payload FROM posts'))
+        posts = [json.loads(row[0]) for row in db.execute('SELECT payload FROM posts')]
+        # Read already verified local daily income; no platform requests here.
+        copies = [dict(p) for p in posts]
+        try:
+            income = collector.revenue(copies,facebook.WAREHOUSE,daily=True)
+        except (OSError,sqlite3.Error,ValueError) as exc:
+            meta = dict(meta,window_income_error=type(exc).__name__)
+        else:
+            for post, enriched in zip(posts,copies):
+                if '_window_income' in enriched:
+                    post['_window_income'] = enriched['_window_income']
+            meta = dict(meta,window_income_version=income['revenue_source_version'])
         return data.publish(root,'x',posts,meta)
 
 

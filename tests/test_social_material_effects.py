@@ -1,5 +1,6 @@
 from contextlib import closing
 from decimal import Decimal
+from datetime import datetime,timezone
 import os
 import json
 from pathlib import Path
@@ -29,7 +30,9 @@ class ChannelEffectsTest(unittest.TestCase):
         meta = dict(version='fixture',generated_at=now,revenue_source_generated_at=now,revenue_through='2026-11-25')
         post = dict(post_id='1',material_id='7',namespace='ads_custom_source',material_name='M',catalog='dramawave',
                     content_id='D1',drama_name='D',product='Dramawave',language='en',account_id='2',
-                    published_at='2026-11-19T16:00:00Z',views=0,revenue_cents=50,owner='u',tenant='t')
+                    published_at='2026-11-19T16:00:00Z',metrics_at='2026-11-25T15:00:00Z',
+                    _window_income=dict(start='2026-11-19',end='2026-11-25',missing=[],daily={'2026-11-25':50}),
+                    views=0,revenue_cents=50,owner='u',tenant='t')
         data.publish(self.root,'x',[dict(post,account_ids=['2','4'],views=3)],meta)
         data.publish(self.root,'facebook',[dict(post,views=110),dict(post,post_id='3',views=None,owner='v'),
                      dict(post,post_id='2',material_id='8',content_id='D2',views=1),
@@ -58,7 +61,7 @@ class ChannelEffectsTest(unittest.TestCase):
         cfg['drama_rule'].update(effect_channel='x',x_views_min='3')
         cfg['material_rule'].update(effect_channel='all',x_views_min='113',sort_by='x_revenue')
         config=normalize_template_payload(cfg)
-        rules=selection.facebook_rules(config,'en')
+        rules=selection.facebook_rules(config,'en',now=datetime(2026,11,26,tzinfo=timezone.utc))
         self.assertTrue(rules.matches('drama','D1'))
         self.assertFalse(rules.matches('drama','D2'))
         self.assertTrue(rules.matches('material','D1','7'))
@@ -66,7 +69,7 @@ class ChannelEffectsTest(unittest.TestCase):
         self.assertFalse(rules.matches('material','D2','7'))
         self.assertEqual(rules.audit('D1','7')['material']['facts']['coverage']['views'],2)
         cfg['material_rule']['x_views_max']='120'
-        self.assertFalse(selection.facebook_rules(normalize_template_payload(cfg),'en').matches('material','D1','7'))
+        self.assertFalse(selection.facebook_rules(normalize_template_payload(cfg),'en',now=datetime(2026,11,26,tzinfo=timezone.utc)).matches('material','D1','7'))
         cfg['material_rule']['effect_channel']='tiktok'
         with self.assertRaises(ValidationError):
             normalize_template_payload(cfg)
@@ -149,6 +152,8 @@ class ChannelEffectsTest(unittest.TestCase):
         self.assertEqual(result['assigned_revenue_cents'],240)
         self.assertEqual(result['unassigned_revenue_cents'],240)
         self.assertEqual(result['revenue_incomplete_sites'],[])
+        self.assertEqual(posts['2_101']['_window_income']['daily'],{'2026-11-19':120})
+        self.assertEqual(posts['2_102']['_window_income']['daily'],{'2026-11-20':120})
 
 
 if __name__=='__main__':

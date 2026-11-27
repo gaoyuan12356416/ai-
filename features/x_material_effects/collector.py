@@ -99,7 +99,7 @@ def enrich(posts,reader):
         elif post['namespace']=='drama_episode':
             post.update(product='Dramawave',catalog='dramawave')
 
-def revenue(posts,warehouse_root):
+def revenue(posts,warehouse_root,*,daily=False):
     from features.social_analytics.warehouse_reader import current,connect
     from features.social_analytics.report import campaign_index,resolve
     from features.social_analytics.backend_scope import eligible
@@ -126,6 +126,9 @@ def revenue(posts,warehouse_root):
         facts={str(f['id']).rsplit(':',1)[-1] for row in index[key] for f in row.get('publications',[])}
         if pid not in facts:continue
         p.update(revenue_cents=0,refund_cents=0,revenue_status='matched')
+        if daily:
+            start=max(meta['start'],(datetime.fromisoformat(end)-timedelta(days=31)).date().isoformat())
+            p['_window_income']=dict(start=start,end=end,missing=[],daily={})
     seen=set()
     for effect in effects:
         campaign=str(effect['campaign_id']);key=('x',str(effect['site_id']),campaign)
@@ -137,6 +140,9 @@ def revenue(posts,warehouse_root):
         if not p or p['revenue_status']!='matched' or not any(eligible(r,effect['date']) for r in index.get(key,[])):
             unassigned+=cents;continue
         p['revenue_cents']+=cents;p['refund_cents']+=int(effect['refund_cents']);assigned+=cents
+        if daily and effect['date']>=p['_window_income']['start']:
+            totals=p['_window_income']['daily']
+            totals[effect['date']]=totals.get(effect['date'],0)+cents
     if assigned!=sum(p['revenue_cents'] or 0 for p in posts):raise ValueError('material_revenue_not_conserved')
     return dict(revenue_source_version=meta['version'],revenue_source_generated_at=meta['generated_at'],
                 revenue_through=end,revenue_timezone='UTC',currency='USD',

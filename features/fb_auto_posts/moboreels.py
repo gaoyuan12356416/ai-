@@ -157,7 +157,7 @@ def candidate_snapshot(repo, config):
     limit=max(1,min(int(config.get("_candidate_limit",getattr(repo,"candidate_limit",5000))),getattr(repo,"candidate_limit",5000)))
     deadline=repo.monotonic_fn()+repo.catalog_deadline_seconds
     from features.social_material_effects.selection import facebook_rules
-    social = facebook_rules(config,language,'moboreels')
+    social = facebook_rules(config,language,'moboreels',now=repo.now_fn())
     candidates=[]
     while True:
         if repo.monotonic_fn()>=deadline or page_count>=repo.catalog_max_pages:

@@ -152,6 +152,8 @@ def revenue(posts, warehouse_root=WAREHOUSE):
                 for site in revenue_sites(row):
                     index[('facebook',site,row['key'][0])].append(row)
         mapped = {}
+        window_mapped = {}
+        recent_start = (date.fromisoformat(end)-timedelta(days=31)).isoformat()
         for key, rows in index.items():
             row = resolve(rows)
             if not row:
@@ -174,6 +176,14 @@ def revenue(posts, warehouse_root=WAREHOUSE):
             p.update(drama_name=p['drama_name'] or row.get('drama_label'), account_username=row.get('channel_label') or '',
                      owner=row['owner'], tenant=row['tenant'])
             sites = revenue_sites(row)
+            if first_day <= end and not p.get('mobo_code'):
+                gaps = sorted({(date.fromisoformat(recent_start)+timedelta(days=i)).isoformat()
+                               for i in range(32)} - set.intersection(*(
+                                   set(meta['coverage'].get('facebook:'+site,())) for site in sites)))
+                if any((meta.get('catalog_errors') or {}).get('facebook:'+site) for site in sites):
+                    gaps = [(date.fromisoformat(recent_start)+timedelta(days=i)).isoformat() for i in range(32)]
+                p['_window_income'] = dict(start=max(recent_start,first_day),end=end,missing=gaps,daily={})
+                window_mapped[key] = (p, first_day)
             if first_day > end or any(missing[site]>=first_day for site in sites) or p.get('mobo_code'):
                 continue
             mapped[key] = (p, first_day)
@@ -184,6 +194,12 @@ def revenue(posts, warehouse_root=WAREHOUSE):
             key = ('facebook',str(fact['site_id']),str(fact['campaign_id']))
             target = mapped.get(key)
             cents = int(fact['revenue_cents'])
+            window_target = window_mapped.get(key)
+            if window_target:
+                wp, first = window_target
+                if max(first,recent_start)<=fact['date'] and (wp['account_id'],wp['material_id']) == (str(fact['adset_id']),str(fact['ad_id'])):
+                    daily = wp['_window_income']['daily']
+                    daily[fact['date']] = daily.get(fact['date'],0)+cents
             if target:
                 p, first_day = target
                 if first_day <= fact['date'] and (p['account_id'],p['material_id']) == (str(fact['adset_id']),str(fact['ad_id'])):

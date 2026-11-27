@@ -26,7 +26,9 @@
       label.append(selector);
       const note = document.createElement('p');
       note.className = 'helper';
-      note.textContent = '按所选渠道的累计表现筛选。浏览在 X 取曝光，在 Facebook 取媒体浏览。留空表示不限。';
+      note.textContent = isFB
+        ? '按指标窗口内的新增表现筛选和排序（不含今天）。互动取北京日末可用快照差额，采集时间影响精度；缺少起止快照时未知，不用累计值补齐。收入按同日期范围的 UTC 发生日汇总。留空表示不限。'
+        : '按所选渠道的累计表现筛选。浏览在 X 取曝光，在 Facebook 取媒体浏览。留空表示不限。';
       box.append(title, label, note);
       const grid = document.createElement('div');
       grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,215px),1fr));gap:10px 16px';

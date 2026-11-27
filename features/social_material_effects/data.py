@@ -56,12 +56,15 @@ def publish(root, source, posts, meta):
     target = root / (source + '.sqlite3')
     temp = root / (source + '.next')
     temp.unlink(missing_ok=True)
-    with closing(sqlite3.connect(temp)) as db:
+    with closing(sqlite3.connect(temp.resolve().as_uri(), uri=True)) as db:
         db.execute('PRAGMA journal_mode=OFF')
+        from . import window
+        cutoff = window.prepare(db, target, meta.get('generated_at'))
         db.execute('CREATE TABLE posts(' + ','.join(f + ' TEXT' for f in FIELDS)
                    + ',account_ids TEXT,' + ','.join(m + ' INTEGER' for m in METRICS) + ',PRIMARY KEY(post_id))')
         def records():
             for p in posts:
+                window.record(db, p, cutoff)
                 yield (*(str(p[f]) if p.get(f) is not None else None for f in FIELDS),
                        encoded(sorted(set(map(str, p.get('account_ids') or [p['account_id']])))),
                        *(p.get(m) for m in METRICS))
@@ -74,7 +77,7 @@ def publish(root, source, posts, meta):
         db.execute(f'CREATE TABLE rollup AS SELECT {dims},COUNT(*) AS posts,{sums} FROM posts GROUP BY {dims}')
         db.execute('CREATE INDEX lookup ON rollup(language,product COLLATE NOCASE,catalog)')
         count = db.execute('SELECT COUNT(*) FROM posts').fetchone()[0]
-        meta = dict(meta, channel=source, post_count=count)
+        meta = dict(meta, channel=source, post_count=count, window_schema=1)
         db.execute('CREATE TABLE metadata(value TEXT NOT NULL)')
         db.execute('INSERT INTO metadata VALUES(?)', (encoded(meta),))
         db.commit()

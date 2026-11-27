@@ -179,6 +179,9 @@ def collect(db,posts,history,graph,reader,usage,max_posts,now):
                     values = json.loads(old[2]) if old else {}
                     had_engagement = engage(values)
                     fresh = samples.get(key,{})
+                    times = values.setdefault('_times',{k:old[3] if old else None
+                        for k in ('views','likes','comments','shares') if k in values})
+                    times.update((k,stamp) for k in fresh)
                     if 'views' in fresh:
                         values['_views_at'] = stamp
                     elif 'views' in values and '_views_at' not in values and old:
@@ -224,8 +227,12 @@ def apply_cached(db,posts):
             continue
         values = json.loads(metrics)
         view_stamp = values.pop('_views_at',stamp)
+        times = values.pop('_times',None) or {k:stamp for k in values if k in ('views','likes','comments','shares')}
+        times['views'] = view_stamp
         if p.get('views') is not None and (p.get('metrics_at') or '')>(view_stamp or ''):
             values.pop('views',None)
+            times['views'] = p.get('metrics_at')
+        p['_metric_times'] = times
         p.update(values)
         p['metrics_at'] = max(filter(None,(stamp,p.get('metrics_at'))),default=None)
         if native:

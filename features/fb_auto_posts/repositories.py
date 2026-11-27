@@ -533,7 +533,7 @@ class MaterialRepository:
         )
         language = str(config["language"])
         from features.social_material_effects.selection import facebook_rules
-        social = facebook_rules(config,language)
+        social = facebook_rules(config,language,now=self.now_fn())
         from features.hit_publish import POLICY
         hit = config.get('hit_drama_publish') or {}
         window_lookup = config.get('_window_metadata')
