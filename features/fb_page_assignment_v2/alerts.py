@@ -36,11 +36,12 @@ KIND_ZH = {
 }
 REASON_ZH = {
     "idempotency_conflict": "同一子批标识已用于不同的 Page 池或剧目列表（包括顺序、数量）",
+    "queue_drama_pool_conflict": "同一队列中的该剧已绑定其他 Page 池，请核对队列号和 Page 池",
     "unauthorized": "接口身份认证未通过",
     "body_too_large": "请求正文超过大小限制",
     "invalid_json": "请求正文不是有效的 JSON",
     "body_must_be_object": "请求正文必须是对象",
-    "external_task_id_required_1_to_128_characters": "缺少有效子批标识，长度需为 1 至 128 个字符",
+    "external_task_id_required_1_to_128_characters": "缺少有效队列 ID，长度需为 1 至 128 个字符",
     "drama_ids_required_1_to_100_items": "剧目列表需包含 1 至 100 个条目",
     "drama_id_must_be_nonblank_string_at_most_128_characters": "剧目 ID 需为非空字符串，且不超过 128 个字符",
     "request_identifier_encoding_invalid": "请求标识包含无效字符编码",
@@ -298,7 +299,7 @@ def text_for(payload):
             external, example["page_group_id"] or "未知",
             chinese_code(example["detail"], REASON_ZH, "未识别的异常，请核查服务日志")))
     if payload["reason"] == "idempotency_conflict" and payload["mode"] in ("first", "summary"):
-        lines.append("处理建议：同一子批重试时保持 Page 池和剧目列表完全一致；拆分后的不同子批使用各自固定且唯一的请求标识。")
+        lines.append("处理建议：核对原队列 ID 和 Page 池；当前接口按队列 ID＋剧 ID 排重，同一队列的分片和重试沿用原队列 ID，已保存的 Page 决定会复用。历史告警需以实际成功重试核对恢复。")
     return "\n".join(lines)
 
 

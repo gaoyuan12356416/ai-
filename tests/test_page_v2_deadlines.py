@@ -93,8 +93,6 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(entered.wait(), .5)
         later = asyncio.create_task(service.submit(request(), time.monotonic()+2))
         try:
-            conflict = await service.submit(request(group=24), time.monotonic()+.5)
-            self.assertEqual(conflict[0], 409)
             self.assertEqual((await early)[1]["error"], "request_deadline")
         finally:
             release.set()
@@ -123,13 +121,13 @@ class Deadlines(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await asyncio.to_thread(entered.wait, .6))
                 self.assertEqual((await early)[1]["error"], "request_deadline")
                 later = asyncio.create_task(service.submit(request(), time.monotonic()+1.5))
-                self.assertEqual((await service.submit(request(group=24), time.monotonic()+.5))[0], 409)
             finally:
                 release.set()
             receipt = await later
             self.assertEqual(receipt[0], 200)
             self.assertEqual(await service.submit(request(), time.monotonic()+.5), receipt)
-        self.assertEqual(calls, ["cross:1:a"])
+        self.assertEqual(len(calls),1)
+        self.assertTrue(calls[0].startswith("cross:1:a:chunk:"))
 
     async def test_malformed_worker_result_affects_only_one_request(self):
         async def compute(reqs, deadline):

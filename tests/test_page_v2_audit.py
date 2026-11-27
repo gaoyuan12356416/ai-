@@ -60,6 +60,29 @@ class Receipts(unittest.TestCase):
             self.assertEqual(r.execute("SELECT count(*) FROM audit").fetchone()[0], 16)
         self.assertEqual(self.store.status()["pending"], 0)
 
+    def test_queue_drama_unique_decisions_survive_concurrent_saves_and_audit_cleanup(self):
+        def save_slice(n):
+            selection={"snapshot":{},"rows":[{"drama_id":"abc","page_id":str(n)},
+                                               {"drama_id":"abc","page_id":str(n+100)},
+                                               {"drama_id":"null","page_id":None}]}
+            return self.store.save("slice-"+str(n),str(n),62,["abc","abc","null"],selection,"queue-1")
+        with concurrent.futures.ThreadPoolExecutor(8) as e:
+            responses=list(e.map(save_slice,range(12)))
+        self.assertTrue(all(status==200 for status,_ in responses))
+        pages={r["page_id"] for _,body in responses for r in body["results"] if r["drama_id"]=="abc"}
+        self.assertEqual(len(pages),1)
+        Workers(self.store,sink=self.sink).flush(self.store.claim())
+        self.assertEqual(self.store.status()["pending"],0)
+        reopened=Store(self.root/"hk")
+        pairs=reopened.queue_rows("queue-1",["abc","null"])
+        self.assertEqual({pairs["abc"]["row"]["page_id"]},pages)
+        self.assertIsNone(pairs["null"]["row"]["page_id"])
+        with reopened.db() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM queue_drama").fetchone()[0],2)
+            self.assertEqual(db.execute("SELECT count(details) FROM assignment").fetchone()[0],0)
+        other=self.store.save("another","other",62,["abc","abc"],self.select,"queue-2")
+        self.assertEqual([r["page_id"] for r in other[1]["results"]],["9","9"])
+
     def test_persisted_incidents_can_recover_after_restart(self):
         self.store.incident("page_source", "t", 62, "lookup_failed")
         reopened = Store(self.root / "hk")
@@ -144,7 +167,7 @@ class Incidents(unittest.TestCase):
         self.assertEqual(text.count("同一子批标识已用于不同的 Page 池或剧目列表"), 2)
         self.assertIn("子批 3092716，Page 池 24", text)
         self.assertIn("本次新增异常 1 次，新增受影响子批 1 个", text)
-        self.assertIn("拆分后的不同子批", text)
+        self.assertIn("按队列 ID＋剧 ID 排重", text)
         self.assertNotIn("idempotency_conflict", text)
         self.assertEqual(payload["reason"], "idempotency_conflict")
         payload["mode"] = "recovered"

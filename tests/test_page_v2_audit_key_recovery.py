@@ -54,7 +54,7 @@ class KeyRecovery(unittest.IsolatedAsyncioTestCase):
         for key in ("a","b","unrelated"):
             self.assertEqual((await self.post(request(key)))[0],200)
         for key in ("a","b"):
-            self.assertEqual((await self.post(request(key,drama="wrong")))[0],409)
+            await self.app.notify("request_conflict",key,62,"idempotency_conflict")
         await self.app.close()
         self.store = Store(self.root)
         self.app = await self.start()
@@ -83,7 +83,7 @@ class KeyRecovery(unittest.IsolatedAsyncioTestCase):
         self.hold=True
         original=asyncio.create_task(self.post(request("flight")))
         await asyncio.wait_for(self.started.wait(),2)
-        self.assertEqual((await self.post(request("flight",drama="bad")))[0],409)
+        await self.app.notify("request_conflict","flight",62,"idempotency_conflict")
         self.release.set()
         self.assertEqual((await original)[0],200)
         self.assertEqual(self.events("request_conflict"),[("fault","flight")])
@@ -117,7 +117,7 @@ class KeyRecovery(unittest.IsolatedAsyncioTestCase):
 
     async def test_slow_recovery_outbox_preserves_success_then_drains(self):
         await self.post(request("cached"))
-        await self.post(request("cached",drama="conflict"))
+        await self.app.notify("request_conflict","cached",62,"idempotency_conflict")
         gate=threading.Event()
         original=self.store.recover_key
         def delayed(*args,**kwargs):

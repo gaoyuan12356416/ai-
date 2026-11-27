@@ -72,6 +72,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS failure_signal(kind TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS failure_key(kind TEXT NOT NULL, external_id TEXT NOT NULL,
                     event_id TEXT NOT NULL,PRIMARY KEY(kind,external_id));
+                CREATE TABLE IF NOT EXISTS queue_drama(
+                    queue_id TEXT NOT NULL,drama_id TEXT NOT NULL,pool INTEGER NOT NULL,
+                    result TEXT NOT NULL,task_id TEXT NOT NULL,
+                    PRIMARY KEY(queue_id,drama_id));
             """)
 
     @contextmanager
@@ -103,7 +107,31 @@ class Store:
         with self.db() as db:
             return self._lookup(db, external_id, fingerprint)
 
-    def save(self, external_id, fingerprint, group, ids, selection):
+    @staticmethod
+    def _queue_rows(db, queue_id, ids):
+        wanted = set(ids)
+        marks = ",".join("?" for _ in wanted)
+        found = {}
+        for row in db.execute("SELECT drama_id,pool,result,task_id FROM queue_drama "
+                              "WHERE queue_id=? AND drama_id IN (" + marks + ")", (queue_id, *wanted)):
+            found[row["drama_id"]] = dict(pool=row["pool"],row=json.loads(row["result"]),task_id=row["task_id"])
+        # Historical decisions remain immutable. The first occurrence is the canonical pair
+        # when a previously rejected slice is retried under the new queue + drama rule.
+        if wanted - found.keys():
+            old = db.execute("SELECT pool,response,task_id FROM assignment WHERE external_id=?", (queue_id,)).fetchone()
+            if old is not None:
+                for row in json.loads(old["response"])["results"]:
+                    drama = row["drama_id"]
+                    if drama in wanted and drama not in found:
+                        found[drama] = dict(pool=old["pool"],task_id=old["task_id"],
+                            row=dict(row,selection_stage="original_receipt",reused_from_task_id=old["task_id"]))
+        return found
+
+    def queue_rows(self, queue_id, ids):
+        with self.db() as db:
+            return self._queue_rows(db, queue_id, ids)
+
+    def save(self, external_id, fingerprint, group, ids, selection, queue_id=None):
         rows = selection["rows"]
         if len(rows) != len(ids) or any(row["drama_id"] != item for item, row in zip(ids, rows)):
             raise ValueError("decision_input_order_mismatch")
@@ -111,14 +139,28 @@ class Store:
         candidates = freeze_candidates(meta.pop("candidates", []))
         meta["candidate_snapshot"] = candidates.digest
         task_id = "v2_" + uuid.uuid4().hex
-        response = {"task_id": task_id, "results": [{"drama_id": r["drama_id"], "page_id": r["page_id"]}
-                                                     for r in rows]}
-        details = zlib.compress(encoded({"snapshot": meta, "rows": rows}).encode(), 1)
         now = time.time()
         with self.db(write=True) as db:
             previous = self._lookup(db, external_id, fingerprint)
             if previous:
                 return previous
+            if queue_id is not None:
+                canonical = self._queue_rows(db, queue_id, ids)
+                if any(value["pool"] != group for value in canonical.values()):
+                    return 409, {"results":[],"error":"queue_drama_pool_conflict"}
+                for row in rows:
+                    canonical.setdefault(row["drama_id"],dict(pool=group,row=row,task_id=task_id))
+                rows = [dict(canonical[drama]["row"], **(
+                    {"reused_from_task_id":canonical[drama]["task_id"]}
+                    if canonical[drama]["task_id"] != task_id else {})) for drama in ids]
+                meta["queue_id"] = queue_id
+                meta["pair_sources"] = {drama:value["task_id"] for drama,value in canonical.items()}
+                db.executemany("INSERT OR IGNORE INTO queue_drama VALUES(?,?,?,?,?)",
+                    [(queue_id,drama,group,encoded(value["row"]),value["task_id"])
+                     for drama,value in canonical.items()])
+            response = {"task_id": task_id, "results": [{"drama_id": r["drama_id"], "page_id": r["page_id"]}
+                                                         for r in rows]}
+            details = zlib.compress(encoded({"snapshot": meta, "rows": rows}).encode(), 1)
             db.execute("INSERT OR IGNORE INTO candidate_snapshot(hash,packed,created) VALUES(?,?,?)",
                        (candidates.digest, candidates.packed, now))
             db.execute("""INSERT INTO assignment(external_id,task_id,fingerprint,pool,created,response,
