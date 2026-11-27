@@ -16,7 +16,7 @@ BASE='fe2e6877ca0c4be8d05949daffda676d279cd3bd'
 LINKS=dict(report=Path('/opt/social-material-effects/current'),collector=Path('/opt/social-material-effects-collector/current'),
            x=Path('/opt/x-material-effects/current'))
 COMMON=['features/social_material_effects/'+n+'.py' for n in ('sampling','window')]
-FILES=dict(report=COMMON+['features/social_material_effects/'+n+'.py' for n in ('data','report')],
+FILES=dict(report=['features/social_material_effects/report.py'],
            collector=COMMON+['features/social_material_effects/'+n+'.py' for n in ('data','graph','backfill')],
            x=COMMON+['features/social_material_effects/__init__.py','features/x_material_effects/collector.py','features/x_material_effects/close.py'])
 TIMERS=['social-material-effects-refresh.timer','social-material-effects-backfill.timer','x-material-effects-refresh.timer']
