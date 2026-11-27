@@ -419,10 +419,13 @@ def snapshot(root, version, data, manifest):
           CREATE TABLE titles(content_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
           CREATE TABLE metadata(key TEXT PRIMARY KEY,payload TEXT NOT NULL);''')
         with db:
-            db.executemany('INSERT OR IGNORE INTO catalog VALUES(?,?)', [(digest(row), encoded(row)) for row in data['catalog']])
+            # Feed SQLite one encoded row at a time. The collected source rows
+            # already occupy memory; another full JSON batch can exceed the
+            # collector's memory limit before the snapshot is published.
+            db.executemany('INSERT OR IGNORE INTO catalog VALUES(?,?)', ((digest(row), encoded(row)) for row in data['catalog']))
             db.executemany('INSERT INTO effects VALUES(?,?,?,?)',
-                           [(row['platform'], row['date'], fact_key(row), encoded(row)) for row in data['metrics']])
-            db.executemany('INSERT INTO titles VALUES(?,?)', [(key, encoded(value)) for key, value in data['titles'].items()])
+                           ((row['platform'], row['date'], fact_key(row), encoded(row)) for row in data['metrics']))
+            db.executemany('INSERT INTO titles VALUES(?,?)', ((key, encoded(value)) for key, value in data['titles'].items()))
             db.execute('INSERT INTO metadata VALUES(?,?)', ('manifest', encoded(manifest)))
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RuntimeError('serving_snapshot_integrity_failed')
@@ -451,6 +454,10 @@ def refresh(env, root, start=None, end=None):
         writer.start(version, started)
         writer.write(values)
         verify(reader, version, values)
+        # The warehouse copy has been verified. Release its serialized batches
+        # before creating the serving copy from the original source rows.
+        del values
+        print(encoded(dict(event='warehouse_verified', version=version)), flush=True)
         manifest['generated_at'] = now()
         snapshot(root, version, data, manifest)
         writer.finish(version, manifest)
