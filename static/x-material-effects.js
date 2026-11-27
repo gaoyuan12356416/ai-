@@ -82,14 +82,15 @@
     $('notice').classList.toggle('hidden', !notes.length);
     const cards = [
       ['渠道素材数（去重）', number(data.material_count)], ['有数据天数', number(data.data_days)],
-      ['已知浏览量', number(data.summary.views)], ['已知点赞量', number(data.summary.likes)],
+      ['已知新增浏览量', number(data.summary.views)], ['已知新增点赞量', number(data.summary.likes)],
       ['已知收入 USD', usd(data.summary.revenue_cents)],
     ];
     $('summary').innerHTML = cards.map(([name, value]) =>
       `<div class="kpi-card"><span class="kpi-label">${name}</span><strong class="kpi-value">${value}</strong></div>`
     ).join('');
     $('freshness').textContent = `数据日期 ${data.meta.dates.start} 至 ${data.meta.dates.end}　|　` + Object.entries(data.meta.channels).map(([key, value]) =>
-      `${label(key)} 更新于 ${time(value.generated_at)}，收入截至 ${value.revenue_through}（UTC）`).join('　|　');
+      `${label(key)} 更新于 ${time(value.generated_at)}，收入截至 ${value.revenue_through}（UTC）`).join('　|　') +
+      `　|　浏览增量覆盖 ${number(data.coverage.views)}/${number(data.post_count)} 帖日`;
   }
 
   async function load() {
@@ -163,7 +164,7 @@
       const data = await api('/api/x-material-effects?' + query);
       if (request !== detailRequest || !$('detail').open) return;
       const headings = ['数据日期', '渠道', '帖子／账号', '新增浏览', '赞', '评', '分享', 'X 转发', 'X 引用', '收藏', '收入 USD', '当日互动采样'];
-      $('detailBody').innerHTML = `<p>当天可见关联帖子 ${number(data.total)} 条，当前显示 ${number(data.items.length)} 条。按账号或发布归属展示；指标为当天新增，缺失显示“—”。</p>
+      $('detailBody').innerHTML = `<p>当天可见关联帖子 ${number(data.total)} 条，当前显示 ${number(data.items.length)} 条。按账号或发布归属展示；互动为相邻日期采样净增，缺失显示“—”。</p>
         <div class="analytics-table-scroll" tabindex="0"><table class="analytics-table">
         <thead><tr>${headings.map(name => `<th scope="col" class="plain-heading">${name}</th>`).join('')}</tr></thead>
         <tbody>${data.items.map(postRow).join('')}</tbody></table></div>

@@ -10,6 +10,7 @@ import sqlite3
 import time
 
 from features.fb_auto_posts.effect_collector import FeedbackError, GatedReader, MetaReader
+from . import sampling, window
 
 FIELDS = ('id,reactions.type(LIKE).limit(0).summary(total_count),comments.limit(0).summary(total_count),'
           'shares,insights.metric(post_media_view).period(lifetime)')
@@ -71,11 +72,23 @@ def prepare(db):
     db.execute('CREATE TABLE IF NOT EXISTS collection_state(key TEXT PRIMARY KEY,value INTEGER NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS collection_run(id INTEGER PRIMARY KEY,mode TEXT NOT NULL,'
                'started INTEGER NOT NULL,finished INTEGER NOT NULL,stats TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS page_retry(page TEXT PRIMARY KEY,retry INTEGER NOT NULL,error TEXT NOT NULL)')
+    sampling.prepare(db)
     db.commit()
 
 
-def plan(posts,saved,history,now,max_posts):
-    if history:
+def plan(posts,saved,history,now,max_posts,coverage=False):
+    close = sampling.closing_start(datetime.fromtimestamp(now,timezone.utc)) if coverage else None
+    if coverage:
+        today = datetime.fromtimestamp(now,timezone.utc).astimezone(window.BJ).replace(hour=0,minute=0,second=0,microsecond=0)
+        boundary = close or today
+        due = [p for key,p in posts.items() if key not in saved or (
+            (not saved[key][5] or saved[key][4]<=now) and
+            (window.instant(saved[key][3]) is None or window.instant(saved[key][3])<boundary))]
+        # Stable Page order keeps successive closing samples at similar times.
+        due.sort(key=lambda p:(p['account_id'],p['post_id']) if close else
+                 ((saved.get(p['post_id']) or ('','','',''))[3] or '',p['account_id'],p['post_id']))
+    elif history:
         due = [p for key,p in posts.items() if key not in saved]
         due.sort(key=lambda p:(p['published_at'],p['post_id']))
     else:
@@ -88,7 +101,7 @@ def plan(posts,saved,history,now,max_posts):
     selected = {}
     for page,rows in pages.items():
         # A historical Page lookup can serve several full groups of posts.
-        size = min(max_posts,len(rows)) if history else min(max_posts,len(rows),25)
+        size = min(max_posts,len(rows)) if history or coverage else min(max_posts,len(rows),25)
         selected[page] = rows[:size]
         max_posts -= size
         if max_posts==0:
@@ -143,16 +156,20 @@ def fetch_batch(batch,page,credentials,saved,graph,usage):
     return natives,pending,samples,error,stop,winning
 
 
-def collect(db,posts,history,graph,reader,usage,max_posts,now):
+def collect(db,posts,history,graph,reader,usage,max_posts,now,coverage=False,max_seconds=0):
     saved = {r[0]:r for r in db.execute('SELECT * FROM observation')}
-    due,groups = plan(posts,saved,history,now,max_posts)
+    holds = {r[0] for r in db.execute('SELECT page FROM page_retry WHERE retry>?',(now,))}
+    eligible = {key:p for key,p in posts.items() if p['account_id'] not in holds}
+    due,groups = plan(eligible,saved,history,now,max_posts,coverage)
+    started = time.monotonic()
     stats = dict(graph_due=due,first_attempted=0,first_covered=0,attempted=0,graph_calls=0,
-                 peak_usage=0,errors={},metrics_upstream_error='')
+                 peak_usage=0,errors={},metrics_upstream_error='',held_pages=len(holds),
+                 closing_pass=bool(coverage and sampling.closing_start(datetime.fromtimestamp(now,timezone.utc))))
     pages = list(groups)
     errors = Counter()
     for begin in range(0,len(pages),40):
         page_batch = pages[begin:begin+40]
-        if graph.calls>=graph.max_calls:
+        if graph.calls>=graph.max_calls or (max_seconds and time.monotonic()-started>=max_seconds):
             break
         try:
             credentials = reader.credentials(page_batch)
@@ -162,7 +179,7 @@ def collect(db,posts,history,graph,reader,usage,max_posts,now):
         for page in page_batch:
             rows,creds = groups[page],list(credentials.get(page,()))
             for offset in range(0,len(rows),25):
-                if graph.calls>=graph.max_calls:
+                if graph.calls>=graph.max_calls or (max_seconds and time.monotonic()-started>=max_seconds):
                     break
                 batch = rows[offset:offset+25]
                 natives,pending,samples,error,stop,winner = fetch_batch(batch,page,creds,saved,graph,usage)
@@ -172,13 +189,14 @@ def collect(db,posts,history,graph,reader,usage,max_posts,now):
                 stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
                 for p in batch:
                     key = p['post_id']
+                    fresh = samples.get(key,{})
+                    sampling.save(db,key,fresh,stamp)
                     # An interrupted batch is eligible again immediately. Record only actual outcomes.
                     if key in pending and stop:
                         continue
                     old = saved.get(key)
                     values = json.loads(old[2]) if old else {}
                     had_engagement = engage(values)
-                    fresh = samples.get(key,{})
                     times = values.setdefault('_times',{k:old[3] if old else None
                         for k in ('views','likes','comments','shares') if k in values})
                     times.update((k,stamp) for k in fresh)
@@ -201,6 +219,15 @@ def collect(db,posts,history,graph,reader,usage,max_posts,now):
                     stats['first_attempted'] += int(old is None)
                     stats['first_covered'] += int(not had_engagement and engage(values))
                 db.commit()
+                # A Page permission failure must not consume every remaining
+                # batch on that Page, or delay other authorized Pages.
+                if not samples and error in ('feedback_graph_10','feedback_graph_190','fb_page_access_unavailable'):
+                    db.execute('INSERT OR REPLACE INTO page_retry VALUES(?,?,?)',(page,now+21600,error))
+                    db.commit()
+                    break
+                if samples:
+                    db.execute('DELETE FROM page_retry WHERE page=?',(page,))
+                    db.commit()
                 if stop:
                     if stop!='feedback_request_budget_reached':
                         stats['metrics_upstream_error'] = stop
@@ -240,7 +267,7 @@ def apply_cached(db,posts):
         p['error_code'] = error
 
 
-def sync(posts,cache,*,max_calls=160,max_posts=1500,history=False):
+def sync(posts,cache,*,max_calls=160,max_posts=1500,history=False,coverage=False,max_seconds=0,interval=0.5):
     import fcntl
     cache = Path(cache)
     with closing(sqlite3.connect(cache,timeout=15)) as db,cache.with_suffix('.lock').open('a') as guard:
@@ -256,16 +283,17 @@ def sync(posts,cache,*,max_calls=160,max_posts=1500,history=False):
             if resume and resume[0]>now:
                 stats.update(collection_status='rate_cooldown',resume_at=resume[0],metrics_upstream_error='feedback_graph_usage_high')
             else:
-                graph = MetaReader(os.environ.get('FB_GRAPH_API_VERSION','v22.0'),max_calls=max_calls)
+                graph = MetaReader(os.environ.get('FB_GRAPH_API_VERSION','v22.0'),max_calls=max_calls,interval=interval)
                 usage = Usage()
                 graph.session.hooks['response'].append(usage.response)
                 with closing(graph.session):
                     try:
-                        stats = collect(db,posts,history,graph,GatedReader(os.environ),usage,max_posts,now)
+                        stats = collect(db,posts,history,graph,GatedReader(os.environ),usage,max_posts,now,coverage,max_seconds)
                     except FeedbackError as exc:
                         stats.update(graph_calls=graph.calls,metrics_upstream_error=str(exc),peak_usage=usage.peak)
             db.execute('INSERT INTO collection_run(mode,started,finished,stats) VALUES(?,?,?,?)',
-                       ('history' if history else 'hourly',now,int(time.time()),json.dumps(stats)))
+                       ('coverage' if coverage else 'history' if history else 'hourly',now,int(time.time()),json.dumps(stats)))
+            sampling.prune(db)
             db.commit()
         if not history:
             apply_cached(db,posts)

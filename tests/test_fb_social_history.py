@@ -62,7 +62,9 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual((ans['first_attempted'],ans['first_covered']),(64,63))
         self.assertEqual(ans['errors'],{'fb_page_access_unavailable':1})
         row=self.db.execute("select metrics from observation where id='10_1'").fetchone()
-        self.assertEqual(json.loads(row[0]),{'likes':0,'comments':4})
+        vals=json.loads(row[0]);times=vals.pop('_times')
+        self.assertEqual(vals,{'likes':0,'comments':4})
+        self.assertEqual(set(times),{'likes','comments'})
         self.assertEqual(self.run_collect(old,FakeGraph(metrics))['graph_calls'],0)
     def test_mid_batch_budget_does_not_mark_unread_posts(self):
         def fn(keys,fields,token):
@@ -86,6 +88,9 @@ class CollectorTest(unittest.TestCase):
         stats=self.run_collect([post(1)],FakeGraph(metrics),False)
         self.assertEqual(stats['first_covered'],1)
         vals=json.loads(self.db.execute('select metrics from observation').fetchone()[0])
+        times=vals.pop('_times')
+        self.assertEqual((times['shares'],times['views']),('2026-09-01','2026-09-01'))
+        self.assertNotEqual(times['likes'],times['views'])
         self.assertEqual(vals,{'likes':0,'comments':4,'shares':3,'views':5,'_views_at':'2026-09-01'})
         rows={'10_1':dict(post(1),views=8,metrics_at='2026-10-01')}
         graph.apply_cached(self.db,rows)
@@ -100,7 +105,8 @@ class CollectorTest(unittest.TestCase):
         stats=self.run_collect([post(1),post(2,'22')],FakeGraph(fn))
         self.assertEqual((stats['first_attempted'],stats['first_covered']),(2,1))
         self.assertEqual(stats['errors'],{'feedback_graph_10':1})
-        self.assertEqual(self.db.execute("select metrics from observation where id='10_1'").fetchone()[0],'{}')
+        vals=json.loads(self.db.execute("select metrics from observation where id='10_1'").fetchone()[0])
+        self.assertFalse(any(k in vals for k in ('views','likes','comments','shares')))
     def test_usage_header_and_retry_after(self):
         r=SimpleNamespace(status_code=429,headers={'Retry-After':'120','x-business-use-case-usage':
               '{"page":[{"call_count":88,"estimated_time_to_regain_access":8}]}'})

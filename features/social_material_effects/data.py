@@ -77,7 +77,11 @@ def publish(root, source, posts, meta):
         db.execute(f'CREATE TABLE rollup AS SELECT {dims},COUNT(*) AS posts,{sums} FROM posts GROUP BY {dims}')
         db.execute('CREATE INDEX lookup ON rollup(language,product COLLATE NOCASE,catalog)')
         count = db.execute('SELECT COUNT(*) FROM posts').fetchone()[0]
-        meta = dict(meta, channel=source, post_count=count, window_schema=1)
+        from . import sampling
+        history_path = root/'facebook-observations.sqlite3' if source == 'facebook' else Path(
+            os.environ.get('X_MATERIAL_EFFECT_OBSERVATIONS', '/mnt/data-disk/x-material-effects/observations.sqlite3'))
+        history = sampling.project(db, history_path, cutoff)
+        meta = dict(meta, channel=source, post_count=count, window_schema=1, **history)
         db.execute('CREATE TABLE metadata(value TEXT NOT NULL)')
         db.execute('INSERT INTO metadata VALUES(?)', (encoded(meta),))
         db.commit()

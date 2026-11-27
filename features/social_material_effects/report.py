@@ -62,7 +62,7 @@ def query(params, actor, root=None, *, now=None):
         return any(window.instant(m.get(key)) is None or
                    (stamp-window.instant(m[key])).total_seconds() > 7200 for m in meta.values())
     summary_meta = dict(unavailable_channels=unavailable,
-        channels={k:{field:m.get(field) for field in ('version','generated_at','revenue_through','metrics_upstream_error','revenue_incomplete_sites')} for k,m in meta.items()},
+        channels={k:{field:m.get(field) for field in ('version','generated_at','revenue_through','metrics_upstream_error','revenue_incomplete_sites','closing_window')} for k,m in meta.items()},
         generated_at=min(m.get('generated_at','') for m in meta.values()),
         revenue_through=min(m.get('revenue_through','') for m in meta.values()),
         stale=stale('generated_at'), revenue_stale=stale('revenue_source_generated_at'),

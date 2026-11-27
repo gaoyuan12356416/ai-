@@ -35,13 +35,14 @@
         <label>数据结束日期<input type="date" name="end" required></label>
         <div class="date-presets" aria-label="数据日期快捷选择">
           <button class="btn btn-secondary btn-sm" type="button" data-days="1">昨日</button>
+          <button class="btn btn-secondary btn-sm" type="button" data-days="3">近 3 天</button>
           <button class="btn btn-secondary btn-sm" type="button" data-days="7">近 7 天</button>
           <button class="btn btn-secondary btn-sm" type="button" data-days="30">近 30 天</button>
         </div>
         <button class="btn btn-primary" type="submit">查询</button>
         <button class="btn btn-secondary" type="reset">重置</button>
       </form>
-      <p class="scope-strip">按数据日期筛选，每行是某天、某渠道、某素材的新增数据，包含旧帖子在当天的表现。浏览与互动按北京时间的每日最后一次采样差额计算，采样时点会影响精度；收入沿用来源的 UTC 数据日期。缺少相邻日期快照的互动显示“—”，不会用累计值代替。X 浏览为曝光，Facebook 浏览为媒体浏览。</p>
+      <p class="scope-strip">按数据日期筛选，浏览与互动为相邻日期最后一次成功采样的净增，包含旧帖表现。每日北京时间 23:00–24:00 优先补采日终数据；平台延迟及采样时间会影响精度。缺少相邻快照、计数回退时显示“—”，不把多天增量算成一天，也不用累计值代替。收入沿用来源的 UTC 数据日期。X 浏览为曝光，Facebook 浏览为媒体浏览。</p>
       <div id="notice" class="analytics-message warning hidden" role="status" aria-live="polite"></div>
       <div class="kpi-grid effects-summary" id="summary"></div>
       <section class="analytics-panel" aria-label="素材效果明细">
@@ -78,6 +79,6 @@
   </div>
   <script src="/quick-nav.js?v=20261127-daily1"></script>
   <script src="/ui-topbar.js?v=db2d3427364e"></script>
-  <script src="/x-material-effects.js?v=20261127-daily1"></script>
+  <script src="/x-material-effects.js?v=20261127-sampling1"></script>
 </body>
 </html>

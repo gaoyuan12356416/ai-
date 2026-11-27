@@ -150,11 +150,14 @@ def revenue(posts,warehouse_root,*,daily=False):
                 revenue_through=end,revenue_timezone='UTC',currency='USD',
                 assigned_revenue_cents=assigned,unassigned_revenue_cents=unassigned)
 
-def collect_metrics(posts,state_path,*,limit=0):
+def collect_metrics(posts,state_path,*,limit=0,closing_pass=False):
+    from features.social_material_effects import sampling
     now=datetime.now(timezone.utc);stamp=now.isoformat();calls=0;success=0;failures=0;upstream=''
+    boundary=sampling.closing_start(now) if closing_pass else None
     with closing(sqlite3.connect(state_path)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS observations(post_id TEXT PRIMARY KEY,metrics_json TEXT,metrics_at TEXT,attempt_at TEXT,error_code TEXT,retry_at TEXT)')
         db.execute('CREATE TABLE IF NOT EXISTS collection_state(id INTEGER PRIMARY KEY CHECK(id=1),error_code TEXT,retry_at TEXT)')
+        sampling.prepare(db)
         previous={r[0]:r for r in db.execute('SELECT * FROM observations')}
         hold=db.execute('SELECT error_code,retry_at FROM collection_state WHERE id=1').fetchone()
         if not hold:
@@ -166,9 +169,12 @@ def collect_metrics(posts,state_path,*,limit=0):
         due=[]
         for post in posts:
             old=previous.get(post['post_id'])
-            if not old or ((not old[2] or (now-instant(old[2])).total_seconds()>=interval(post['published_at'],now)) and (not old[5] or instant(old[5])<=now)):
+            needed = not old or not old[2] or (instant(old[2])<boundary if boundary else
+                     (now-instant(old[2])).total_seconds()>=interval(post['published_at'],now))
+            if needed and (not old or not old[5] or instant(old[5])<=now):
                 due.append(post)
-        due.sort(key=lambda p:(p['post_id'] in previous,-instant(p['published_at']).timestamp()))
+        due.sort(key=lambda p:p['post_id'] if boundary else
+                 (p['post_id'] in previous,-instant(p['published_at']).timestamp()))
         if limit:due=due[:limit]
         pending=len(due)
         if hold and instant(hold[1])>now:upstream=hold[0];due=[]
@@ -182,13 +188,16 @@ def collect_metrics(posts,state_path,*,limit=0):
                 code='x_http_'+str(exc.code)
                 if exc.code in (401,402,403,429):retry=now+timedelta(hours=6)
             except (OSError,ValueError):code='x_metrics_transport_error'
+            stamp=datetime.now(timezone.utc).isoformat()
             for post in batch:
                 value=values.get(post['post_id']);old=previous.get(post['post_id'])
                 error=code or ('post_unavailable' if value is None else '')
                 if value and post['author_id'] and str(value.get('author_id'))!=post['author_id']:error='post_author_mismatch'
                 if error:
                     failures+=1;metrics=old[1] if old else '{}';at=old[2] if old else ''
-                else:success+=1;metrics=encoded(extract(value));at=stamp
+                else:
+                    success+=1;fresh=extract(value);metrics=encoded(fresh);at=stamp
+                    sampling.save(db,post['post_id'],fresh,stamp)
                 next_attempt=now+timedelta(seconds=interval(post['published_at'],now)) if error=='post_unavailable' else retry
                 db.execute('INSERT INTO observations VALUES(?,?,?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET metrics_json=excluded.metrics_json,metrics_at=excluded.metrics_at,attempt_at=excluded.attempt_at,error_code=excluded.error_code,retry_at=excluded.retry_at',
                     (post['post_id'],metrics,at,stamp,error,next_attempt.isoformat() if error else ''))
@@ -204,4 +213,6 @@ def collect_metrics(posts,state_path,*,limit=0):
             post.update({k:None for k in METRICS if k not in ('revenue_cents','refund_cents')})
             post.update(json.loads(row[1]) if row else {})
             post.update(metrics_at=row[2] if row else None,error_code=row[4] if row else 'not_collected')
+        sampling.prune(db)
+        db.commit()
     return dict(api_calls=calls,metrics_updated=success,metrics_failed=failures,metrics_due=pending,metrics_upstream_error=upstream)

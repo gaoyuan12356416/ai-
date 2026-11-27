@@ -1,4 +1,4 @@
-"""Read missing Facebook engagement from the last published set of confirmed posts."""
+"""Daily Facebook coverage and a stable 23:00-24:00 Beijing closing pass."""
 import argparse
 import json
 from . import data, graph
@@ -20,14 +20,21 @@ def candidates(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--max-calls',type=int,default=300)
+    parser.add_argument('--max-calls',type=int,default=400)
     parser.add_argument('--max-posts',type=int,default=6000)
+    parser.add_argument('--max-seconds',type=int,default=240)
+    parser.add_argument('--interval',type=float,default=0.3)
     args = parser.parse_args()
     if min(args.max_calls,args.max_posts)<1:
         parser.error('limits must be positive')
     root = data.root_path()
-    stats = graph.sync(candidates(root),root/'facebook-observations.sqlite3',
-                       max_calls=args.max_calls,max_posts=args.max_posts,history=True)
+    from datetime import datetime,timezone
+    from . import facebook,sampling
+    # Newly published receipts must also be eligible in the closing hour.
+    posts = facebook.discover()[0] if sampling.closing_start(datetime.now(timezone.utc)) else candidates(root)
+    stats = graph.sync(posts,root/'facebook-observations.sqlite3',
+                       max_calls=args.max_calls,max_posts=args.max_posts,history=True,coverage=True,
+                       max_seconds=args.max_seconds,interval=args.interval)
     print(json.dumps(stats),flush=True)
     return int(bool(stats.get('metrics_upstream_error')) and
                stats['metrics_upstream_error'] not in graph.STOP_CODES)
