@@ -10,10 +10,10 @@ import traceback
 
 from features.fb_page_assignment.runtime import log
 from features.fb_page_assignment.selector import KNOWN_AUDIENCES, _load_order, _match, _number, _profile
-from .catalog import Reads, SelectionError, TABLE, page_states, permissions, source_dramas, task_ref
+from .catalog import Reads, SelectionError, TABLE, page_states, pool_products, dramas_for_pools
 from .snapshot import Catalog, canon, topics
 
-POLICY = "positive-profile-v2.1"
+POLICY = "positive-profile-v2.2-direct"
 STATES = ("page_id", "language", "status", "forbidden_status", "is_permission",
           "active_ad_count", "fan_ccount", "updated_at")
 
@@ -106,16 +106,16 @@ class Selector:
             self.digest = head["sha256"]
         return head, data
 
-    def hydrate(self, data, facts, groups, refs, requests, viable, deadline):
+    def hydrate(self, data, facts, groups, requests, viable, deadline):
         """Only exact misses with known authoritative direction need resource rows.
         The normal path uses versioned themes. Misses are deduplicated and read four
         titles at a time; a failed optional read must never become a business null.
         """
         cold_ids = defaultdict(set)
         for i in viable:
-            ref, req = refs[i], requests[i]
+            req = requests[i]
             for cid in req["drama_ids"]:
-                d = facts[ref, cid]
+                d = facts[req["page_group_id"], cid]
                 if d.get("error"):
                     continue
                 app, lang = str(d["app"]), d["language"]
@@ -172,15 +172,7 @@ class Selector:
 
     def select_batch(self, requests, deadline):
         errors = [None] * len(requests)
-        refs = {}
-        for i, req in enumerate(requests):
-            try:
-                ref = task_ref(req["external_task_id"])
-            except SelectionError as e:
-                errors[i] = e
-            else:
-                refs[i] = ref
-        if not refs:
+        if not requests:
             return errors
         step = "load_catalog"
         try:
@@ -188,31 +180,23 @@ class Selector:
             step = "open_read_connection"
             with self.connection(role="read", deadline=deadline) as conn, conn.cursor() as cur:
                 reader = Reads(cur, deadline)
-                step = "read_task_permissions"
-                grants, materials = permissions(reader, set(refs.values()))
+                step = "read_pool_products"
+                products = pool_products(reader, {req["page_group_id"] for req in requests})
                 viable = set()
-                for i, ref in refs.items():
-                    group = requests[i]["page_group_id"]
-                    if ref not in materials:
-                        errors[i] = SelectionError(503, "publication_task_unavailable")
-                    elif group not in grants.get(ref, set()):
-                        errors[i] = SelectionError(403, "publication_pool_not_authorized")
+                for i, req in enumerate(requests):
+                    if req["page_group_id"] not in products:
+                        errors[i] = SelectionError(403, "publication_pool_unavailable")
                     else:
                         viable.add(i)
                 if not viable:
                     return errors
                 step = "read_page_states"
-                pools = page_states(reader, {requests[i]["page_group_id"] for i in viable})
-                for i in list(viable):
-                    if requests[i]["page_group_id"] not in pools:
-                        errors[i] = SelectionError(403, "publication_pool_unavailable")
-                        viable.remove(i)
-                known_refs = {refs[i] for i in viable}
+                pools = page_states(reader, set(products), products=products)
                 valid_inputs = defaultdict(set)
                 for i in viable:
-                    valid_inputs[refs[i]].update(requests[i]["drama_ids"])
-                step = "read_source_dramas"
-                facts = source_dramas(reader, known_refs, materials, valid_inputs)
+                    valid_inputs[requests[i]["page_group_id"]].update(requests[i]["drama_ids"])
+                step = "read_pool_dramas"
+                facts = dramas_for_pools(reader, products, valid_inputs)
                 step = "close_read_connection"
             step = "prepare_candidates"
             groups = {}
@@ -221,12 +205,12 @@ class Selector:
                 groups[group] = (eligible_pages(raw, self.profiles), frozen,
                                  getattr(frozen, "digest", None) or hashlib.sha256(canon(raw)).hexdigest(), {})
             step = "resolve_drama_profiles"
-            self.hydrate(data, facts, groups, refs, requests, viable, deadline)
+            self.hydrate(data, facts, groups, requests, viable, deadline)
             step = "rank_pages"
             for i in viable:
-                req, ref = requests[i], refs[i]
+                req = requests[i]
                 ids, gid = req["drama_ids"], req["page_group_id"]
-                dramas = {cid: facts[ref, cid] for cid in ids}
+                dramas = {cid: facts[gid, cid] for cid in ids}
                 if any(d.get("lookup_failed") for d in dramas.values()):
                     errors[i] = SelectionError(503, "drama_theme_lookup_failed")
                     continue
@@ -234,13 +218,13 @@ class Selector:
                 rows = decide(ids, dramas, lanes, scores)
                 errors[i] = dict(rows=rows, snapshot=dict(
                     policy=POLICY, catalog_version=head["version"], catalog_sha256=head["sha256"],
-                    pool_group_id=gid, candidate_sha256=digest, candidate_fields=STATES,
+                    pool_group_id=gid, pool_app_id=products[gid], candidate_sha256=digest, candidate_fields=STATES,
                     candidates=candidates, dramas=dramas))
         except Exception as exc:
             code = exc.code if isinstance(exc, SelectionError) else "selection_dependency_unavailable"
             if not isinstance(exc, SelectionError):
                 log_dependency_failure(step, exc, requests)
-            for i in refs:
+            for i in range(len(requests)):
                 if errors[i] is None:
                     errors[i] = SelectionError(503, code)
         return errors

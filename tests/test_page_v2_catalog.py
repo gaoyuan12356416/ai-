@@ -10,7 +10,7 @@ from contextlib import nullcontext
 
 from features.fb_page_assignment.selector import _profile
 from features.fb_page_assignment_v2.catalog import (
-    SelectionError, Task, numbers, page_states, permissions, source_dramas, task_ref)
+    SelectionError, Task, numbers, page_states, permissions, dramas_for_pools, task_ref)
 from features.fb_page_assignment_v2.catalog_transport import pull_catalog, pull_publishers, source_file
 from features.fb_page_assignment_v2.selection import Selector, decide, eligible_pages
 from features.fb_page_assignment_v2.snapshot import Catalog, canon, install, sha, topics
@@ -117,19 +117,25 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(grants[Task("native",2)], {24})
         self.assertEqual(numbers("12,14"), {12,14})
 
-    def test_real_source_hints_prevent_cross_product_and_case_collision(self):
-        ref, other = Task("native",2), Task("cross",4)
-        reader = Maps({"ads_source s":[dict(id=12,data_source_id="Ab",product="HotDrama",language="jp"),
-                                      dict(id=13,data_source_id="old",product="Unknown app",language="en")],
-                       "ads_drama_info":[dict(content_id="Ab",app_id=a,language="ja") for a in (1479,3302)] +
-                       [dict(content_id="old",app_id=1479,language="en"),dict(content_id="XX",app_id=1479,language="en")]})
-        facts=source_dramas(reader,{ref,other},{ref:{12,13},other:set()},
-                            {ref:{"Ab","old","absent"}, other:{"Ab","xx"}})
-        self.assertEqual(facts[ref,"Ab"]["app"],3302)
-        self.assertEqual(facts[ref,"old"]["error"],"drama_not_found")
-        self.assertEqual(facts[ref,"absent"]["error"],"drama_not_in_task")
-        self.assertEqual(facts[other,"Ab"]["error"],"drama_source_ambiguous")
-        self.assertEqual(facts[other,"xx"]["error"],"drama_not_found")
+    def test_direct_drama_ids_use_pool_product_and_exact_identity(self):
+        reader = Maps({"ads_drama_info":[
+            dict(content_id="Ab",app_id=1479,language="en"),
+            dict(content_id="Ab",app_id=3302,language="jp"),
+            dict(content_id="Ab",app_id=3302,language="ja"),
+            dict(content_id="old",app_id=1479,language="en"),
+            dict(content_id="XX",app_id=1479,language="en"),
+            dict(content_id="many",app_id=1479,language="en"),
+            dict(content_id="many",app_id=1479,language="ar")]})
+        facts=dramas_for_pools(reader,{24:1479,48:3302},
+                              {24:{"Ab","old","absent","xx","many"},48:{"Ab","old"}})
+        self.assertEqual(facts[24,"Ab"],{"app":1479,"language":"en","id":"Ab"})
+        self.assertEqual(facts[48,"Ab"],{"app":3302,"language":"ja","id":"Ab"})
+        self.assertEqual(facts[48,"old"]["error"],"drama_not_found")
+        self.assertEqual(facts[24,"absent"]["error"],"drama_not_found")
+        self.assertEqual(facts[24,"xx"]["error"],"drama_not_found")
+        self.assertEqual(facts[24,"many"]["error"],"drama_source_ambiguous")
+        self.assertEqual(len(reader.touched),1)
+        self.assertIn("ads_drama_info",reader.touched[0])
 
     def test_merged_state_excludes_removed_unauthorized_duplicate_language(self):
         base=dict(group_id=24,page_id="2",language="en",source_id=1,status=0,forbidden_status=0,
@@ -193,21 +199,29 @@ class CatalogTests(unittest.TestCase):
             calls.append(kwargs)
             return nullcontext(Conn())
         selector=Selector(Snap(),connection,freeze_candidates)
-        ref=Task("cross",10)
         reqs=[dict(external_task_id=k,page_group_id=p,drama_ids=ids) for k,p,ids in (
-            ("cross:10:a",24,["A","A"]),("cross:10:b",24,["A"]),("cross:10:c",62,["A"]),("bad",24,["A"]))]
-        facts={(ref,"A"):{"app":1479,"language":"en","id":"A"}}
+            ("cross:10:a",24,["A","A"]),("cross:10:b",24,["A"]),("cross:10:c",62,["A"]),
+            ("arbitrary-tracking-id",24,["A"]),("3087027",24,["missing","A"]))]
         raw=[["2","en",0,0,1,0,0,""],["3","en",0,0,1,0,0,""]]
-        with patch("features.fb_page_assignment_v2.selection.permissions",return_value=({ref:{24}},{ref:{1}})), \
-             patch("features.fb_page_assignment_v2.selection.page_states",return_value={24:raw}) as states, \
-             patch("features.fb_page_assignment_v2.selection.source_dramas",return_value=facts):
+        reader=Maps({"LEFT JOIN":[dict(group_id=24,page_id=pid,language="en",source_id=int(pid),
+                       status=0,forbidden_status=0,is_permission=1,active_ad_count=0,fan_ccount=0,updated_at="")
+                       for pid in ("2","3")],
+                     "ads_facebook_page_group":[dict(id=24,app_id=1479)],
+                     "ads_drama_info":[dict(content_id="A",app_id=1479,language="en")]})
+        with patch("features.fb_page_assignment_v2.selection.Reads",return_value=reader):
             replies=selector.select_batch(reqs,time.monotonic()+1)
         self.assertEqual([r["page_id"] for r in replies[0]["rows"]],["2","3"])
         self.assertEqual(replies[1]["rows"][0]["page_id"],"2")
-        self.assertEqual([v.status for v in replies[2:]],[403,403])
+        self.assertEqual(replies[2].status,403)
+        self.assertEqual(replies[2].code,"publication_pool_unavailable")
+        self.assertEqual(replies[3]["rows"][0]["page_id"],"2")
+        self.assertEqual(replies[4]["rows"][0]["error_code"],"drama_not_found")
+        self.assertEqual(replies[4]["rows"][1]["page_id"],"2")
         self.assertIs(replies[0]["snapshot"]["candidates"],replies[1]["snapshot"]["candidates"])
         self.assertEqual(replies[0]["snapshot"]["candidate_sha256"],freeze_candidates(raw).digest)
-        self.assertEqual((len(calls),states.call_count),(1,1))
+        self.assertEqual((len(calls),len(reader.touched)),(1,3))
+        self.assertTrue(all("ads_facebook_page_group" in q or "ads_drama_info" in q for q in reader.touched))
+        self.assertEqual(replies[0]["snapshot"]["pool_app_id"],1479)
 
     def test_themes_normalize_and_series_ambiguity(self):
         rows = [dict(series_code="A",language="jp",labels='["ＴＥＳＴ"]')]

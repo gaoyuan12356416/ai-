@@ -1,4 +1,8 @@
-"""Resolve publication-owned pools and source materials in one replica transaction."""
+"""Read caller-selected pools and drama identities in one replica transaction.
+
+Publication helpers below are retained for offline QA sample generation only.
+The assignment endpoint does not use publication tasks as an authorization source.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -94,7 +98,7 @@ TABLE = "kunlunads_dev."
 
 
 def permissions(reader, refs):
-    """Use selected FB children when present; never infer a pool from its parent."""
+    """Legacy offline QA sample discovery, not an assignment API permission check."""
     cross_ids = {v.key for v in refs if v.kind == "cross"}
     native_ids = {v.key for v in refs if v.kind == "native"}
     crosses = {int(r["id"]): r for r in reader.many(
@@ -172,57 +176,41 @@ def permissions(reader, refs):
     return grants, materials
 
 
-def source_dramas(reader, allowed, tasks, inputs):
-    ids = {i for t in allowed for i in tasks[t]}
-    materials = {}
-    for row in reader.many("SELECT s.id,c.data_source_id,c.product,c.language FROM " + TABLE +
-                           "ads_source s JOIN " + TABLE +
-                           "ads_custom_source c ON s.source_type=3 AND c.id=CAST(s.source_id AS UNSIGNED) "
-                           "WHERE s.id IN ({ids})", ids):
-        cid = str(row["data_source_id"] or "").strip()
-        if cid:
-            label = str(row["product"] or "").strip().casefold()
-            materials[int(row["id"])] = (cid, APPS.get(label, -1) if label else None, language(row["language"]))
-    wanted = {cid for t in allowed for cid in inputs[t]}
+def dramas_for_pools(reader, products, inputs):
+    """Resolve exact drama IDs in each pool's product, independently of tracking IDs."""
+    wanted = {cid for ids in inputs.values() for cid in ids}
+    apps = sorted(set(products[group] for group in inputs))
+    if not wanted:
+        return {}
     infos = defaultdict(set)
     for row in reader.many("SELECT DISTINCT content_id,app_id,language FROM " + TABLE +
-                           "ads_drama_info FORCE INDEX(ac) WHERE content_id IN ({ids}) "
-                           "AND app_id IN (1479,979,3302)", wanted):
+                           "ads_drama_info FORCE INDEX(ac) WHERE app_id IN (" +
+                           ",".join(["%s"] * len(apps)) + ") AND content_id IN ({ids})",
+                           wanted, before=tuple(apps)):
         # MySQL collation may fold characters; identities are case-sensitive.
         cid = str(row["content_id"])
         if cid in wanted:
-            infos[cid].add((int(row["app_id"]), language(row["language"])))
+            infos[int(row["app_id"]), cid].add(language(row["language"]))
     resolved = {}
-    for ref in allowed:
-        mappings = defaultdict(set)
-        for sid in tasks[ref]:
-            if sid in materials:
-                cid, app, lang = materials[sid]
-                mappings[cid].add((app, lang))
-        for cid in inputs[ref]:
-            hints = mappings.get(cid, set())
-            candidates = set(infos.get(cid, ()))
-            if tasks[ref] and cid not in mappings:
-                resolved[ref, cid] = {"error": "drama_not_in_task"}
-                continue
-            if len(hints) > 1:
-                resolved[ref, cid] = {"error": "drama_source_ambiguous"}
-                continue
-            if hints:
-                app, lang = next(iter(hints))
-                candidates = {(a, l) for a, l in candidates if (app is None or app == a) and (not lang or lang == l)}
-            if len(candidates) == 1 and next(iter(candidates))[1] not in ("", "unknown", "__unknown__"):
-                app, lang = next(iter(candidates))
-                resolved[ref, cid] = {"app": app, "language": lang, "id": cid}
+    for group, ids in inputs.items():
+        app = products[group]
+        for cid in ids:
+            languages = infos.get((app, cid), set())
+            if len(languages) == 1 and next(iter(languages)) not in ("", "unknown", "__unknown__"):
+                resolved[group, cid] = {"app": app, "language": next(iter(languages)), "id": cid}
             else:
-                resolved[ref, cid] = {"error": "drama_source_ambiguous" if candidates else "drama_not_found"}
+                resolved[group, cid] = {"error": "drama_source_ambiguous" if languages else "drama_not_found"}
     return resolved
 
 
-def page_states(reader, groups):
-    headers = {int(r["id"]): int(r["app_id"]) for r in reader.many(
+def pool_products(reader, groups):
+    return {int(r["id"]): int(r["app_id"]) for r in reader.many(
         "SELECT id,app_id FROM " + TABLE + "ads_facebook_page_group WHERE id IN ({ids}) AND is_delete=0", groups)
         if int(r["app_id"] or 0) in SUPPORTED_PRODUCTS}
+
+
+def page_states(reader, groups, *, products=None):
+    headers = pool_products(reader, groups) if products is None else products
     raw = reader.many("SELECT i.group_id,i.page_id,i.language,p.id source_id,p.status,p.forbidden_status,"
                       "p.is_permission,p.active_ad_count,p.fan_ccount,p.updated_at FROM " + TABLE +
                       "ads_facebook_page_group_ins i JOIN " + TABLE +
