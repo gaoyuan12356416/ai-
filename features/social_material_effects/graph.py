@@ -153,6 +153,9 @@ def fetch_batch(batch,page,credentials,saved,graph,usage):
             if error in STOP_CODES:
                 stop = error
                 break
+    # defaultdict entries created by a missing-metrics response are not samples.
+    # Keep them from clearing a Page's permission cooldown on a later failure.
+    samples = {key:values for key,values in samples.items() if values}
     return natives,pending,samples,error,stop,winning
 
 

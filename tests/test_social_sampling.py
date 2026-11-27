@@ -48,6 +48,29 @@ class SamplingTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM counter_history').fetchone()[0],1)
             self.assertEqual(db.execute('SELECT page FROM page_retry').fetchone()[0],'10')
 
+    def test_empty_metric_response_does_not_cancel_page_permission_cooldown(self):
+        from features.fb_auto_posts.effect_collector import FeedbackError
+        def request(keys,fields,token):
+            if token=='empty':return {key:dict(id=key) for key in keys}
+            if token=='denied':raise FeedbackError('feedback_graph_10')
+            return metrics(keys,fields,token)
+        with closing(sqlite3.connect(':memory:')) as db:
+            graph.prepare(db)
+            posts=[*[fbpost(i) for i in range(70)],fbpost(99,'22')]
+            g=FakeGraph(request)
+            reader=Reader({'10':[{'value':'empty'},{'value':'denied'}],'22':[{'value':'ok'}]})
+            ans=graph.collect(db,{p['post_id']:p for p in posts},True,g,
+                reader,graph.Usage(),100,100,True)
+            self.assertEqual(g.calls,3)
+            self.assertEqual(ans['attempted'],26)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM counter_history').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT page FROM page_retry').fetchone()[0],'10')
+            # A second pass must leave the denied Page alone while it cools.
+            second=FakeGraph(request)
+            graph.collect(db,{p['post_id']:p for p in posts},True,second,
+                reader,graph.Usage(),100,101,True)
+            self.assertEqual(second.calls,0)
+
     def test_recovery_and_multiple_samples_keep_actual_day_and_latest_value(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);path=root/'facebook-observations.sqlite3'
