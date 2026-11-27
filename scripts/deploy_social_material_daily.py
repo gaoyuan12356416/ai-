@@ -16,7 +16,7 @@ LINKS = dict(report=Path('/opt/social-material-effects/current'),
              collector=Path('/opt/social-material-effects-collector/current'))
 FILES = dict(report=['features/social_material_effects/'+f+'.py' for f in ('daily','report','window')],
              collector=['features/social_material_effects/window.py'])
-ASSETS = ['x-material-effects.'+suffix for suffix in ('html','js','css')]
+ASSETS = ['x-material-effects.'+suffix for suffix in ('html','js','css')] + ['quick-nav.js']
 SERVICE = 'social-material-effects-report.service'
 
 

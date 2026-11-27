@@ -23,7 +23,7 @@
     },
     {
       key: "xMaterialEffects", label: "社媒素材效果", order: 40,
-      description: "查看 X 和 Facebook 素材累计浏览、互动与收入",
+      description: "按数据日期查看 X 和 Facebook 素材浏览、互动与收入",
       kind: "page", href: "/x-material-effects.html", module: "x_material_effects", enabled: true,
     },
   ];
@@ -679,6 +679,9 @@
       }
       const entry = saved || { ...definition };
       if (entry.key === "xMaterialEffects" && entry.label === "X 素材效果") entry.label = definition.label;
+      if (entry.key === "xMaterialEffects" && ["查看 X 素材累计浏览、互动与收入", "查看 X 和 Facebook 素材累计浏览、互动与收入"].includes(entry.description)) {
+        entry.description = definition.description;
+      }
       if (!saved && definition.key === "xMaterialEffects" && oldX) inheritNavAccess(entry, oldX, true);
       if (!saved && definition.key === "socialkitAnalytics") {
         if (oldSocialKit) inheritNavAccess(entry, oldSocialKit);
