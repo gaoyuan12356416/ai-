@@ -368,7 +368,7 @@
         <label class="stretch">模板文案<textarea name="caption_template" rows="3" maxlength="2200" required>${h(c.caption_template??"{desc} {code}")}</textarea></label></div>
         <div class="macro-tools"><span>插入变量</span>${[["{desc}","素材描述"],["{{drama_name}}","剧名"],["{code}","四位码"],["{url}","归因链接"]].map(([v,label])=>`<button class="row-link" type="button" data-macro="${h(v)}">${label}</button>`).join("")}</div>`)}
       </div><aside class="panel editor-summary" tabindex="-1" aria-label="保存摘要"><h2>保存摘要</h2><div id="edit-volume"><strong id="edit-summary"></strong><small id="edit-times"></small></div>
-      <dl>${[["version","模板版本"],["accounts","已选频道"],["languages","剧语言"],["model","选材方式"],["window","投放指标统计"],["drama","剧目排序"],["material","素材排序"],["video","视频制作"],["copy","文案来源"]].map(([key,title])=>`<div><dt>${title}</dt><dd data-summary="${key}"></dd></div>`).join("")}</dl>
+      <dl>${[["version","模板版本"],["accounts","已选频道"],["languages","剧语言"],["model","选材方式"],["window","指标统计窗口"],["drama","剧目排序"],["material","素材排序"],["video","视频制作"],["copy","文案来源"]].map(([key,title])=>`<div><dt>${title}</dt><dd data-summary="${key}"></dd></div>`).join("")}</dl>
       <p class="muted">${fresh?"草稿保存后可预演，启用后按排期执行。":t.enabled?"当前模板已启用。新版本用于后续排期。":"保存后可继续预演此版本。"}</p>
       <button class="button primary" type="submit">${fresh?"保存草稿":"保存新版本"}</button>
       <button class="button" type="button" data-return>返回模板列表</button></aside></form>`;
