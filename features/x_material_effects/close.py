@@ -9,7 +9,7 @@ from features.social_material_effects import sampling
 
 
 def main():
-    if not sampling.closing_start(datetime.now(timezone.utc)):
+    if not sampling.closing_start(datetime.now(timezone.utc),23):
         return dict(status='outside_closing_hour')
     root=Path(store.ROOT)
     with (root/'refresh.lock').open('a') as guard:

@@ -1,4 +1,4 @@
-"""Daily Facebook coverage and a stable 23:00-24:00 Beijing closing pass."""
+"""Daily Facebook coverage and a stable 21:00-24:00 Beijing closing pass."""
 import argparse
 import json
 from . import data, graph

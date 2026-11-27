@@ -14,9 +14,9 @@ from . import window
 METRICS = (*window.COUNTERS, 'reposts', 'quotes', 'bookmarks')
 
 
-def closing_start(now):
+def closing_start(now, hour=21):
     local = now.astimezone(window.BJ)
-    return local.replace(hour=23, minute=0, second=0, microsecond=0) if local.hour == 23 else None
+    return local.replace(hour=hour, minute=0, second=0, microsecond=0) if local.hour >= hour else None
 
 
 def prepare(db):
@@ -82,4 +82,4 @@ def project(db, raw_path, cutoff):
                 window.record(db, dict(json.loads(metrics), post_id=pid, metrics_at=stamp), cutoff)
                 count += 1
     return dict(history_cursor=high, history_samples_merged=count,
-                interaction_method='daily_last_observation_delta', closing_window='23:00-24:00 Asia/Shanghai')
+                interaction_method='daily_last_observation_delta', closing_window='21:00-24:00 Asia/Shanghai')

@@ -14,15 +14,16 @@ from tests.test_fb_social_history import FakeGraph,Reader,metrics,post as fbpost
 
 class SamplingTest(unittest.TestCase):
     def test_closing_hour_is_beijing_and_never_crosses_day(self):
-        self.assertIsNone(sampling.closing_start(datetime(2026,11,27,14,59,tzinfo=timezone.utc)))
+        self.assertIsNone(sampling.closing_start(datetime(2026,11,27,12,59,tzinfo=timezone.utc)))
         self.assertEqual(sampling.closing_start(datetime(2026,11,27,15,30,tzinfo=timezone.utc)).isoformat(),
-                         '2026-11-27T23:00:00+08:00')
+                         '2026-11-27T21:00:00+08:00')
+        self.assertIsNone(sampling.closing_start(datetime(2026,11,27,14,59,tzinfo=timezone.utc),23))
         self.assertIsNone(sampling.closing_start(datetime(2026,11,27,16,tzinfo=timezone.utc)))
 
     def test_daily_coverage_and_close_bypass_success_interval_but_not_failure_retry(self):
         now=int(datetime(2026,11,27,15,10,tzinfo=timezone.utc).timestamp())
         rows=[fbpost(i) for i in range(4)]
-        saved={p['post_id']:(p['post_id'],'','{}','2026-11-27T14:00:00Z',now+3600,'') for p in rows}
+        saved={p['post_id']:(p['post_id'],'','{}','2026-11-27T12:00:00Z',now+3600,'') for p in rows}
         saved['10_1']=('10_1','','{}','2026-11-27T15:01:00Z',now+3600,'')
         saved['10_2']=('10_2','','{}','2026-11-26T14:00:00Z',now+3600,'feedback_graph_10')
         due,groups=graph.plan({p['post_id']:p for p in rows},saved,True,now,100,coverage=True)

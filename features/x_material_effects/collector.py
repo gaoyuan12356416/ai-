@@ -153,7 +153,7 @@ def revenue(posts,warehouse_root,*,daily=False):
 def collect_metrics(posts,state_path,*,limit=0,closing_pass=False):
     from features.social_material_effects import sampling
     now=datetime.now(timezone.utc);stamp=now.isoformat();calls=0;success=0;failures=0;upstream=''
-    boundary=sampling.closing_start(now) if closing_pass else None
+    boundary=sampling.closing_start(now,23) if closing_pass else None
     with closing(sqlite3.connect(state_path)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS observations(post_id TEXT PRIMARY KEY,metrics_json TEXT,metrics_at TEXT,attempt_at TEXT,error_code TEXT,retry_at TEXT)')
         db.execute('CREATE TABLE IF NOT EXISTS collection_state(id INTEGER PRIMARY KEY CHECK(id=1),error_code TEXT,retry_at TEXT)')
