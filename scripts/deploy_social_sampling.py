@@ -65,7 +65,7 @@ def stage(folder):
                 original=target.parent.resolve();target.parent.unlink();shutil.copytree(original,target.parent,symlinks=True)
             if target.is_symlink():target.unlink()
             if not target.resolve().is_relative_to(candidate):raise RuntimeError('source_symlink_escape')
-            base='a8e298a0' if lane=='x' else BASE
+            base='b07ff04c95718ff8f5b4f70ff2381ae1a5cfa275' if lane=='x' else BASE
             raw=content(SRC,base,name,previous/name)
             compile(raw,name,'exec');atomic(target,raw)
             changes[name]=dict(before=sha(previous/name),after=sha(target))
