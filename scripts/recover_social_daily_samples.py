@@ -2,7 +2,6 @@
 import argparse
 from contextlib import closing
 from datetime import datetime,timezone
-import fcntl
 import json
 from pathlib import Path
 import sqlite3
@@ -17,28 +16,31 @@ def read(path):
 
 
 def import_file(target,path,source):
-    added=0
+    samples,posts=[],[]
+    # Close the source read transaction before writing: seeding may read the
+    # destination cache itself, and SQLite's rollback journal needs that lock.
     with closing(read(path)) as db:
         tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if 'counter_day' in tables:
             for pid,metric,day,value,stamp in db.execute('SELECT * FROM counter_day'):
-                added+=sampling.save(target,pid,{metric:value},stamp)
+                samples.append((pid,{metric:value},stamp))
         if source=='facebook' and 'observation' in tables:
             for pid,native,raw,stamp,retry,error in db.execute('SELECT * FROM observation'):
                 values=json.loads(raw)
                 times=values.get('_times') or {m:stamp for m in sampling.METRICS}
                 if values.get('_views_at'):times['views']=values['_views_at']
-                added+=sampling.save_post(target,dict(values,post_id=pid,metrics_at=stamp,_metric_times=times))
+                posts.append(dict(values,post_id=pid,metrics_at=stamp,_metric_times=times))
         if source=='x' and 'observations' in tables:
             for pid,raw,stamp in db.execute('SELECT post_id,metrics_json,metrics_at FROM observations'):
-                added+=sampling.save(target,pid,json.loads(raw),stamp)
+                samples.append((pid,json.loads(raw),stamp))
         if source=='x' and 'posts' in tables and any(r[1]=='payload' for r in db.execute('PRAGMA table_info(posts)')):
             for raw, in db.execute('SELECT payload FROM posts'):
-                added+=sampling.save_post(target,json.loads(raw))
-    return added
+                posts.append(json.loads(raw))
+    return sum(sampling.save(target,*sample) for sample in samples)+sum(sampling.save_post(target,p) for p in posts)
 
 
 def main(folder):
+    import fcntl
     backup=folder/'backup'
     files={
         'facebook':list(backup.glob('facebook*.sqlite3'))+[

@@ -112,5 +112,18 @@ class SamplingTest(unittest.TestCase):
                 self.assertEqual(stamp,response_at.isoformat())
                 self.assertEqual(json.loads(raw)['views'],25)
 
+    def test_cache_seeding_closes_read_before_writes_need_exclusive_lock(self):
+        from scripts.recover_social_daily_samples import import_file
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'observations.sqlite3'
+            with closing(sqlite3.connect(path,timeout=0.1)) as db:
+                graph.prepare(db)
+                db.executemany('INSERT INTO observation VALUES(?,?,?,?,?,?)',
+                    ((str(i),'',json.dumps({'views':i,'likes':i}),'2026-11-26T15:30:00Z',0,'') for i in range(1000)))
+                db.commit();db.execute('PRAGMA cache_size=10')
+                self.assertEqual(import_file(db,path,'facebook'),1000)
+                db.commit()
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM counter_history').fetchone()[0],1000)
+
 
 if __name__=='__main__':unittest.main()
