@@ -46,7 +46,12 @@ class CoverSourceTests(unittest.TestCase):
             materials = [dict(self.materials[0], product=product)]
             rows = [self.row(), self.row(app_id=root, cover='https://example.com/' + root + '.jpg')]
             self.assertEqual(select_cover(materials, root, rows)['cover_url'], 'https://example.com/' + root + '.jpg')
-            self.assertEqual(select_cover(self.materials, root, rows)['error'], 'cover_material_product_or_type_mismatch')
+            # Live new-product Ads reuse DramaWave materials; shared content ID
+            # must still resolve to the destination product's exact cover.
+            self.assertEqual(select_cover(self.materials, root, rows)['cover_url'], 'https://example.com/' + root + '.jpg')
+            self.assertEqual(select_cover(self.materials, root, [self.row()])['error'], 'cover_missing')
+            self.assertEqual(select_cover([dict(self.materials[0], product='HotDrama')], root, rows)['error'],
+                             'cover_material_product_or_type_mismatch')
 
     def test_url_keeps_attribution_and_rejects_credentials(self):
         self.assertEqual(cover_url('https://static.mydramawave.com/a.png?q=2'), 'https://static-v1.mydramawave.com/a.png?q=2')

@@ -59,7 +59,7 @@ class CoverSnapshotTests(unittest.TestCase):
             task['candidate']['root_id'] = root
             row = self.context_row(product=child, queue_product=child, setting_id=child,
                                    setting_parent=root, parent_setting_id=root)
-            process = self.process(context=row, root=root, product=product)
+            process = self.process(context=row, root=root, product='DramaWave')
             with patch.object(sql_source.subprocess, 'Popen', return_value=process):
                 prepared = source.prepare_candidates([task])['1']
             self.assertTrue(prepared['validated'], prepared.get('error'))

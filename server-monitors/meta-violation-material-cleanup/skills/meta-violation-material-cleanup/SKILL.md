@@ -22,7 +22,7 @@ Source: GitHub gaoyuan12356416/ai-, server-monitors/meta-violation-material-clea
 
 ## Selection and transformation
 
-- Roots 1479 (DramaWave), 3302 (HotDrama), 979 (FreeReels), 3049 (TopShort) and their direct product children only, per the 2026-11-27 scope expansion. Similar names without a configured parent do not establish product membership. FreeReels/TopShort use their own material product and root-product drama cover; only the existing HotDrama/DramaWave reuse rule allows cross-product materials.
+- Roots 1479 (DramaWave), 3302 (HotDrama), 979 (FreeReels), 3049 (TopShort) and their direct product children only, per the 2026-11-27 scope expansion. Similar names without a configured parent do not establish product membership. FreeReels/TopShort allow their own and DramaWave materials: the live first cohort's 6/8 materials all reused DramaWave, and each had an exact destination-product/content/language cover. Always use the Ad's root-product cover; never fall back to another product's cover. Existing HotDrama reuse is unchanged.
 - Exact seven policies: Adult Nudity and Sexual Activity; Adult Sexual Solicitation and Sexually Explicit Language; Adult Sexual Exploitation; Human Exploitation; Violence & Graphic Content; Spam; Drugs and Pharmaceuticals.
 - Scan the preceding three-day half-open window each hour. At least three distinct violating Ad IDs per attributable canonical material trigger; duplicate policies on one Ad count once.
 - Include current already-qualified materials on the first scan. Persist triggers and waiting tasks beyond the rolling window. Each hour discover newly associated Ads; exclude queued/terminal pairs and proven historical Ad deletion receipts before expensive reads.

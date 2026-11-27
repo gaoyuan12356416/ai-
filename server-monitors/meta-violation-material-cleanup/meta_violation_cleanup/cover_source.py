@@ -34,10 +34,11 @@ def cover_url(value):
 
 def select_cover(metadata, root_id, rows):
     """All materials in one simple creative must resolve to the same drama."""
-    # HotDrama intentionally reuses DramaWave materials with the same shared
-    # content ID. The cover still comes from the Ad's own root product below.
+    # HotDrama, FreeReels and TopShort reuse DramaWave materials with the same
+    # shared content ID. The cover still comes from the Ad's own root below.
     products = {'1479': {'dramawave'}, '3302': {'hotdrama', 'dramawave'},
-                '979': {'freereels'}, '3049': {'topshort'}}.get(str(root_id))
+                '979': {'freereels', 'dramawave'},
+                '3049': {'topshort', 'dramawave'}}.get(str(root_id))
     if not products or any(str(m.get('data_source')) != '6' or
                            str(m.get('product') or '').strip().casefold() not in products for m in metadata):
         return {'error': 'cover_material_product_or_type_mismatch'}
