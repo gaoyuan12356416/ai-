@@ -37,6 +37,25 @@ def catalog_row(key, drama, material, *, owner="u", tenant="T", lang="en"):
 
 
 class OrganicMetricsTest(unittest.TestCase):
+    def test_daily_window_excludes_prior_income_and_keeps_scope(self):
+        key=campaign_key('1','Case')
+        rows=[catalog_row(key,'a','101')]
+        days=['2026-11-25','2026-11-26']
+        effects=[dict(platform='tiktok',site_id='2250',date=d,campaign_id=key,revenue_cents=v)
+                 for d,v in zip(days,[1000,50])]
+        manifest=dict(version='v',end=days[-1],generated_at='2026-11-27T00:00:00Z',
+                      coverage={'tiktok:2250':days},iaa_coverage={'tiktok:2250':days})
+        snapshot=profiles.build_snapshot(rows,effects,{},manifest,date(2026,11,26))
+        one=profiles.social_metrics(ACTOR,'en',snapshot=snapshot,dates=(days[-1],days[-1]))
+        two=profiles.social_metrics(ACTOR,'en',snapshot=snapshot,dates=tuple(days))
+        self.assertEqual((one['materials']['101'],two['materials']['101']),(50,1050))
+        self.assertEqual(one['status'],'complete')
+        self.assertEqual(profiles.social_metrics(dict(ACTOR,user_id='other'),'en',snapshot=snapshot,dates=tuple(days))['dramas'],{})
+        snapshot['meta']['social_income_coverage'].remove(days[-1])
+        self.assertEqual(profiles.social_metrics(ACTOR,'en',snapshot=snapshot,dates=tuple(days))['status'],'partial')
+        del snapshot['social_income_daily']
+        self.assertEqual(profiles.social_metrics(ACTOR,'en',snapshot=snapshot,dates=tuple(days))['status'],'unavailable')
+
     def test_scoped_performance_uses_verified_route_and_material_evidence(self):
         keys = [campaign_key(str(i), "Case") for i in range(10)]
         rows = [

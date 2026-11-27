@@ -282,7 +282,7 @@
       sort.querySelector(`option[value="${metric}"]`).disabled=disabled;
       if(disabled&&sort.value===metric)sort.value="x_revenue";
     }
-    form.querySelector(`[data-effect-info="${key}"]`).textContent=source==="tiktok"?"TikTok 按已回传的累计归属收入筛选和排序。":source==="all"?"合计 X 和 Facebook 已回传的累计社媒表现。":"按当前来源已回传的累计社媒表现筛选和排序。";
+    form.querySelector(`[data-effect-info="${key}"]`).textContent=source==="tiktok"?"按指标窗口内发生的归属收入筛选和排序；收入沿用 UTC 统计日，不含今天。":"按指标窗口内新增的社媒表现筛选和排序，不含今天。互动取北京日末可用快照差额，采集时间影响精度；缺少起止快照时未知，不用累计值补齐。收入按同日期范围的 UTC 发生日汇总。";
   }
 
   function launchWindow(input){
@@ -348,7 +348,7 @@
         <label>视频制作<select name="video_template"><option value="random_overlay">随机模板</option><option value="direct_outro">固定教程片尾</option></select></label></div>`)}
       ${panel("选择 TT 频道",picker(true))}
       ${panel("两层筛选与排序",`<div class="window-fields form-grid">
-        ${numberField("metric_window_days","投放指标统计（天）",c.metric_window_days??7,1,30)}
+        ${numberField("metric_window_days","指标统计窗口（完整天，投放及社媒）",c.metric_window_days??7,1,30)}
         <label>剧目上线窗口（相对天数）<input name="drama_launch_window_days" value="${h(c.drama_launch_window_days??30)}" placeholder="0、30 或 -1~0" required></label>
         ${numberField("material_window_days","素材入库窗口（天）",c.material_window_days??30,0,3650)}
         ${numberField("cooldown_days","同频道同剧冷却（天）",c.cooldown_days??7,0,3650)}</div>
@@ -543,7 +543,8 @@
       return `<li>${h(effectMetrics[key])} ${h(shown)}${note?`<small class="muted">（${h(note)}）</small>`:""}</li>`;
     });
     const versions=Object.entries(effect.versions||{}).filter(([,v])=>v!=null&&v!=="").map(([k,v])=>(effectSources[k]||k)+" "+v);
-    return `<details class="social-evidence"><summary>${h(channel)} 社媒证据${effect.posts!=null?` · ${h(effect.posts)} 条发布`:""}</summary><ul>${facts.join("")}</ul>${versions.length?`<small class="secondary">数据版本 ${h(versions.join(" · "))}</small>`:""}${effect.as_of?`<small class="secondary">数据截至 ${h(effect.as_of)}</small>`:""}</details>`;
+    const period=effect.window?`<small class="secondary">新增窗口 ${h(effect.window.start)} 至 ${h(effect.window.end)} · 互动为日末快照差额，收入按 UTC 日${effect.missing_income_dates?.length?` · 收入待补：${h(effect.missing_income_dates.join("、"))}`:""}</small>`:"";
+    return `<details class="social-evidence"><summary>${h(channel)} 社媒证据${effect.posts!=null?` · ${h(effect.posts)} 条发布`:""}</summary>${period}<ul>${facts.join("")}</ul>${versions.length?`<small class="secondary">数据版本 ${h(versions.join(" · "))}</small>`:""}${effect.as_of?`<small class="secondary">数据截至 ${h(effect.as_of)}</small>`:""}</details>`;
   }
   function execution(t,initialMode="template"){
     const c=cfg(t),scope=(c.account_ids||[]).map(String),today=new Date(Date.now()+8*3600000).toISOString().slice(0,10);

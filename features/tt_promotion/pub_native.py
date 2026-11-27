@@ -385,12 +385,14 @@ class Runtime:
         config = template.config
         scoped = {**config, **opts}
         from .social_effects import SocialRules
+        from features.social_material_effects.window import bounds
+        selected_at = datetime.fromisoformat(opts['_catalog_at']) if opts.get('_catalog_at') else now()
 
         # Keep every slot for the same template/language on one projection generation.
         cache = getattr(self, "_preview_effects", {})
-        effect_key = (template.id, template.version, channel["drama_language"])
+        effect_key = (template.id, template.version, channel["drama_language"], bounds(config.get('metric_window_days',7),selected_at))
         if effect_key not in cache:
-            cache[effect_key] = SocialRules(config, channel["drama_language"])
+            cache[effect_key] = SocialRules(config, channel["drama_language"],now=selected_at)
         effects = cache[effect_key]
         selector = make_selector(
             self.native, _PreviewStore(self.store), scoped, channel, seed, blocked, effects=effects
@@ -406,7 +408,7 @@ class Runtime:
             account_id=str(channel["account_id"]),
             language=channel["drama_language"],
             rules=rules,
-            now=datetime.fromisoformat(opts["_catalog_at"]) if opts.get("_catalog_at") else now(),
+            now=selected_at,
         )
         raw = selector.select_and_reserve(req).as_dict()
         m = raw["material"]

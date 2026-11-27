@@ -1,9 +1,9 @@
-"""Cumulative, measured organic effects applied to otherwise eligible TT candidates."""
+"""Windowed, measured organic effects applied to otherwise eligible TT candidates."""
 
 from decimal import Decimal, InvalidOperation
 import sqlite3
 
-from features.social_material_effects import data, selection
+from features.social_material_effects import data, selection, window
 
 METRICS = data.FILTERS
 SOURCES = {"x", "facebook", "all", "tiktok"}
@@ -50,8 +50,9 @@ def normalized(rule):
 
 
 class SocialRules:
-    def __init__(self, config, language):
+    def __init__(self, config, language, *, now=None):
         self.levels = {}
+        self.dates = window.bounds(config.get('metric_window_days',7),now)
         active = {
             level: config.get(level + "_rule", {})
             for level in ("drama", "material")
@@ -69,13 +70,13 @@ class SocialRules:
                     source = rule.get("effect_channel", "x")
                     if source == "tiktok":
                         if native is None:
-                            native = social_metrics(config.get("creator") or {}, language)
+                            native = social_metrics(config.get("creator") or {}, language,dates=self.dates)
                             if native["status"] not in ("complete", "partial"):
                                 raise EffectSourceError("TT 已归属收入快照尚未就绪")
                         index = native[level + "s"]
                         revision, stamp = {"tiktok": native["version"]}, native["end"]
                     else:
-                        index, revision, stamp = selection.load(level, source, language, ["dramawave"])
+                        index, revision, stamp = selection.load(level, source, language, ["dramawave"],dates=self.dates)
                     if any(k in versions and versions[k] != v for k, v in revision.items()):
                         break
                     versions.update(revision)
@@ -87,6 +88,7 @@ class SocialRules:
             raise EffectSourceError("所选社媒效果快照暂不可用") from exc
         finally:
             self.native_partial = bool(native and native["status"] == "partial")
+            self.native_missing = native.get('missing_dates',[]) if native else []
 
     def facts(self, level, content, material=None):
         rule, source, index, revision, stamp = self.levels[level]
@@ -167,5 +169,7 @@ class SocialRules:
                 metrics=public(facts),
                 known=public(facts.get("known", {})),
                 coverage=coverage,
+                window=window.description(*self.dates),
+                missing_income_dates=self.native_missing if source=='tiktok' else [],
             )
         return out

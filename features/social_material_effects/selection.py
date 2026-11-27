@@ -2,7 +2,7 @@
 from decimal import Decimal
 from functools import lru_cache
 import sqlite3
-from . import data
+from . import data, window
 
 METRICS = tuple('revenue_cents' if k=='revenue' else k for k in data.FILTERS)
 
@@ -12,18 +12,30 @@ def normal_language(code):
     return {'jp':'ja','fil':'tl'}.get(text,text)
 
 
-def load(level, source, language, products, root=None):
+def load(level, source, language, products, root=None, *, dates=None):
     root = data.root_path(root)
     sources = data.channels(source)
     # Hold immutable file handles while reading their metadata and rows. The
     # stat fingerprint is only a cache discriminator for the next reader.
     files = tuple((p.stat().st_ino,p.stat().st_mtime_ns) for p in (root/(s+'.sqlite3') for s in sources))
-    return _load(str(root),files,level,sources,normal_language(language),tuple(sorted(v.lower() for v in products)))
+    return _load(str(root),files,level,sources,normal_language(language),tuple(sorted(v.lower() for v in products)), dates)
 
 
 @lru_cache(maxsize=12)
-def _load(root, files, level, sources, language, products):
+def _load(root, files, level, sources, language, products, dates=None):
     with data.reading(sources,root) as (db,meta):
+        if dates is not None:
+            facts = {}
+            for source in sources:
+                for key, values in window.totals(db,source,level,language,products,*dates).items():
+                    total = facts.setdefault(key,[0]+[None,0]*len(METRICS))
+                    total[0] += values[0]
+                    for i in range(len(METRICS)):
+                        value, n = values[1+2*i:3+2*i]
+                        if value is not None:
+                            total[1+2*i] = (total[1+2*i] or 0)+value
+                        total[2+2*i] += n
+            return facts, {s:m['version'] for s,m in meta.items()}, min(m['generated_at'] for m in meta.values())
         aliases = {'ja':('ja','jp'),'tl':('tl','fil')}.get(language,(language,))
         where = 'lower(language) IN (' + ','.join('?' for _ in aliases) + ')'
         args = list(aliases)
@@ -56,17 +68,18 @@ def active(rule):
 
 
 class FacebookRules:
-    def __init__(self, config, language, catalog):
+    def __init__(self, config, language, catalog, now=None):
         from features.material_products import selected
         self.rules = {}
         self.versions = {}
         self.catalog = catalog
+        self.dates = window.bounds(config.get('metric_window_days',7),now)
         for level in ('drama','material'):
-            rule = config[level+'_rule']
+            rule = config.get(level+'_rule',{})
             if not active(rule):
                 continue
             source = rule.get('effect_channel','facebook')
-            index, version, _ = load(level,source,language,selected(config))
+            index, version, _ = load(level,source,language,selected(config),dates=self.dates)
             limits = []
             for i,metric in enumerate(data.FILTERS):
                 low,high = (rule.get('x_'+metric+'_'+k) for k in ('min','max'))
@@ -109,13 +122,13 @@ class FacebookRules:
     def audit(self,cid,mid):
         if not self.rules:
             return {}
-        return dict(versions=self.versions, **{level:dict(channel=rule[4],
+        return dict(versions=self.versions, window=window.description(*self.dates), **{level:dict(channel=rule[4],
                     facts=evidence(self.record(level,cid,mid))) for level,rule in self.rules.items()})
 
 
-def facebook_rules(config, language, catalog='dramawave'):
+def facebook_rules(config, language, catalog='dramawave', *, now=None):
     try:
-        return FacebookRules(config,language,catalog)
+        return FacebookRules(config,language,catalog,now)
     except (OSError, sqlite3.Error) as exc:
         from features.fb_auto_posts.repositories import RepositoryError
         raise RepositoryError('fb_social_effect_unavailable','所选社媒效果快照暂不可用',503) from exc

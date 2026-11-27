@@ -78,6 +78,7 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
     index = campaign_index(catalog)
     owners = {key: resolve(candidates) for key, candidates in index.items()}
     social = defaultdict(int)
+    social_daily = defaultdict(int)
     targets = {}
     for key, candidates in index.items():
         row = owners[key]
@@ -159,6 +160,8 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
             accept(owners[key], day, revenue, iaa)
             if key in targets and day >= windows["all"]["start"]:
                 social[targets[key]] += revenue
+                if day >= (date.fromisoformat(end)-timedelta(days=31)).isoformat():
+                    social_daily[(*targets[key],day)] += revenue
     by_receipt = defaultdict(list)
     for key, candidates in index.items():
         for row in candidates:
@@ -180,6 +183,8 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
             end=end,
             windows=windows,
             status=windows["all"]["status"],
+            social_income_coverage=sorted(set(manifest.get('coverage',{}).get('tiktok:2250',()))
+                - set(windows['all']['iaa_pending_dates'])),
         ),
         facts=list(grouped.values()),
         social_income=[
@@ -194,6 +199,9 @@ def build_snapshot(catalog, effects, classifications, manifest, last_complete_ut
             )
             for (tenant, owner, lang, content, material), cents in sorted(social.items())
         ],
+        social_income_daily=[dict(product='dramawave',tenant=t,owner=o,language=l,
+            content_id=c,material_id=m,date=d,cents=v)
+            for (t,o,l,c,m,d),v in sorted(social_daily.items())],
         classifications=categories,
     )
 
@@ -267,10 +275,8 @@ def refresh(root=None, warehouse=None, env_file="/root/drama_material_service/.e
         manifest, path = current(warehouse or os.environ.get("SOCIAL_ANALYTICS_WAREHOUSE_ROOT") or WAREHOUSE)
         last_day = datetime.now(timezone.utc).date() - timedelta(days=1)
         window = _windows(manifest, last_day)["all"]
-        if window["status"] != "complete" and (directory / "current.json").is_file():
-            prior = _snapshot(directory)
-            if prior and prior["meta"]["status"] == "complete":
-                raise ValueError("tt_income_refresh_pending")
+        prior = _snapshot(directory) if (directory / "current.json").is_file() else None
+        preserve_portrait = window['status']!='complete' and prior and prior['meta']['status']=='complete'
         with closing(connect(path)) as db:
             catalog = [
                 json.loads(r[0])
@@ -284,6 +290,15 @@ def refresh(root=None, warehouse=None, env_file="/root/drama_material_service/.e
                     "SELECT payload FROM effects WHERE platform='tiktok' AND dt<=?", (window["end"],)
                 )
             ]
+        # A missing income day must not prevent other verified days from serving
+        # template windows. Keep the existing complete portrait independently.
+        window_data = build_snapshot(catalog,effects,{},manifest,last_day)
+        _write_snapshot(directory,'social-income.json',{k:window_data[k] for k in
+            ('meta','social_income','social_income_daily')})
+        if preserve_portrait:
+            return dict(status='portrait_preserved',window_income_status=window['status'],
+                        version=manifest['version'],missing_dates=window['missing_dates'],
+                        iaa_pending_dates=window['iaa_pending_dates'])
         ids = sorted({r["drama"] for r in catalog if r.get("drama")})
         classifications = _catalog_labels(reader, ids)
         data = build_snapshot(catalog, effects, classifications, manifest, last_day)
@@ -330,12 +345,14 @@ def account_followers(root=None):
     return _snapshot(directory, "followers.json") or {}
 
 
-def social_metrics(actor, language_code, *, product="dramawave", snapshot=None, root=None):
+def social_metrics(actor, language_code, *, product="dramawave", snapshot=None, root=None, dates=None):
     """Known cumulative 2250 income in USD cents for the actor's visible TT organic campaigns."""
     if snapshot is None:
         directory = Path(root or os.environ.get("TT_PROMOTION_PROFILE_ROOT") or DEFAULT_ROOT)
         try:
-            snapshot = _snapshot(directory)
+            snapshot = _snapshot(directory,'social-income.json') if dates is not None else _snapshot(directory)
+            if snapshot is None:
+                snapshot = _snapshot(directory)
         except (OSError, ValueError):
             snapshot = None
     data = snapshot or {}
@@ -358,7 +375,12 @@ def social_metrics(actor, language_code, *, product="dramawave", snapshot=None, 
     ):
         return result
     material_parent = defaultdict(set)
-    for row in data["social_income"]:
+    if dates is not None and 'social_income_daily' not in data:
+        return result
+    rows = data['social_income_daily'] if dates is not None else data['social_income']
+    for row in rows:
+        if dates is not None and not dates[0]<=row['date']<=dates[1]:
+            continue
         if (
             row["tenant"] != actor["tenant_key"]
             or (actor.get("role") != "admin" and row["owner"] != actor["user_id"])
@@ -375,6 +397,13 @@ def social_metrics(actor, language_code, *, product="dramawave", snapshot=None, 
         if len(parents) > 1:
             del result["materials"][material]
     result["status"] = meta.get("status", "unavailable")
+    if dates is not None:
+        start,end = map(date.fromisoformat,dates)
+        requested = {(start+timedelta(days=i)).isoformat() for i in range((end-start).days+1)}
+        retained = (date.fromisoformat(meta['end'])-timedelta(days=31)).isoformat()
+        covered = {d for d in meta.get('social_income_coverage',()) if retained<=d<=meta['end']}
+        result.update(start=dates[0],end=dates[1],missing_dates=sorted(requested-covered),
+                      status='complete' if requested<=covered else 'partial')
     if result["status"] == "partial":
         for scope in ("dramas", "materials"):
             result[scope] = {key: amount for key, amount in result[scope].items() if amount != 0}
