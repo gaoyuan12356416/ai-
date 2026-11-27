@@ -77,7 +77,8 @@ def extend_hotdrama_catalog(resources, infos, directions, warm, aliases, themes)
         if not any(r.get('labels') not in (None, '', '[]', []) for r in own):
             source = [r for r in resources.get(('1479', cid), []) if language(r['language']) == lang]
             source = matching_resources(source, link['series_code'])
-            if source and (not own or matching_resources(own, link['series_code'])):
+            own_series = {str(r.get('series_code') or '') for r in own} - {''}
+            if source and own_series <= {link['series_code']}:
                 target[lang] = topics(source, aliases, themes).get(lang, [])
 
 

@@ -63,6 +63,9 @@ class HotDramaTests(unittest.TestCase):
         warm = {'3302': {'A': {'ro': []}}}
         extend_hotdrama_catalog(resources, self.infos, directions, warm, {'romance': 'romance'}, {'romance': 'sweet_romance'})
         self.assertEqual(warm['3302']['A']['ro'], [])
+        resources[('3302', 'A')] = [{**own, 'series_code':'', 'labels':[]}]
+        extend_hotdrama_catalog(resources, self.infos, directions, warm, {'romance': 'romance'}, {'romance': 'sweet_romance'})
+        self.assertEqual(warm['3302']['A']['ro'], ['sweet_romance'])
 
     def test_rebuild_conserves_product_facts_money_and_publication_counts(self):
         old = classifications([], [self.infos[1]])[3302, 'A', 'ro']
