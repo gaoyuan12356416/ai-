@@ -61,7 +61,7 @@ def prepare(folder, root, reader):
         present = {r[0] for r in db.execute('SELECT page_id FROM pages')}
         def freeze(part):
             try:
-                rows, meta = request(reader, version, part, detail=True, exact=True, step=len(part))
+                rows, meta = request(reader, version, part, detail=True, exact=True, step=24)
             except Exception as exc:
                 if '3024' not in str(exc) or len(part) <= 1:
                     raise
@@ -77,9 +77,9 @@ def prepare(folder, root, reader):
             db.commit()
             atomic_json(folder / 'original-meta.json', meta)
         missing = [pid for pid in ids if pid not in present]
-        for offset in range(0, len(missing), 24):
-            freeze(missing[offset:offset + 24])
-            print(encoded(dict(event='frozen_pages',done=min(offset+24,len(missing)),total=len(missing))), flush=True)
+        for offset in range(0, len(missing), 96):
+            freeze(missing[offset:offset + 96])
+            print(encoded(dict(event='frozen_pages',done=min(offset+96,len(missing)),total=len(missing))), flush=True)
     meta = json.loads((folder / 'original-meta.json').read_text())
     original = Pages(folder / 'original.sqlite3')
     totals = dict.fromkeys(meta['audit'], 0)
