@@ -104,15 +104,30 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
     for column, values, index in (
         ('original_source_id',materials,'ads_facebook_auto_created_data_original_source_id'),
         ('source_id',aliases,'ads_facebook_auto_created_data_source_id')):
-        for part in _chunks(sorted(values),1000):
+        for part in _chunks(sorted(values),64):
             # A valid nonempty original set must equal the source wrapper's
             # material set. Scalar originals were already found above; arrays
             # are covered by the complete composite pass below.
-            absent_original=(" AND (original_source_id IS NULL OR TRIM(original_source_id) IN ('','0'))"
-                             if column=='source_id' else '')
-            for rows in pages('ads_facebook_auto_created_data FORCE INDEX('+index+')',expressions,
-                              column+' IN '+_inside(part)+' AND product IN '+_inside(products)+absent_original,column):
-                accept(rows)
+            # Filtering sparse empty originals in SQL made LIMIT ineffective:
+            # MySQL read hundreds of thousands of rows before returning even
+            # one page and repeatedly hit errno 3024. Page the narrow source
+            # projection first, then hydrate only matches by primary key in the
+            # SAME snapshot. Never filter publication dates or omit a range.
+            fields = (tuple((key, 'CAST(%s AS CHAR)' % key) for key in
+                            ('id', 'source_id', 'original_source_id'))
+                      if column == 'source_id' else expressions)
+            for rows in pages('ads_facebook_auto_created_data FORCE INDEX('+index+')',fields,
+                              column+' IN '+_inside(part)+' AND product IN '+_inside(products),column):
+                if column == 'source_id':
+                    metrics['source_candidate_rows'] += len(rows)
+                    missing = [str(row['id']) for row in rows if row['original_source_id'] is None
+                               or str(row['original_source_id']).strip(' ') in ('', '0')]
+                    for ids in _chunks(missing, 1000):
+                        for full in pages('ads_facebook_auto_created_data FORCE INDEX(PRIMARY)',
+                                          expressions, 'id IN ' + _inside(ids)):
+                            accept(full)
+                else:
+                    accept(rows)
             progress(stage='material_lookup',publication_rows=len(found),lookup_metrics=dict(metrics))
     # Complete both indexed columns independently. A product-index pass fetches
     # tens of millions of full records; these range scans reject ordinary

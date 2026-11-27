@@ -9,6 +9,7 @@ import subprocess
 
 from .notifications import Notifier, recipient
 from .runtime import CST, process_lock
+from .policy import ROOT_PRODUCT_LABEL
 
 
 def report_settings(config):
@@ -270,7 +271,7 @@ def workload_card(data):
     return {'config': {'wide_screen_mode': True},
             'header': {'template': 'blue', 'title': {'tag': 'plain_text', 'content': lines[0]}},
             'elements': [
-                {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': lines[1] + '\nDramaWave / HotDrama · 每4小时播报'}]},
+                {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': lines[1] + '\n' + ROOT_PRODUCT_LABEL + ' · 每4小时播报'}]},
                 {'tag': 'div', 'fields': [
                     {'is_short': True, 'text': {'tag': 'lark_md', 'content': label + '\n**{:,} {}**'.format(count, unit)}}
                     for label, count, unit in [('替换成功', t.get('succeeded', 0), '条'),
@@ -295,7 +296,7 @@ def report_body(data):
     cadence += '，汇总近%d小时' % lookback_hours
     lines = ['Meta 违规素材封面替换｜' + title,
              '统计窗口：%s 至 %s（北京时间，前含后不含）' % (start, end),
-             '范围：DramaWave / HotDrama；' + cadence,
+             '范围：' + ROOT_PRODUCT_LABEL + '；' + cadence,
              '新增达标素材 %d；新增关联广告 %d' % (data['new_materials'], data['new_ads']),
              '扫描：完成 %d 批，异常 %d 批' % (data['scan_completed'], data['scan_failed']),
              '执行异常批次：%d' % data['worker_errors'],
@@ -387,8 +388,8 @@ def report_card(data):
         return duration(data['timings'][key]['mean_seconds'])
 
     elements = [
-        note('%s → %s（北京）\nDramaWave / HotDrama · %s' % (
-            start, end, '每天 09:30 播报' if hours == 24 else '每%d小时播报' % hours)),
+        note('%s → %s（北京）\n%s · %s' % (
+            start, end, ROOT_PRODUCT_LABEL, '每天 09:30 播报' if hours == 24 else '每%d小时播报' % hours)),
         fields(['替换成功\n**{:,} 条**'.format(t.get('succeeded', 0)),
                 '旧 Creative 清理\n**{:,} 个**'.format(d.get('deleted_verified', 0))]),
         md('广告：失败 **%d** · 未知 **%d** · 跳过 %d\n清理：失败 **%d** · 未知 **%d**' % (

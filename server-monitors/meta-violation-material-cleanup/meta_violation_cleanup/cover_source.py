@@ -36,7 +36,8 @@ def select_cover(metadata, root_id, rows):
     """All materials in one simple creative must resolve to the same drama."""
     # HotDrama intentionally reuses DramaWave materials with the same shared
     # content ID. The cover still comes from the Ad's own root product below.
-    products = {'1479': {'dramawave'}, '3302': {'hotdrama', 'dramawave'}}.get(str(root_id))
+    products = {'1479': {'dramawave'}, '3302': {'hotdrama', 'dramawave'},
+                '979': {'freereels'}, '3049': {'topshort'}}.get(str(root_id))
     if not products or any(str(m.get('data_source')) != '6' or
                            str(m.get('product') or '').strip().casefold() not in products for m in metadata):
         return {'error': 'cover_material_product_or_type_mismatch'}
@@ -226,6 +227,7 @@ def scan(source, store, batch_id, audit=None, stop=lambda: False):
         if store.requeue_waiting(row['id'], batch_id):
             counts['review_rechecks'] += 1
     summary = dict(counts, new_materials=new_materials, triggered_materials=len(triggered),
+                   product_scope_counts=dict(Counter(scope.values())),
                    new_material_product_pairs=new_material_product_pairs,
                    violation_rows=len(violations), policy_rows=len(rows), lookup=lookup,
                    seconds=round(time.monotonic() - began, 3), **meta)

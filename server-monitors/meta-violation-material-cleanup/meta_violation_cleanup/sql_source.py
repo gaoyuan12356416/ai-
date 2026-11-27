@@ -17,6 +17,7 @@ import time
 import uuid
 
 from .sql_diagnostics import StderrCapture, record_failure
+from .policy import ROOT_PRODUCT_IDS
 
 
 _SQL_LOCK = threading.RLock()
@@ -403,8 +404,9 @@ class SqlSource:
         return self._products("")
 
     def scope_products(self):
-        """Small current directory for the two allowed roots and their children."""
-        return self._products("id IN (1479,3302) OR ads_app_id IN (1479,3302)")
+        """Small current directory for allowed roots and their children."""
+        roots = ','.join(sorted(ROOT_PRODUCT_IDS, key=int))
+        return self._products("id IN (%s) OR ads_app_id IN (%s)" % (roots, roots))
 
     def _products(self, predicate):
         expressions = (("id", "CAST(id AS CHAR)"), ("name", "name"),
@@ -776,9 +778,9 @@ class SqlSource:
                 parent = str(row.get("setting_parent") or "")
                 if not _ID.fullmatch(product) or str(row.get("setting_id")) != product:
                     raise SqlSourceError("current_product_unavailable")
-                if product in ("1479", "3302"):
+                if product in ROOT_PRODUCT_IDS:
                     scope[product] = product
-                elif parent in ("1479", "3302"):
+                elif parent in ROOT_PRODUCT_IDS:
                     if str(row.get("parent_setting_id")) != parent:
                         raise SqlSourceError("current_product_unavailable")
                     scope[product] = parent

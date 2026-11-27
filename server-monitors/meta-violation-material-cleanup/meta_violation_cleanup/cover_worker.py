@@ -15,7 +15,7 @@ from .cover_payload import (PayloadError, build_payload, payload_key,
                             verify_ad_binding, verify_creative)
 from .cover_store import CoverStoreError
 from .graph import GraphError
-from .policy import _feedback_empty
+from .policy import _feedback_empty, ROOT_PRODUCT_IDS
 from .throttle import RequestNotSent
 from .cover_performance import Timings, timed
 
@@ -273,7 +273,7 @@ class CoverWorker:
                 if str(context.get(field)) != str(task[field]):
                     return self._finish(task, 'obsolete', {'reason': 'source_binding_changed', 'request_sent': False})
             user = str(context['user_id'])
-            if str(context.get('root_id')) not in ('1479', '3302') or not context.get('material_ids'):
+            if str(context.get('root_id')) not in ROOT_PRODUCT_IDS or not context.get('material_ids'):
                 return self._finish(task, 'failed', {'reason': 'source_scope_unverified', 'request_sent': False})
             if self.store.is_cover_creative(task['account_id'], task['old_creative_id']):
                 return self._finish(task, 'obsolete', {'reason': 'cover_already_applied', 'request_sent': False})

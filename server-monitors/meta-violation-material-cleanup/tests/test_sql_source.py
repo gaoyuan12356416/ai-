@@ -493,7 +493,7 @@ class SqlSourceTests(unittest.TestCase):
 
     def test_scope_products_reads_only_root_ids_and_direct_children(self):
         def responder(sql):
-            self.assertIn("WHERE id>0 AND (id IN (1479,3302) OR ads_app_id IN (1479,3302))", sql)
+            self.assertIn("WHERE id>0 AND (id IN (979,1479,3049,3302) OR ads_app_id IN (979,1479,3049,3302))", sql)
             self.assertIn("ads_apps_setting", sql)
             self.assertNotIn("LIKE", sql)
             return [{"id": "1479", "name": "DramaWave", "ads_app_id": "0", "default_user": "803"},
@@ -520,7 +520,7 @@ class SqlSourceTests(unittest.TestCase):
         calls = []
         def responder(sql):
             calls.append(sql)
-            self.assertIn('AND (id IN (1479,3302) OR ads_app_id IN (1479,3302))', sql)
+            self.assertIn('AND (id IN (979,1479,3049,3302) OR ads_app_id IN (979,1479,3049,3302))', sql)
             return next(pages)
         result, _, _, _ = self.run_source(lambda db: db.scope_products(), responder, page_size=2)
         self.assertEqual([r['id'] for r in result], ['1479', '1723', '3302'])

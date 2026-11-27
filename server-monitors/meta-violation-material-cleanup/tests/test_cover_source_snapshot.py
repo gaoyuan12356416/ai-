@@ -20,7 +20,7 @@ class CoverSnapshotTests(unittest.TestCase):
             'ad_id': '100', 'old_creative_id': '5000', 'root_id': '1479',
             'material_ids': ['9010'], 'account_id': '7000', 'user_id': '804'}}
 
-    def process(self, cover='https://example.com/one.jpg', context=None):
+    def process(self, cover='https://example.com/one.jpg', context=None, root='1479', product='DramaWave'):
         row = self.context_row() if context is None else context
 
         def respond(sql):
@@ -30,9 +30,9 @@ class CoverSnapshotTests(unittest.TestCase):
                 return [{'id': '900', 'source_type': 3, 'source_id': '9010'}]
             if 'ads_custom_source FORCE INDEX(PRIMARY)' in sql:
                 return [{'id': '9010', 'data_source_id': 'Drama01', 'data_source': 6,
-                         'language': 'en', 'product': 'DramaWave'}]
+                         'language': 'en', 'product': product}]
             self.assertIn('ads_drama_resource FORCE INDEX(content_id)', sql)
-            return [{'app_id': '1479', 'content_id': 'Drama01', 'language': 'en', 'cover': cover}]
+            return [{'app_id': root, 'content_id': 'Drama01', 'language': 'en', 'cover': cover}]
 
         return sql_fixtures.FakeMysql(respond)
 
@@ -51,6 +51,19 @@ class CoverSnapshotTests(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs['env']['SQL_GATE_BYPASS'], '0')
         self.assertIsNone(source._active)
         self.assertEqual(process.poll(), 0)
+
+    def test_new_product_child_is_revalidated_and_uses_its_root_cover(self):
+        for root, child, product in [('979', '2580', 'FreeReels'), ('3049', '3637', 'TopShort')]:
+            source = self.make_source()
+            task = self.task()
+            task['candidate']['root_id'] = root
+            row = self.context_row(product=child, queue_product=child, setting_id=child,
+                                   setting_parent=root, parent_setting_id=root)
+            process = self.process(context=row, root=root, product=product)
+            with patch.object(sql_source.subprocess, 'Popen', return_value=process):
+                prepared = source.prepare_candidates([task])['1']
+            self.assertTrue(prepared['validated'], prepared.get('error'))
+            self.assertEqual(prepared['identity']['root_id'], root)
 
     def test_next_wave_reads_changed_cover_and_route_in_a_new_snapshot(self):
         source = self.make_source()

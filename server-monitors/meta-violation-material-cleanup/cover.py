@@ -30,6 +30,7 @@ from meta_violation_cleanup.cover_pipeline import run_lanes
 from meta_violation_cleanup.notifications import Notifier
 from meta_violation_cleanup.runner import safe_error
 from meta_violation_cleanup.throttle import Governor, RequestNotSent
+from meta_violation_cleanup.policy import ROOT_PRODUCT_LABEL
 
 
 class CoverWritePaused(RuntimeError):
@@ -69,7 +70,7 @@ def report_body(batch, counts, global_counts=None):
         'Meta 违规素材封面替换',
         '批次：' + batch['id'],
         '完成时间：' + now(),
-        '范围：DramaWave / HotDrama，近3天≥3个不同违规广告',
+        '范围：' + ROOT_PRODUCT_LABEL + '，近3天≥3个不同违规广告',
         '新增达标素材：%d；新增关联广告：%d' % (meta.get('new_materials', 0), meta.get('new_ads', 0)),
         '广告替换：成功 %d，失败 %d，未知 %d，跳过 %d' % (
             tasks.get('succeeded', 0), tasks.get('failed', 0), tasks.get('unknown', 0),
@@ -171,10 +172,10 @@ def do_scan(config, store, audit, stop):
             transient = (isinstance(exc, SqlSourceError) and exc.code in
                          ('sql_stream_incomplete', 'sql_query_timeout', 'sql_query_failed') and codes and
                          diagnostic.get('code') == exc.code and
-                         codes <= {1040, 1203, 2002, 2003, 2006, 2013, 2055})
+                         codes <= {1040, 1203, 2002, 2003, 2006, 2013, 2055, 3024})
             if attempt or not transient or stop():
                 raise
-            print(json.dumps({'scan_retry': 'fresh_batch_after_connection_failure',
+            print(json.dumps({'scan_retry': 'fresh_batch_after_source_failure',
                               'failed_batch_id': bid, 'mysql_errors': sorted(codes)}), flush=True)
         finally:
             source.close()

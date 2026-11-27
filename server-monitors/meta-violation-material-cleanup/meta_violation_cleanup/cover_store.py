@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+from .policy import ROOT_PRODUCT_IDS
 
 
 class CoverStoreError(RuntimeError):
@@ -164,7 +165,7 @@ class CoverStore:
                 roots = value.get('root_ids') or [value.get('root_id')]
                 for root in roots:
                     root = _id(root)
-                    if root not in ('1479', '3302'):
+                    if root not in ROOT_PRODUCT_IDS:
                         raise CoverStoreError('trigger_product_out_of_scope')
                     saved = dict(value, material_id=mid, root_id=root)
                     for key in ('window_start', 'window_end', 'policy_version'):

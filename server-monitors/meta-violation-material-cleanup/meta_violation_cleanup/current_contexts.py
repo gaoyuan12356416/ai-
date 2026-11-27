@@ -1,6 +1,6 @@
 """Bounded write-time SQL contexts in one FIFO snapshot; no lifetime cache."""
 from .sql_source import SqlSourceError, _ids, _ID, _inside, _quote
-from .policy import parse_ids
+from .policy import parse_ids, ROOT_PRODUCT_IDS
 
 
 def current_contexts(source, candidates):
@@ -55,8 +55,8 @@ def current_contexts(source, candidates):
                     product=str(row.get('product') or '');parent=str(row.get('setting_parent') or '')
                     if not _ID.fullmatch(product) or str(row.get('setting_id'))!=product:
                         raise SqlSourceError('current_product_unavailable')
-                    if product in ('1479','3302'):context['scope'][product]=product
-                    elif parent in ('1479','3302'):
+                    if product in ROOT_PRODUCT_IDS:context['scope'][product]=product
+                    elif parent in ROOT_PRODUCT_IDS:
                         if str(row.get('parent_setting_id'))!=parent:raise SqlSourceError('current_product_unavailable')
                         context['scope'][product]=parent
                     user=source._credential_user(source._credential_identity(row),row)

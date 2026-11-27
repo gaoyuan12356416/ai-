@@ -34,9 +34,10 @@ class ScanRecoveryTests(unittest.TestCase):
             self.assertEqual(len(store.ready_tasks()),1)
             self.assertEqual(source.close.call_count,2)
 
-    def test_retry_is_bounded_and_does_not_retry_statement_limits_or_data_errors(self):
+    def test_retry_is_bounded_includes_statement_timeout_but_not_data_or_auth_errors(self):
         for errno,code,expected in ((2013,'sql_stream_incomplete',2),
-                                    (3024,'sql_stream_incomplete',1),
+                                    (3024,'sql_stream_incomplete',2),
+                                    (1045,'sql_stream_incomplete',1),
                                     (2013,'ad_lineage_incomplete',1)):
             with self.subTest(errno=errno,code=code),tempfile.TemporaryDirectory() as tmp:
                 store=CoverStore(Path(tmp)/'cover.sqlite3');source=MagicMock()

@@ -41,6 +41,13 @@ class CoverSourceTests(unittest.TestCase):
         rows=[self.row(),self.row(app_id='3302',cover='https://example.com/hot.jpg')]
         self.assertEqual(select_cover(self.materials, '3302', rows)['cover_url'], 'https://example.com/hot.jpg')
 
+    def test_new_products_resolve_only_own_product_cover(self):
+        for root, product in [('979', 'FreeReels'), ('3049', 'TopShort')]:
+            materials = [dict(self.materials[0], product=product)]
+            rows = [self.row(), self.row(app_id=root, cover='https://example.com/' + root + '.jpg')]
+            self.assertEqual(select_cover(materials, root, rows)['cover_url'], 'https://example.com/' + root + '.jpg')
+            self.assertEqual(select_cover(self.materials, root, rows)['error'], 'cover_material_product_or_type_mismatch')
+
     def test_url_keeps_attribution_and_rejects_credentials(self):
         self.assertEqual(cover_url('https://static.mydramawave.com/a.png?q=2'), 'https://static-v1.mydramawave.com/a.png?q=2')
         self.assertEqual(cover_url('https://user:secret@example.com/a.png'), '')
@@ -96,6 +103,16 @@ class ScanTests(unittest.TestCase):
     def test_out_of_scope_linkage_is_not_modified(self):
         self.rows['103'][0]['product']='826'
         self.assertEqual(self.scan('first')['new_ads'],3)
+
+    def test_new_root_triggers_are_persisted_and_queued(self):
+        for root in ('979', '3049'):
+            for rows in self.rows.values():
+                rows[0]['product'] = root
+                rows[0]['original_source_id'] = root
+                rows[0]['creative_id'] = str(int(rows[0]['creative_id']) + 10000)
+            summary = self.scan('root-' + root)
+            self.assertEqual(summary['new_ads'], 4)
+            self.assertIn(root, self.store.triggered_materials()[root]['root_ids'])
 
     def test_historical_deleted_receipt_excluded_before_queue(self):
         self.deleted={'103'}

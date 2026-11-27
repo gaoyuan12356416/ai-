@@ -8,7 +8,9 @@ import re
 from datetime import datetime, timedelta, timezone
 
 
-ROOT_PRODUCTS = {1479: "DramaWave", 3302: "HotDrama"}
+ROOT_PRODUCTS = {1479: "DramaWave", 3302: "HotDrama", 979: "FreeReels", 3049: "TopShort"}
+ROOT_PRODUCT_IDS = frozenset(map(str, ROOT_PRODUCTS))
+ROOT_PRODUCT_LABEL = " / ".join(ROOT_PRODUCTS.values())
 POLICY_VERSION = "20261027-v3"
 POLICY_CONTRACT = {
     "min_distinct_violating_ads": 5,
@@ -89,7 +91,7 @@ def _optional_ids(value, capacity=768):
 
 
 def product_scope(settings):
-    """Map the two explicit roots and only their direct configured children."""
+    """Map the explicit roots and only their direct configured children."""
     roots = {str(key) for key in ROOT_PRODUCTS}
     result = {key: key for key in roots}
     seen, conflicts = {}, set()

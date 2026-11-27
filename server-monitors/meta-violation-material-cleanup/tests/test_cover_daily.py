@@ -66,6 +66,13 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(daily.summary([])['mean_seconds'], None)
         self.assertEqual(daily.summary(range(1, 101))['p95_seconds'], 95)
 
+    def test_four_hour_card_names_all_current_products(self):
+        data = daily.collect(self.store.path, *daily.window(self.at, 4, 4), workload_only=True)
+        text = json.dumps(daily.workload_card(data), ensure_ascii=False)
+        for product in ('DramaWave', 'HotDrama', 'FreeReels', 'TopShort'):
+            self.assertIn(product, text)
+        self.assertEqual(data['scan_completed'], 0)
+
     def test_four_hour_workload_excludes_history_and_deduplicates_review_and_cleanup(self):
         start, end = daily.window(self.at, 4, 4)
         self.event('task:1', 'unknown', (start - timedelta(seconds=1)).astimezone(timezone.utc).isoformat(timespec='microseconds'))

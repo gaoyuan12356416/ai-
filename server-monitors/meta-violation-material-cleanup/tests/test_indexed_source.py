@@ -38,6 +38,31 @@ class FixtureSource:
 
 
 class IndexedSourceTests(unittest.TestCase):
+    def test_sparse_original_filter_is_applied_after_bounded_pages(self):
+        source = FixtureSource()
+        self.addCleanup(source.db.close)
+        # Many already-attributed rows precede sparse source-only candidates,
+        # including repeated source keys crossing pagination boundaries.
+        source.db.executemany('INSERT INTO ads_source VALUES(?,?,?)',
+                              [(100+n, 3, str(1000+n)) for n in range(130)])
+        for n in range(140):
+            source.db.execute('INSERT INTO ads_facebook_auto_created_data VALUES(' + ','.join('?' for _ in range(11)) + ')',
+                (n+1, str(2000+n), '979', str(100+n%130), 'other' if n<135 else None,
+                 str(3000+n), '77', '1', '1', '', ''))
+        query = source.query
+        def bounded(sql):
+            if 'FORCE INDEX(ads_facebook_auto_created_data_source_id)' in sql and 'source_id IN ' in sql:
+                self.assertNotIn('original_source_id IS NULL', sql)
+                self.assertNotIn('TRIM(original_source_id)', sql)
+                values = re.search(r'WHERE source_id IN \((.*?)\)', sql)[1].split(',')
+                self.assertLessEqual(len(values), 64)
+            return query(sql)
+        source.query = bounded
+        records, metrics = material_rows(source, {str(1000+n) for n in range(130)}, {'979': '979'})
+        self.assertEqual({r['id'] for r in records}, {str(n) for n in range(136, 141)})
+        self.assertEqual(metrics['source_candidate_rows'], 140)
+        self.assertTrue(any('FORCE INDEX(PRIMARY)' in q for q in source.queries))
+
     def test_inverse_covers_scalar_empty_zero_csv_json_and_whitespace(self):
         source=FixtureSource()
         aliases=[(101,3,'7'),(102,3,'[7,8]'),(103,3,'\t7\n'),(104,3,'8')]

@@ -1,6 +1,6 @@
 ---
 name: meta-violation-material-cleanup
-description: Maintain the hourly Meta violation-material cover replacement and one-attempt old Creative cleanup for DramaWave and HotDrama on CPU 43.166.187.96, including durable queues, shared object locks, and Feishu summaries to the configured authorized recipient. Do not use the disabled legacy Ad deletion workflow for this contract.
+description: Maintain the hourly Meta violation-material cover replacement and one-attempt old Creative cleanup for DramaWave, HotDrama, FreeReels and TopShort on CPU 43.166.187.96, including durable queues, shared object locks, and Feishu summaries to the configured authorized recipient. Do not use the disabled legacy Ad deletion workflow for this contract.
 ---
 
 # Meta violation-material cover replacement
@@ -22,7 +22,7 @@ Source: GitHub gaoyuan12356416/ai-, server-monitors/meta-violation-material-clea
 
 ## Selection and transformation
 
-- Roots 1479 (DramaWave), 3302 (HotDrama) and their direct product children only.
+- Roots 1479 (DramaWave), 3302 (HotDrama), 979 (FreeReels), 3049 (TopShort) and their direct product children only, per the 2026-11-27 scope expansion. Similar names without a configured parent do not establish product membership. FreeReels/TopShort use their own material product and root-product drama cover; only the existing HotDrama/DramaWave reuse rule allows cross-product materials.
 - Exact seven policies: Adult Nudity and Sexual Activity; Adult Sexual Solicitation and Sexually Explicit Language; Adult Sexual Exploitation; Human Exploitation; Violence & Graphic Content; Spam; Drugs and Pharmaceuticals.
 - Scan the preceding three-day half-open window each hour. At least three distinct violating Ad IDs per attributable canonical material trigger; duplicate policies on one Ad count once.
 - Include current already-qualified materials on the first scan. Persist triggers and waiting tasks beyond the rolling window. Each hour discover newly associated Ads; exclude queued/terminal pairs and proven historical Ad deletion receipts before expensive reads.
@@ -50,6 +50,15 @@ Hold shared object reservations through final reference verification and deletio
 Definite failure is not automatically retried. Unknown writes are reconciled read-only; missing objects or permission errors do not prove deletion. A known-ID unknown creation may be accepted after exact ID/account and payload verification, allowing only the first unsent Ad binding; never replay CREATE. Deletion failure does not undo a successful cover replacement.
 
 ## Concurrency and storage
+
+For the repeated 2026-11-27 scan statement timeout (MySQL 3024), see
+[scan recovery and product expansion](../../../../doc/20261127.meta-cover-scan-products.md).
+Page source aliases before filtering sparse empty original-source values, then
+hydrate matched primary keys in the same snapshot. Keep 64 aliases per scalar
+lookup, the 120-second statement limit and complete CSV/JSON/whitespace scans.
+A statement timeout may restart the whole failed scan once with fresh evidence;
+never splice a broken snapshot or reset terminal/unknown tasks. The reporter
+has its own release drop-in; update and back it up as well as the worker link.
 
 For a transient read-only SQL timeout/disconnect, see
 [source retry recovery](../../../../doc/20261118.meta-cover-source-retry.md).

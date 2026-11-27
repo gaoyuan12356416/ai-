@@ -270,11 +270,11 @@ class WorkerTests(unittest.TestCase):
         self.config = {'cover_live_enabled': True, 'execution_workers': 32,
                        'execution_batch_size': 64, 'execution_context_ttl_seconds': 30}
 
-    def enqueue(self, ads, batch='batch-1'):
+    def enqueue(self, ads, batch='batch-1', root='1479'):
         self.store.begin_batch(batch, {})
         for item in ads:
             self.store.enqueue(batch, {'account_id': item['account_id'], 'ad_id': item['id'],
-                'old_creative_id': item['creative']['id'], 'user_id': '1', 'root_id': '1479', 'material_ids': ['501']})
+                'old_creative_id': item['creative']['id'], 'user_id': '1', 'root_id': root, 'material_ids': ['501']})
         self.store.seal_batch(batch)
 
     def worker(self, graph, **kwargs):
@@ -293,6 +293,16 @@ class WorkerTests(unittest.TestCase):
         self.assertLess(next(i for i,c in enumerate(graph.calls) if c[0]=='bind'), next(i for i,c in enumerate(graph.calls) if c[0]=='delete'))
         worker.run_once()
         self.assertEqual(len([c for c in graph.calls if c[0]=='delete']), 1)
+
+    def test_new_roots_can_replace_with_existing_exact_binding_checks(self):
+        for root in ('979', '3049'):
+            original = ad(root, str(int(root) + 1), account=root)
+            self.enqueue([original], batch='batch-' + root, root=root)
+            graph = Graph([original], [creative(str(int(root) + 1), account=root)])
+            report = self.worker(graph).run_once(process_deletes=False)
+            self.assertEqual(report['tasks'], {'succeeded': 1})
+            self.assertEqual(graph.ads[root]['tracking_specs'], original['tracking_specs'])
+            self.assertEqual(sum(call[0] == 'bind' for call in graph.calls), 1)
 
     def test_clear_active_and_paused_allowed_reviewing_ad_waits(self):
         ads = [ad('10','20'), ad('11','21',status='PAUSED'), ad('12','22')]

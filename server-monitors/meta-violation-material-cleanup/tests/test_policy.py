@@ -36,9 +36,24 @@ class PolicyTests(unittest.TestCase):
         return policy.material_identity([lineage(**kwargs)], {}, self.scope, creative_id=kwargs.get("creative", "900"))
 
     def test_product_scope_roots_direct_children_only(self):
-        self.assertEqual(self.scope, {"1479": "1479", "3302": "3302", "1723": "1479", "3303": "3302"})
-        self.assertEqual(policy.ROOT_PRODUCTS, {1479: "DramaWave", 3302: "HotDrama"})
+        self.assertEqual(self.scope, {"1479": "1479", "3302": "3302", "979": "979", "3049": "3049",
+                                     "1723": "1479", "3303": "3302"})
+        self.assertEqual(policy.ROOT_PRODUCTS, {1479: "DramaWave", 3302: "HotDrama", 979: "FreeReels", 3049: "TopShort"})
         self.assertEqual(len(policy.POLICY_NAMES), 7)
+
+    def test_new_product_children_use_exact_parent_not_similar_names_or_grandchildren(self):
+        scope = policy.product_scope([{'id': '2580', 'ads_app_id': '979'},
+                                      {'id': '3637', 'ads_app_id': '3049'},
+                                      {'id': '3638', 'ads_app_id': '0', 'name': 'iap-topshort'},
+                                      {'id': '9999', 'ads_app_id': '3637'}])
+        self.assertEqual(scope['2580'], '979')
+        self.assertEqual(scope['3637'], '3049')
+        self.assertNotIn('3638', scope)
+        self.assertNotIn('9999', scope)
+        for product, root in [('979', '979'), ('2580', '979'), ('3049', '3049'), ('3637', '3049')]:
+            identity = policy.material_identity([lineage(product=product)], {}, scope, '900')
+            self.assertEqual(identity['root_id'], root)
+            self.assertFalse(identity['reason'])
 
     def test_product_scope_conflicting_configuration_excluded(self):
         scope = policy.product_scope([{"id": 55, "ads_app_id": 1479}, {"id": 55, "ads_app_id": 3302}])
